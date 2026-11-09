@@ -70,12 +70,19 @@ uint32_t name_index(State& s, const std::string& n) {
     return static_cast<uint32_t>(s.names.size() - 1);
 }
 
-// True when the two bytes before `ip` are a `syscall` instruction (0F 05): the thread is inside a system call. No C++ objects here (SEH).
+// True when the instruction before `ip` is a system call (x64: `syscall`, 0F 05; arm64: `svc`): the thread is inside one.
 bool after_syscall(uint64_t ip) {
+#if defined(__aarch64__)
+    uint32_t w = 0;
+    SIZE_T got = 0;
+    if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(ip - 4), &w, 4, &got) || got != 4) return false;
+    return (w & 0xFFE0001Fu) == 0xD4000001u;   // SVC #imm16
+#else
     uint8_t b[2] = {0, 0};
     SIZE_T got = 0;
     if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(ip - 2), b, 2, &got) || got != 2) return false;   // no fault if the page is not mapped
     return b[0] == 0x0F && b[1] == 0x05;
+#endif
 }
 
 void flush_samples(State& s);
@@ -103,7 +110,7 @@ void loop() {
             tc.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
             if (GetThreadContext(h, &tc)) {
                 batch[i].n = static_cast<uint8_t>(detail::capture_stack(&tc, batch[i].frames, kDepth));
-                batch[i].waiting = after_syscall(tc.Rip) ? 1 : 0;
+                batch[i].waiting = after_syscall(NXRT_CTX_PC(tc)) ? 1 : 0;
                 ok[i] = batch[i].n > 0;
             }
             ResumeThread(h);

@@ -10,7 +10,7 @@
 #pragma once
 #include <atomic>
 #include <cstdint>
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) || defined(__APPLE__)
 #include <intrin.h>
 #endif
 

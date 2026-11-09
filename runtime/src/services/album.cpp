@@ -28,10 +28,15 @@
 #include "services_internal.h"
 
 #include <windows.h>
+#ifdef _WIN32
 #include <wincodec.h>
 
 #pragma comment(lib, "windowscodecs")
 #pragma comment(lib, "ole32")
+#else
+#include <CoreGraphics/CoreGraphics.h>
+#include <ImageIO/ImageIO.h>
+#endif
 
 namespace nxrt::services {
 
@@ -68,6 +73,7 @@ std::filesystem::path album_dir() {
     return d.is_absolute() ? d : exe_dir() / d;
 }
 
+#ifdef _WIN32
 bool album_write_png(const std::filesystem::path& file, const uint8_t* rgba, uint32_t width, uint32_t height, std::string* err) {
     // 24-bit BGR rows (the album keeps no alpha; the game's alpha channel is whatever its render target held).
     const size_t stride = static_cast<size_t>(width) * 3;
@@ -119,6 +125,37 @@ bool album_write_png(const std::filesystem::path& file, const uint8_t* rgba, uin
     }
     return true;
 }
+#else
+// macOS: ImageIO writes the PNG (24-bit RGB: the album keeps no alpha, as on Windows).
+bool album_write_png(const std::filesystem::path& file, const uint8_t* rgba, uint32_t width, uint32_t height, std::string* err) {
+    const size_t stride = static_cast<size_t>(width) * 4;
+    std::vector<uint8_t> px(rgba, rgba + stride * height);
+    for (size_t i = 3; i < px.size(); i += 4) px[i] = 0xFF;
+    CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGDataProviderRef dp = CGDataProviderCreateWithData(nullptr, px.data(), px.size(), nullptr);
+    CGImageRef img = CGImageCreate(width, height, 8, 32, stride, cs, static_cast<CGBitmapInfo>(kCGImageAlphaNoneSkipLast) | kCGBitmapByteOrderDefault,
+                                   dp, nullptr, false, kCGRenderingIntentDefault);
+    const std::string path = file.string();
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(nullptr, reinterpret_cast<const UInt8*>(path.c_str()), static_cast<CFIndex>(path.size()), false);
+    CGImageDestinationRef dst = url ? CGImageDestinationCreateWithURL(url, CFSTR("public.png"), 1, nullptr) : nullptr;
+    bool ok = false;
+    if (dst && img) {
+        CGImageDestinationAddImage(dst, img, nullptr);
+        ok = CGImageDestinationFinalize(dst);
+    }
+    if (dst) CFRelease(dst);
+    if (url) CFRelease(url);
+    if (img) CGImageRelease(img);
+    CGDataProviderRelease(dp);
+    CGColorSpaceRelease(cs);
+    if (!ok) {
+        if (err) *err = "CGImageDestination failed";
+        std::error_code ec;
+        std::filesystem::remove(file, ec);
+    }
+    return ok;
+}
+#endif
 
 namespace {
 

@@ -12,6 +12,10 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(TP ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+if(APPLE)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/CMakeLists.apple.cmake)
+    return()
+endif()
 set(A2B_ISPC "${TP}/ispc/ispc-v1.32.0-windows/bin/ispc.exe" CACHE FILEPATH "Intel ISPC compiler (BSD-3)")
 
 # ---- ARM astcenc 5.7.0 (Apache-2.0): decoder-only DLLs, one per ISA, picked at run time by CPUID

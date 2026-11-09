@@ -25,8 +25,12 @@
 #include <sstream>
 #include <unordered_set>
 
+#if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
 #include <intrin.h>
+#elif defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 #include <nxrt/ftrace.h>
 #include <nxrt/config.h>
@@ -52,6 +56,7 @@ inline uint32_t rd32(const uint8_t* p) {
 // The SHA instructions (Intel since Ice Lake / Alder Lake, AMD since Zen): the same digest as block() at several times the speed. The
 // shader cache keys on this hash, and the game hashes every stage of every program it links (over a second of the boot on the portable
 // loop). Intrinsics, no inline assembly; chosen at run time from CPUID.
+#if defined(__x86_64__) || defined(_M_X64)
 bool have_shani() {
     static const bool yes = [] {
         int r[4];
@@ -95,6 +100,53 @@ __attribute__((target("sha,sse4.1,ssse3"))) void sha1_blocks_shani(uint32_t h[5]
     _mm_storeu_si128(reinterpret_cast<__m128i*>(h), _mm_shuffle_epi32(abcd, 0x1B));
     h[4] = static_cast<uint32_t>(_mm_extract_epi32(e0, 3));
 }
+#elif defined(__aarch64__)
+// ARMv8 SHA-1 instructions (every Apple silicon core has them): the same digest as block().
+bool have_shani() { return true; }
+void sha1_blocks_shani(uint32_t h[5], const uint8_t* data, size_t blocks) {
+    uint32x4_t abcd = vld1q_u32(h);
+    uint32_t e0 = h[4];
+    const uint32x4_t k0 = vdupq_n_u32(0x5A827999), k1 = vdupq_n_u32(0x6ED9EBA1), k2 = vdupq_n_u32(0x8F1BBCDC), k3 = vdupq_n_u32(0xCA62C1D6);
+    for (; blocks; --blocks, data += 64) {
+        const uint32x4_t abcd_save = abcd;
+        const uint32_t e_save = e0;
+        uint32x4_t m0 = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(data)));
+        uint32x4_t m1 = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(data + 16)));
+        uint32x4_t m2 = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(data + 32)));
+        uint32x4_t m3 = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(data + 48)));
+        uint32x4_t t0 = vaddq_u32(m0, k0), t1 = vaddq_u32(m1, k0);
+        uint32_t e1;
+        // rounds 0-3 .. 76-79, four per step; msg schedule with sha1su0/su1 (ARM ACLE reference ordering)
+        e1 = vsha1h_u32(vgetq_lane_u32(abcd, 0)); abcd = vsha1cq_u32(abcd, e0, t0); t0 = vaddq_u32(m2, k0); m0 = vsha1su0q_u32(m0, m1, m2);
+        e0 = vsha1h_u32(vgetq_lane_u32(abcd, 0)); abcd = vsha1cq_u32(abcd, e1, t1); t1 = vaddq_u32(m3, k0); m0 = vsha1su1q_u32(m0, m3); m1 = vsha1su0q_u32(m1, m2, m3);
+        e1 = vsha1h_u32(vgetq_lane_u32(abcd, 0)); abcd = vsha1cq_u32(abcd, e0, t0); t0 = vaddq_u32(m0, k0); m1 = vsha1su1q_u32(m1, m0); m2 = vsha1su0q_u32(m2, m3, m0);
+        e0 = vsha1h_u32(vgetq_lane_u32(abcd, 0)); abcd = vsha1cq_u32(abcd, e1, t1); t1 = vaddq_u32(m1, k1); m2 = vsha1su1q_u32(m2, m1); m3 = vsha1su0q_u32(m3, m0, m1);
+        e1 = vsha1h_u32(vgetq_lane_u32(abcd, 0)); abcd = vsha1cq_u32(abcd, e0, t0); t0 = vaddq_u32(m2, k1); m3 = vsha1su1q_u32(m3, m2); m0 = vsha1su0q_u32(m0, m1, m2);
+        e0 = vsha1h_u32(vgetq_lane_u32(abcd, 0)); abcd = vsha1pq_u32(abcd, e1, t1); t1 = vaddq_u32(m3, k1); m0 = vsha1su1q_u32(m0, m3); m1 = vsha1su0q_u32(m1, m2, m3);
+        e1 = vsha1h_u32(vgetq_lane_u32(abcd, 0)); abcd = vsha1pq_u32(abcd, e0, t0); t0 = vaddq_u32(m0, k1); m1 = vsha1su1q_u32(m1, m0); m2 = vsha1su0q_u32(m2, m3, m0);
+        e0 = vsha1h_u32(vgetq_lane_u32(abcd, 0)); abcd = vsha1pq_u32(abcd, e1, t1); t1 = vaddq_u32(m1, k1); m2 = vsha1su1q_u32(m2, m1); m3 = vsha1su0q_u32(m3, m0, m1);
+        e1 = vsha1h_u32(vgetq_lane_u32(abcd, 0)); abcd = vsha1pq_u32(abcd, e0, t0); t0 = vaddq_u32(m2, k2); m3 = vsha1su1q_u32(m3, m2); m0 = vsha1su0q_u32(m0, m1, m2);
+        e0 = vsha1h_u32(vgetq_lane_u32(abcd, 0)); abcd = vsha1pq_u32(abcd, e1, t1); t1 = vaddq_u32(m3, k2); m0 = vsha1su1q_u32(m0, m3); m1 = vsha1su0q_u32(m1, m2, m3);
+        e1 = vsha1h_u32(vgetq_lane_u32(abcd, 0)); abcd = vsha1mq_u32(abcd, e0, t0); t0 = vaddq_u32(m0, k2); m1 = vsha1su1q_u32(m1, m0); m2 = vsha1su0q_u32(m2, m3, m0);
+        e0 = vsha1h_u32(vgetq_lane_u32(abcd, 0)); abcd = vsha1mq_u32(abcd, e1, t1); t1 = vaddq_u32(m1, k2); m2 = vsha1su1q_u32(m2, m1); m3 = vsha1su0q_u32(m3, m0, m1);
+        e1 = vsha1h_u32(vgetq_lane_u32(abcd, 0)); abcd = vsha1mq_u32(abcd, e0, t0); t0 = vaddq_u32(m2, k2); m3 = vsha1su1q_u32(m3, m2); m0 = vsha1su0q_u32(m0, m1, m2);
+        e0 = vsha1h_u32(vgetq_lane_u32(abcd, 0)); abcd = vsha1mq_u32(abcd, e1, t1); t1 = vaddq_u32(m3, k3); m0 = vsha1su1q_u32(m0, m3); m1 = vsha1su0q_u32(m1, m2, m3);
+        e1 = vsha1h_u32(vgetq_lane_u32(abcd, 0)); abcd = vsha1mq_u32(abcd, e0, t0); t0 = vaddq_u32(m0, k3); m1 = vsha1su1q_u32(m1, m0); m2 = vsha1su0q_u32(m2, m3, m0);
+        e0 = vsha1h_u32(vgetq_lane_u32(abcd, 0)); abcd = vsha1pq_u32(abcd, e1, t1); t1 = vaddq_u32(m1, k3); m2 = vsha1su1q_u32(m2, m1); m3 = vsha1su0q_u32(m3, m0, m1);
+        e1 = vsha1h_u32(vgetq_lane_u32(abcd, 0)); abcd = vsha1pq_u32(abcd, e0, t0); t0 = vaddq_u32(m2, k3); m3 = vsha1su1q_u32(m3, m2);
+        e0 = vsha1h_u32(vgetq_lane_u32(abcd, 0)); abcd = vsha1pq_u32(abcd, e1, t1); t1 = vaddq_u32(m3, k3);
+        e1 = vsha1h_u32(vgetq_lane_u32(abcd, 0)); abcd = vsha1pq_u32(abcd, e0, t0);
+        e0 = vsha1h_u32(vgetq_lane_u32(abcd, 0)); abcd = vsha1pq_u32(abcd, e1, t1);
+        e0 += e_save;
+        abcd = vaddq_u32(abcd_save, abcd);
+    }
+    vst1q_u32(h, abcd);
+    h[4] = e0;
+}
+#else
+bool have_shani() { return false; }
+void sha1_blocks_shani(uint32_t*, const uint8_t*, size_t) {}
+#endif
 
 std::atomic<bool> g_shani_off{false};   // Sha1::force_portable (tests)
 

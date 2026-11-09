@@ -8,14 +8,17 @@ if(NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 project(nxrt C CXX)
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_C_STANDARD 11)
 
-if(NOT WIN32)
-    message(FATAL_ERROR "nxrt targets native Windows x64 only")
+if(NOT WIN32 AND NOT APPLE)
+    message(FATAL_ERROR "nxrt targets native Windows x64 and macOS (Apple silicon) only")
 endif()
 
 # The generated-code ABI header (Ctx, call_indirect, ...) lives in the recompiler (recomp/include/nxrecomp/).
@@ -26,9 +29,13 @@ if(NOT EXISTS "${NXRT_RECOMP_INCLUDE}/nxrecomp/ctx.h" AND EXISTS "${CMAKE_CURREN
     set(NXRT_RECOMP_INCLUDE "${_nxrt_ri}" CACHE PATH "Directory that holds nxrecomp/" FORCE)
 endif()
 
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND MSVC)
     add_compile_options(/W3 -Wno-unused-parameter -Wno-missing-field-initializers -Wno-cast-function-type-mismatch
                         -Wno-cast-function-type-strict -Wno-language-extension-token)
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    add_compile_options(-Wno-unused-parameter -Wno-missing-field-initializers -Wno-unused-variable -Wno-unused-function
+                        -Wno-unused-private-field -Wno-unused-but-set-variable -Wno-deprecated-declarations -Wno-nullability-completeness
+                        -Wno-c99-designator -Wno-vla-cxx-extension -Wno-c++11-narrowing -fno-strict-aliasing)
 endif()
 add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS _WIN32_WINNT=0x0A00)
 
@@ -39,12 +46,31 @@ set(NXRT_GAMES "pkp" CACHE STRING "ids of the game modules to build (games/<id>/
 
 file(GLOB_RECURSE NXRT_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
 list(FILTER NXRT_SOURCES EXCLUDE REGEX "/src/gfx/")   # the graphics shell is its own library (cmake/gfx.cmake)
+if(APPLE)
+    # macOS: the Win32 subset the runtime uses comes from nxwin (platform/posix: <windows.h> and friends over POSIX and Mach), and the
+    # parts that are Windows components (XAudio2, Media Foundation, the audio endpoint list, dbghelp) are replaced by platform/mac.
+    set(NXRT_WINDOWS_ONLY "/src/services/audio_xaudio2\\.cpp$|/src/services/audio_devices\\.cpp$|/src/media/movie_mf\\.cpp$|/src/diag/symbols\\.cpp$")
+    list(FILTER NXRT_SOURCES EXCLUDE REGEX "${NXRT_WINDOWS_ONLY}")
+    file(GLOB NXWIN_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/platform/posix/src/*.cpp")
+    add_library(nxwin STATIC ${NXWIN_SOURCES})
+    target_include_directories(nxwin SYSTEM BEFORE PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/platform/posix/include")
+    target_link_libraries(nxwin PUBLIC "-framework CoreFoundation")
+    target_compile_options(nxwin PUBLIC "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include nxwin/msvcrt.h>")
+    file(GLOB NXRT_MAC_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/platform/mac/core/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/platform/mac/core/*.mm")
+    list(APPEND NXRT_SOURCES ${NXRT_MAC_SOURCES})
+endif()
 add_library(nxrt STATIC ${NXRT_SOURCES})
 target_include_directories(nxrt PUBLIC include)
 if(EXISTS "${NXRT_RECOMP_INCLUDE}")
     target_include_directories(nxrt PUBLIC "${NXRT_RECOMP_INCLUDE}")
 endif()
-target_link_libraries(nxrt PUBLIC psapi)
+if(WIN32)
+    target_link_libraries(nxrt PUBLIC psapi)
+else()
+    target_link_libraries(nxrt PUBLIC nxwin "-framework CoreFoundation" "-framework CoreAudio" "-framework AudioToolbox"
+                          "-framework VideoToolbox" "-framework CoreMedia" "-framework CoreVideo" "-framework ImageIO"
+                          "-framework CoreGraphics" "-framework UniformTypeIdentifiers" "-framework Foundation")
+endif()
 add_subdirectory(third_party/pokopia-coop)   # [net] protocol = native: pokopia-native's Link Play (MIT, C11)
 target_link_libraries(nxrt PRIVATE pokopia_coop)
 add_subdirectory(third_party/miniz)   # zlib streams (MIT): the Pokopia save repair, games/pkp/pkp_save_uuid.cpp
@@ -61,7 +87,7 @@ if(NXRT_BUILD_GAMES)
 endif()
 # The launcher's branding and factory settings: the data part of one game module and its launcher.rc (version info, manifest). Without that
 # module the launcher builds unbranded, with no resources.
-if(TARGET mpr_launcher AND TARGET nxrt_game_${NXRT_LAUNCHER_GAME}_data)
+if(WIN32 AND TARGET mpr_launcher AND TARGET nxrt_game_${NXRT_LAUNCHER_GAME}_data)
     target_sources(mpr_launcher PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/games/${NXRT_LAUNCHER_GAME}/launcher.rc")
     target_link_libraries(mpr_launcher PRIVATE nxrt_game_${NXRT_LAUNCHER_GAME}_data)
     target_compile_definitions(mpr_launcher PRIVATE NXRT_LAUNCHER_GAME_REGISTER=nxrt_register_game_${NXRT_LAUNCHER_GAME}_data)

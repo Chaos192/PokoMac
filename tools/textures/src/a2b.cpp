@@ -2,10 +2,12 @@
 // Uses: ARM astcenc 5.7.0 (Apache-2.0) through per-ISA DLLs, bc7e.ispc from bc7enc_rdo (Apache-2.0, Binomial LLC).
 #include "astc2bc7.h"
 
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
 #include <intrin.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -22,6 +24,7 @@
 namespace {
 
 // ---------------------------------------------------------------- astcenc DLL dispatch
+#ifdef _WIN32
 struct AstcApi {
     HMODULE module = nullptr;
     const char* isa = nullptr;
@@ -99,6 +102,21 @@ a2b_status ensure_astc(const char* dll_dir) {
         if (load_isa(dir, isa, g_astc)) return A2B_OK;
     return A2B_ERR_NO_ASTC_LIB;
 }
+#else
+// macOS (Apple silicon): the NEON build of the astcenc decompressor is linked in statically, so there is nothing to load.
+struct AstcApi {
+    void* module = reinterpret_cast<void*>(1);
+    const char* isa = "neon";
+    decltype(&astcenc_config_init) config_init = &astcenc_config_init;
+    decltype(&astcenc_context_alloc) context_alloc = &astcenc_context_alloc;
+    decltype(&astcenc_decompress_image) decompress = &astcenc_decompress_image;
+    decltype(&astcenc_context_free) context_free = &astcenc_context_free;
+    decltype(&astcenc_get_error_string) error_string = &astcenc_get_error_string;
+};
+AstcApi g_astc;
+std::once_flag g_bc7e_once;
+a2b_status ensure_astc(const char*) { return A2B_OK; }
+#endif
 
 // ---------------------------------------------------------------- helpers
 template <class F>

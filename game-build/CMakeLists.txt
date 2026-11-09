@@ -20,12 +20,17 @@ set(PKP_EXEFS_DEFAULT "${PKP_ROOT}/game/dump/exefs" CACHE PATH "default ExeFS fo
 # a message box, output still reaches a terminal it was started from), looks for ./exefs by default, and carries no local build paths
 # (source paths in assert strings, the .pdb path): see the installed-layout comment in src/pkp_main.cpp.
 # __FILE__ (the assert strings of the audio renderer) never carries the build folder, in any build: paths are written relative to the checkout.
-add_compile_options("-clang:-fmacro-prefix-map=${PKP_ROOT}=.")
+if(MSVC)
+    set(PKP_CLANG_FLAG "-clang:")
+else()
+    set(PKP_CLANG_FLAG "")
+endif()
+add_compile_options("${PKP_CLANG_FLAG}-fmacro-prefix-map=${PKP_ROOT}=.")
 option(PKP_RELEASE "build pkp.exe as a release package binary" OFF)
 if(PKP_RELEASE)
     set(PKP_GUI_SUBSYSTEM ON)
     set(PKP_EXEFS_DEFAULT "exefs")
-    add_compile_options("-clang:-ffile-prefix-map=${PKP_ROOT}=.")
+    add_compile_options("${PKP_CLANG_FLAG}-ffile-prefix-map=${PKP_ROOT}=.")
 endif()
 
 # The release version ("0.1.0"; "dev" for local builds). The game log, --version and the exe's file properties show it, and the
@@ -48,7 +53,11 @@ add_subdirectory("${PKP_RUNTIME_DIR}" runtime)
 
 foreach(m main sdk subsdk0 rtld)
     add_library(pkp_${m} STATIC IMPORTED GLOBAL)
-    set_target_properties(pkp_${m} PROPERTIES IMPORTED_LOCATION "${PKP_LIB_DIR}/pkp_${m}.lib")
+    if(WIN32)
+        set_target_properties(pkp_${m} PROPERTIES IMPORTED_LOCATION "${PKP_LIB_DIR}/pkp_${m}.lib")
+    else()
+        set_target_properties(pkp_${m} PROPERTIES IMPORTED_LOCATION "${PKP_LIB_DIR}/libpkp_${m}.a")
+    endif()
 endforeach()
 
 # Release model (b) (PKP_RT_DLL=ON, docs/RELEASE.md): no game code in anything built here. The runtime and the boot code become
@@ -56,13 +65,21 @@ endforeach()
 # and src/pkp_stub.cpp (tools/build/pkp_build.py in the package, with the bundled Zig). Nothing lifted is imported here.
 option(PKP_RT_DLL "build the runtime as pkp_rt.dll for release model (b)" OFF)
 if(PKP_RT_DLL)
-    add_library(pkp_rt SHARED src/pkp_main.cpp src/pkp_rt.def)
+    if(APPLE)
+        # macOS: libpkp_rt.dylib exports the same names as pkp_rt.def (src/pkp_rt.exports); the player-side link of pkp
+        # (pkp_build.py) resolves the lifted code's runtime calls against it.
+        add_library(pkp_rt SHARED src/pkp_main.cpp)
+        set_target_properties(pkp_rt PROPERTIES OUTPUT_NAME pkp_rt INSTALL_NAME_DIR "@rpath" BUILD_WITH_INSTALL_NAME_DIR ON)
+        target_link_options(pkp_rt PRIVATE "-Wl,-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/src/pkp_rt.exports" -Wl,-dead_strip)
+    else()
+        add_library(pkp_rt SHARED src/pkp_main.cpp src/pkp_rt.def)
+        # /DEBUG off: no .pdb path in the DLL. Low host allocations as for pkp.exe (guest ranges at 0x71_0000_0000 stay free).
+        target_link_options(pkp_rt PRIVATE /HIGHENTROPYVA:NO /DEBUG:NONE /Brepro)
+    endif()
     set_source_files_properties(src/pkp_main.cpp PROPERTIES COMPILE_DEFINITIONS "PKP_VERSION=\"${PKP_VERSION}\"")
     target_compile_definitions(pkp_rt PRIVATE PKP_RT_DLL=1 PKP_GUI_SUBSYSTEM=1 PKP_EXEFS_DEFAULT="exefs")
     target_link_libraries(pkp_rt PRIVATE nxrt_game_pkp nxrt_gfx nxrt)
-    # /DEBUG off: no .pdb path in the DLL. Low host allocations as for pkp.exe (guest ranges at 0x71_0000_0000 stay free).
-    target_link_options(pkp_rt PRIVATE /HIGHENTROPYVA:NO /DEBUG:NONE /Brepro)
-    target_compile_options(pkp_rt PRIVATE "-clang:-ffile-prefix-map=${PKP_ROOT}=.")
+    target_compile_options(pkp_rt PRIVATE "${PKP_CLANG_FLAG}-ffile-prefix-map=${PKP_ROOT}=.")
     add_custom_command(TARGET pkp_rt POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${PKP_RUNTIME_DIR}/assets/fonts/DejaVuSans.ttf" "$<TARGET_FILE_DIR:pkp_rt>/fonts/DejaVuSans.ttf")
     file(GLOB PKP_A2B_DLLS "${NXRT_A2B_DIR}/astcdec-*-shared.dll")
@@ -72,19 +89,29 @@ if(PKP_RT_DLL)
     return()
 endif()
 
-add_executable(pkp src/pkp_main.cpp res/pkp.rc)
+if(WIN32)
+    add_executable(pkp src/pkp_main.cpp res/pkp.rc)
+    set_source_files_properties(res/pkp.rc PROPERTIES COMPILE_DEFINITIONS "PKP_VER_MAJOR=${PKP_VER_MAJOR};PKP_VER_MINOR=${PKP_VER_MINOR};PKP_VER_PATCH=${PKP_VER_PATCH};PKP_VER_TEXT=\"${PKP_VERSION}\""
+                                OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/res/pkp.manifest")
+else()
+    add_executable(pkp src/pkp_main.cpp)
+endif()
 set_source_files_properties(src/pkp_main.cpp PROPERTIES COMPILE_DEFINITIONS "PKP_VERSION=\"${PKP_VERSION}\"")
-set_source_files_properties(res/pkp.rc PROPERTIES COMPILE_DEFINITIONS "PKP_VER_MAJOR=${PKP_VER_MAJOR};PKP_VER_MINOR=${PKP_VER_MINOR};PKP_VER_PATCH=${PKP_VER_PATCH};PKP_VER_TEXT=\"${PKP_VERSION}\""
-                            OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/res/pkp.manifest")
 target_compile_definitions(pkp PRIVATE PKP_EXEFS_DEFAULT="${PKP_EXEFS_DEFAULT}")
 target_link_libraries(pkp PRIVATE pkp_main pkp_sdk pkp_subsdk0 pkp_rtld nxrt_game_pkp nxrt_gfx nxrt)   # nxrt_game_pkp: runtime/games/pkp
 # A linker map next to the exe (host frames get names), a big main stack (lifted
 # code nests deeply), low host allocations so the guest ranges at 0x71_0000_0000 and up stay free.
 if(PKP_RELEASE)
     target_compile_definitions(pkp PRIVATE PKP_GUI_SUBSYSTEM=1)
-    target_link_options(pkp PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup /PDBALTPATH:pkp.pdb)
+    if(WIN32)
+        target_link_options(pkp PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup /PDBALTPATH:pkp.pdb)
+    endif()
 endif()
-target_link_options(pkp PRIVATE /MAP /STACK:134217728 /HIGHENTROPYVA:NO /DEBUG /MANIFEST:NO)   # res/pkp.rc carries the manifest
+if(WIN32)
+    target_link_options(pkp PRIVATE /MAP /STACK:134217728 /HIGHENTROPYVA:NO /DEBUG /MANIFEST:NO)   # res/pkp.rc carries the manifest
+else()
+    target_link_options(pkp PRIVATE -Wl,-stack_size,0x8000000 "-Wl,-map,${CMAKE_CURRENT_BINARY_DIR}/pkp.map")
+endif()
 
 # The ASTC decoder DLLs astc2bc7 loads at run time (NVN textures in ASTC are transcoded to BC7 on first use): next to pkp.exe.
 # (NXRT_A2B_DIR is the tools/textures build folder the runtime links its transcoder from: cmake/gfx.cmake)

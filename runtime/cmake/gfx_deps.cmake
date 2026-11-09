@@ -3,7 +3,12 @@
 # SHA256. The archives are cached in NXRT_DEPS_DIR (shared by checkouts and worktrees, survives a clean build); the
 # extracted sources and the SDL build live in the build directory. Licences and pins are listed in THIRD_PARTY_NOTICES.md and README.md.
 include(FetchContent)
-set(NXRT_DEPS_DIR "$ENV{LOCALAPPDATA}/nxrt/deps" CACHE PATH "Where the pinned third-party sources are downloaded to")
+if(WIN32)
+    set(_nxrt_deps_default "$ENV{LOCALAPPDATA}/nxrt/deps")
+else()
+    set(_nxrt_deps_default "$ENV{HOME}/Library/Caches/nxrt/deps")
+endif()
+set(NXRT_DEPS_DIR "${_nxrt_deps_default}" CACHE PATH "Where the pinned third-party sources are downloaded to")
 set(FETCHCONTENT_QUIET OFF)
 set(CMAKE_POLICY_DEFAULT_CMP0135 NEW)   # extracted files take the time of extraction
 
@@ -65,7 +70,11 @@ set_target_properties(nxrt_zstd PROPERTIES C_STANDARD 11)
 # volk (loader) next to the Vulkan headers; the Vulkan headers come from the pin, not from the installed SDK.
 add_library(nxrt_volk STATIC "${volk_SOURCE_DIR}/volk.c")
 target_include_directories(nxrt_volk SYSTEM PUBLIC "${volk_SOURCE_DIR}" "${vulkan_headers_SOURCE_DIR}/include")
-target_compile_definitions(nxrt_volk PUBLIC VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR)
+if(WIN32)
+    target_compile_definitions(nxrt_volk PUBLIC VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR)
+else()
+    target_compile_definitions(nxrt_volk PUBLIC VK_NO_PROTOTYPES VK_USE_PLATFORM_METAL_EXT VK_ENABLE_BETA_EXTENSIONS)
+endif()
 set_target_properties(nxrt_volk PROPERTIES C_STANDARD 11)
 
 # VMA is header only; one translation unit in src/gfx defines VMA_IMPLEMENTATION.
