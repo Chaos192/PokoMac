@@ -437,7 +437,7 @@ export function render(el, ctx) {
   if (!flow.checking && !store.state.nup) Object.assign(flow, { report: null, error: null });
 
   el.innerHTML = `<div class="setup">
-    ${ctx.firstRun ? `<div class="setup-brand"><img src="${logoUrl}" alt="Pokopia" /></div>` : ''}
+    ${ctx.firstRun ? `<div class="setup-brand"><img src="${logoUrl}" alt="PokoMac" /></div>` : ''}
     <section class="setup-panel glass strong" id="panel"></section>
   </div>`;
   const panel = el.querySelector('#panel');

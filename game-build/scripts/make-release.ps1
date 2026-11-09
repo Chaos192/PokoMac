@@ -16,7 +16,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$name = "PokopiaRecomp-$Version"
+$name = "PokoMac-$Version"
 $stage = Join-Path $Out 'stage'
 $pkg = Join-Path $stage $name
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
@@ -26,6 +26,8 @@ New-Item -ItemType Directory -Force $stage | Out-Null
 [IO.Compression.ZipFile]::ExtractToDirectory((Resolve-Path $Base).Path, $stage)
 $top = Get-ChildItem $stage -Directory | Select-Object -First 1
 Rename-Item $top.FullName $name
+# the upstream base carries its own launcher under the old name; this package's is PokoMac.exe (Put below)
+Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $pkg 'PokopiaLauncher.exe')
 
 function Put([string]$from, [string]$to) {
     $dst = Join-Path $pkg $to
@@ -50,7 +52,7 @@ function Mirror([string]$from, [string]$to, [string[]]$exclude = @()) {
 # built here
 Put (Join-Path $RtDir 'pkp_rt.dll') 'pkp_rt.dll'
 Put (Join-Path $RtDir 'pkp_rt.lib') 'tools\build\sdk\pkp_rt.lib'
-Put $Launcher 'PokopiaLauncher.exe'
+Put $Launcher 'PokoMac.exe'
 Mirror $Harness 'tools\spirv_harness' @('*.pdb')
 # from the checkout
 Put "$root\game-build\src\pkp_rt_api.h" 'tools\build\sdk\pkp_rt_api.h'

@@ -222,8 +222,9 @@ const WRITE = {
 
 // ---- the page ---------------------------------------------------------------------------------------------------------------------
 
-const REPO_URL = 'https://github.com/featureJosh/pokopia-recomp';
-const DISCORD_URL = 'https://discord.gg/gN5g4MtWHr';
+const REPO_URL = 'https://github.com/Chaos192/PokoMac';
+// the one credit (Settings > About): the project this launcher and port are based on
+const UPSTREAM_URL = 'https://github.com/Dittobyte/Recompia';
 const open = (url, label = 'Open') => ({ act: 'open-url', arg: url, label, icon: 'external-link' });
 const hasControls = (src) => src.controls_exists !== false;
 
@@ -483,7 +484,7 @@ export const SECTIONS = [
             id: 'steam_note', type: 'note',
             note: (env) => ({ text: env.steam && !env.steam.found
               ? 'Steam was not found on this PC, or nobody has signed in to it yet. Start Steam once, sign in, close it, and come back.'
-              : 'Adds a shortcut with the Recompia artwork to your Steam library, so it shows in Game Mode and Big Picture. Close Steam first, then start it again afterwards. Add the game to start playing at once, or the launcher to open this window first.' }),
+              : 'Adds a shortcut with the PokoMac artwork to your Steam library, so it shows in Game Mode and Big Picture. Close Steam first, then start it again afterwards. Add the game to start playing at once, or the launcher to open this window first.' }),
           },
           {
             id: 'steam_game', label: 'Game in Steam', type: 'info', when: (v, env) => !!env.steam?.found,
@@ -569,7 +570,7 @@ export const SECTIONS = [
             id: 'testing_help', label: 'Testing help', type: 'info', when: (v) => v.channel === 'testing',
             value: 'What to test is listed with each Testing build in What\'s New.',
             actions: () => [
-              { act: 'open-url', arg: `${REPO_URL}/issues/new?template=bug_report.yml`, label: 'Report a problem', icon: 'external-link' },
+              { act: 'open-url', arg: `${REPO_URL}/issues/new`, label: 'Report a problem', icon: 'external-link' },
               { act: 'open-log', label: 'Show pkp.log', icon: 'file-text' },
             ],
           },
@@ -587,9 +588,9 @@ export const SECTIONS = [
           { id: 'licence', label: 'Licence', type: 'info', value: 'GPL-3.0-or-later' },
           { id: 'built_with', label: 'Built with', type: 'info', value: 'Tauri 2, Lucide (ISC), Inter (OFL)' },
           { id: 'repo', label: 'Source code', type: 'info', actions: [open(REPO_URL, 'GitHub')] },
-          { id: 'community', label: 'Community', type: 'info', value: 'Recompia Discord: help, testing and chat', actions: [open(DISCORD_URL, 'Join Discord')] },
+          { id: 'based_on', label: 'Credits', type: 'info', value: 'Based on Recompia by Dittobyte — github.com/Dittobyte/Recompia', actions: [open(UPSTREAM_URL, 'GitHub')] },
           { id: 'koi-credit', label: "Koi's Camp", type: 'info', value: 'Artwork by Koi, hand drawn' },
-          { id: 'bug', label: 'Report a bug', type: 'info', actions: [open(`${REPO_URL}/issues/new/choose`)] },
+          { id: 'bug', label: 'Report a bug', type: 'info', actions: [open(`${REPO_URL}/issues/new`)] },
         ],
       },
       {

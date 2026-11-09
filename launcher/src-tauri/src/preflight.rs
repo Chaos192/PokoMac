@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Checks before Set up starts: free disk space, write access to the game folder (writecheck.rs), Vulkan, RAM, and a warning
 //! for the Intel Core CPUs that crash under long heavy loads; on Linux also Proton, which runs the shader translator and the
-//! game. Every check except the disk space, the write access and Proton is a warning the player can continue past.
-//! `evaluate` is a pure function of `Facts` (tests below); `probe` fills `Facts` from Windows or Linux.
+//! game. Every check except the disk space, the write access and Proton is a warning the player can continue past. On macOS the
+//! Vulkan probe gives way to the Mac's own checks (`Mac`): macOS 14.4 or newer and Apple silicon (both blocking), and the Vulkan
+//! runtime the app carries.
+//! `evaluate` is a pure function of `Facts` (tests below); `probe` fills `Facts` from Windows, Linux or macOS.
 //!
 //! The Intel check and the "gentle" job count follow pokopia-native (MIT), nxs2.py `intel_microcode_warning` and
 //! `gentle_jobs` @7c3655d: 13th/14th generation desktop CPUs need Intel's 0x12B microcode (a BIOS update) or sustained
@@ -73,9 +75,11 @@ pub struct Gpu {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Vulkan {
-    /// vulkan-1.dll (libvulkan.so.1) did not load
+    /// vulkan-1.dll (libvulkan.so.1) did not load; not on macOS, where `Mac` checks the app's own loader
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     NoLoader(String),
     /// the loader is there but made no instance or found no device
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     Failed(String),
     Gpus(Vec<Gpu>),
 }
@@ -92,10 +96,36 @@ pub struct Facts {
     pub ram_total: Option<u64>,
     pub cpu_brand: Option<String>,
     pub microcode: Option<u32>,
-    /// Linux: what runs the Windows programs (host.rs runner: Ok(its name), Err(what to install)). None on Windows.
+    /// Linux: what runs the Windows programs (host.rs runner: Ok(its name), Err(what to install)). None on Windows and macOS.
     pub runner: Option<Result<String, String>>,
+    /// macOS: the Mac's own checks, which stand in for the Vulkan probe there. None on Windows and Linux.
+    pub mac: Option<Mac>,
     /// the translated shaders will be packed (Remaining::compact): what the disk message says stays
     pub compact: bool,
+}
+
+/// The oldest macOS the port runs on (the app's LSMinimumSystemVersion, tauri.macos.conf.json).
+pub const MAC_MIN: (u32, u32) = (14, 4);
+
+/// What the native macOS port needs of the Mac. There is no system Vulkan to probe: the game uses the loader and drivers the app
+/// carries (Contents/Resources/runtime, copied next to pkp), so the check is that they are there.
+#[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct Mac {
+    /// kern.osproductversion, e.g. "14.4.1"
+    pub version: Option<String>,
+    /// hw.optional.arm64: an Apple silicon Mac (also when asked from a Rosetta process)
+    pub apple_silicon: bool,
+    /// the files of the bundled Vulkan runtime that are missing from the app
+    pub vulkan_missing: Vec<String>,
+}
+
+/// "14.4.1" -> (14, 4); "15" -> (15, 0).
+pub fn mac_version(v: &str) -> Option<(u32, u32)> {
+    let mut it = v.trim().split('.').map(|x| x.parse::<u32>());
+    let major = it.next()?.ok()?;
+    let minor = it.next().map(|m| m.ok()).unwrap_or(Some(0))?;
+    Some((major, minor))
 }
 
 /// What of setup is still to do, as far as the disk goes.
@@ -202,7 +232,39 @@ pub fn evaluate(f: &Facts) -> Report {
         Err(e) => push("write", Level::Fail, e.title(), e.message()),
     }
 
+    if let Some(m) = &f.mac {
+        let brand = f.cpu_brand.as_deref().map(str::trim).filter(|b| !b.is_empty()).unwrap_or("this Mac's processor");
+        let (want_major, want_minor) = MAC_MIN;
+        match m.version.as_deref().and_then(|v| mac_version(v).map(|n| (v, n))) {
+            Some((v, n)) if n >= MAC_MIN => push("macos", Level::Ok, "macOS", format!("macOS {}.", v)),
+            Some((v, _)) => push(
+                "macos",
+                Level::Fail,
+                "A newer macOS is needed",
+                format!("This Mac runs macOS {}. The game needs macOS {}.{} or newer: update it in System Settings > General > Software Update.", v, want_major, want_minor),
+            ),
+            None => push("macos", Level::Warn, "macOS version unknown", format!("Could not read the macOS version. The game needs macOS {}.{} or newer.", want_major, want_minor)),
+        }
+        if m.apple_silicon {
+            push("apple_silicon", Level::Ok, "Processor", format!("{}: Apple silicon.", brand))
+        } else {
+            push("apple_silicon", Level::Fail, "Apple silicon needed", format!("The game is built for Apple silicon (M1 or newer); {} is an Intel processor.", brand))
+        }
+        if m.vulkan_missing.is_empty() {
+            push("vulkan", Level::Ok, "Vulkan", "The app's own Vulkan runtime: the Khronos loader with KosmicKrisp (Vulkan 1.4 on Metal) and MoltenVK.".into())
+        } else {
+            push(
+                "vulkan",
+                Level::Warn,
+                "Vulkan runtime missing",
+                format!("The app lacks {}. Setup can finish without it, but the game cannot start: download the release again and replace the app.", m.vulkan_missing.join(", ")),
+            )
+        }
+    }
+
     match &f.vulkan {
+        // macOS: checked above, with the Mac's own checks
+        _ if f.mac.is_some() => {}
         Vulkan::NoLoader(e) => push(
             "vulkan",
             Level::Warn,
@@ -315,10 +377,14 @@ pub fn probe(game_dir: &Path, r: &Remaining) -> Facts {
         ram_total: sys::ram_total(),
         cpu_brand: brand,
         microcode,
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         runner: None,
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "macos")))]
         runner: Some(crate::host::runner().map(|r| r.label)),
+        #[cfg(target_os = "macos")]
+        mac: Some(sys::mac(crate::host::runtime_source(&crate::tools_dir()).as_deref())),
+        #[cfg(not(target_os = "macos"))]
+        mac: None,
     }
 }
 
@@ -444,10 +510,12 @@ mod sys {
 }
 
 /// vkGetInstanceProcAddr
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 type GetProc = unsafe extern "system" fn(*mut std::ffi::c_void, *const u8) -> *mut std::ffi::c_void;
 
 /// Makes an instance through the loader's vkGetInstanceProcAddr and lists its devices. The loader runs the driver in this
-/// process. The Windows and the Linux probe share it.
+/// process. The Windows and the Linux probe share it (macOS checks the app's own runtime instead, `Mac`).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 unsafe fn list_gpus(gpa: GetProc) -> Vulkan {
     use std::ffi::c_void;
     #[repr(C)]
@@ -511,7 +579,7 @@ unsafe fn list_gpus(gpa: GetProc) -> Vulkan {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 mod sys {
     use super::Vulkan;
     use std::path::Path;
@@ -562,5 +630,82 @@ mod sys {
             }
             super::list_gpus(std::mem::transmute::<*mut libc::c_void, super::GetProc>(gpa))
         }
+    }
+}
+
+/// macOS: sysctl for the memory, the processor, the OS version and Apple silicon; the Vulkan runtime is the app's own (`Mac`).
+#[cfg(target_os = "macos")]
+mod sys {
+    use super::Vulkan;
+    use std::path::Path;
+
+    pub const VULKAN_LOADER: &str = "libvulkan.1.dylib";
+    /// What the game needs of `runtime/` for Vulkan (runtime/platform/mac/gfx/vulkan_mac.cpp).
+    const VULKAN_FILES: [&str; 5] = [
+        "libvulkan.1.dylib",
+        "libvulkan_kosmickrisp.dylib",
+        "libMoltenVK.dylib",
+        "vulkan/icd.d/libkosmickrisp_icd.json",
+        "vulkan/icd.d/MoltenVK_icd.json",
+    ];
+
+    pub fn free_bytes(dir: &Path) -> Option<u64> {
+        crate::host::free_bytes(dir)
+    }
+
+    /// The raw value of a sysctl by name, None when it does not exist.
+    fn sysctl(name: &str) -> Option<Vec<u8>> {
+        let c = std::ffi::CString::new(name).ok()?;
+        let mut len: libc::size_t = 0;
+        // SAFETY: the first call only asks for the size; the second writes at most `len` bytes into a buffer of that size
+        unsafe {
+            if libc::sysctlbyname(c.as_ptr(), std::ptr::null_mut(), &mut len, std::ptr::null_mut(), 0) != 0 || len == 0 {
+                return None;
+            }
+            let mut buf = vec![0u8; len];
+            if libc::sysctlbyname(c.as_ptr(), buf.as_mut_ptr().cast(), &mut len, std::ptr::null_mut(), 0) != 0 {
+                return None;
+            }
+            buf.truncate(len);
+            Some(buf)
+        }
+    }
+
+    fn sysctl_text(name: &str) -> Option<String> {
+        let b = sysctl(name)?;
+        let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+        Some(String::from_utf8_lossy(&b[..end]).trim().to_string()).filter(|s| !s.is_empty())
+    }
+
+    fn sysctl_int(name: &str) -> Option<u64> {
+        let b = sysctl(name)?;
+        match b.len() {
+            8 => Some(u64::from_le_bytes(b[..8].try_into().ok()?)),
+            4 => Some(u32::from_le_bytes(b[..4].try_into().ok()?) as u64),
+            _ => None,
+        }
+    }
+
+    pub fn ram_total() -> Option<u64> {
+        sysctl_int("hw.memsize")
+    }
+
+    /// ("Apple M5 Max", no microcode on Apple silicon)
+    pub fn cpu() -> (Option<String>, Option<u32>) {
+        (sysctl_text("machdep.cpu.brand_string"), None)
+    }
+
+    /// Not probed: `Facts::mac` carries the check of the app's own runtime instead.
+    pub fn vulkan() -> Vulkan {
+        Vulkan::Gpus(Vec::new())
+    }
+
+    /// The Mac's checks; `runtime` is the app's runtime/ folder (host::runtime_source).
+    pub fn mac(runtime: Option<&Path>) -> super::Mac {
+        let vulkan_missing = match runtime {
+            Some(dir) => VULKAN_FILES.iter().filter(|f| !dir.join(f).is_file()).map(|f| f.to_string()).collect(),
+            None => VULKAN_FILES.iter().map(|f| f.to_string()).collect(),
+        };
+        super::Mac { version: sysctl_text("kern.osproductversion"), apple_silicon: sysctl_int("hw.optional.arm64") == Some(1), vulkan_missing }
     }
 }

@@ -186,7 +186,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: PokopiaRecomp-${{ env.VERSION }}-win64
+          name: PokoMac-${{ env.VERSION }}-win64
           path: |
             build/rel/*.zip
             build/rel/SHA256SUMS.txt
@@ -225,12 +225,12 @@ jobs:
               }
             } catch { Write-Host "Changes in this build: skipped ($_)" }
             try {   # and how to report, so the release page says it too
-              $report = "`n`n### How to report`nOpen [a bug report](https://github.com/featureJosh/pokopia-recomp/issues/new?template=bug_report.yml), choose **Testing** as the channel, say which version you have, and attach ``pkp.log`` (and ``setup.log`` if Set up ran). Thank you for testing."
+              $report = "`n`n### How to report`nOpen [a bug report](https://github.com/Chaos192/PokoMac/issues/new), choose **Testing** as the channel, say which version you have, and attach ``pkp.log`` (and ``setup.log`` if Set up ran). Thank you for testing."
               Add-Content -Path build/notes.md -Value $report
             } catch { Write-Host "How to report: skipped ($_)" }
           }
           $env:BUILD = [regex]::Match($log, "(?m)^## $([regex]::Escape($env:VERSION)) \(build ([^)\r\n]+)\)").Groups[1].Value
-          $title = "Pokopia Recomp $env:VERSION" + $(if ($env:BUILD) { " (build $env:BUILD)" } elseif ($env:PRERELEASE -eq 'true') { " (Testing)" } else { "" })
+          $title = "PokoMac $env:VERSION" + $(if ($env:BUILD) { " (build $env:BUILD)" } elseif ($env:PRERELEASE -eq 'true') { " (Testing)" } else { "" })
           if ($env:PRERELEASE -eq 'true') {
             gh release create $env:REL_TAG --target $env:GITHUB_SHA (Get-Item build/rel/*.zip).FullName build/rel/SHA256SUMS.txt --title $title --notes-file build/notes.md --prerelease
           } else {
@@ -238,7 +238,7 @@ jobs:
           }
 
   # The Linux package: the Windows zip above (the runtime, the build kit, the shader translator: they run through Proton) with the
-  # Linux launcher as an AppImage in place of PokopiaLauncher.exe, which does not start under Proton (no WebView2). A tag adds it
+  # Linux launcher as an AppImage in place of PokoMac.exe, which does not start under Proton (no WebView2). A tag adds it
   # to the release; manual runs without release_tag only build it (artifact).
   linux:
     needs: release
@@ -306,17 +306,17 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: PokopiaRecomp-${{ env.VERSION }}-win64
+          name: PokoMac-${{ env.VERSION }}-win64
           path: build/win
 
       - name: Package
         run: |
           mkdir -p build/stage build/rel
-          unzip -q build/win/PokopiaRecomp-$VERSION-win64.zip -d build/stage
-          pkg=build/stage/PokopiaRecomp-$VERSION
+          unzip -q build/win/PokoMac-$VERSION-win64.zip -d build/stage
+          pkg=build/stage/PokoMac-$VERSION
           test -d "$pkg/tools/build" || { echo "unexpected zip layout"; ls build/stage; exit 1; }
           # Windows-only parts: the launcher, the start script, the embedded Python and Zig (Set up fetches the Linux ones)
-          rm -rf "$pkg/PokopiaLauncher.exe" "$pkg/Play.bat" "$pkg/tools/python" "$pkg/tools/build/zig"
+          rm -rf "$pkg/PokoMac.exe" "$pkg/Play.bat" "$pkg/tools/python" "$pkg/tools/build/zig"
           sed "s/@VERSION@/$VERSION/g" game-build/release_b/README.linux.txt > "$pkg/README.txt"
           # machine translations of that README (README.<lang>.txt), when the repository has them
           for t in game-build/release_b/README.linux.*.txt; do
@@ -324,22 +324,22 @@ jobs:
             lang="${t#game-build/release_b/README.linux.}"; lang="${lang%.txt}"
             sed "s/@VERSION@/$VERSION/g" "$t" > "$pkg/README.$lang.txt"
           done
-          install -m 755 launcher/src-tauri/target/release/bundle/appimage/*.AppImage "$pkg/PokopiaLauncher.AppImage"
-          tar -C build/stage -czf build/rel/PokopiaRecomp-$VERSION-linux-x64.tar.gz PokopiaRecomp-$VERSION
-          (cd build/rel && sha256sum -b PokopiaRecomp-$VERSION-linux-x64.tar.gz | tee linux.sha256)
+          install -m 755 launcher/src-tauri/target/release/bundle/appimage/*.AppImage "$pkg/PokoMac.AppImage"
+          tar -C build/stage -czf build/rel/PokoMac-$VERSION-linux-x64.tar.gz PokoMac-$VERSION
+          (cd build/rel && sha256sum -b PokoMac-$VERSION-linux-x64.tar.gz | tee linux.sha256)
           ls -la build/rel
 
       - name: Smoke test (the AppImage starts and finds tools/)
         run: |
           sudo apt-get install -y -q --no-install-recommends xvfb
-          cd build/stage/PokopiaRecomp-$VERSION
-          (APPIMAGE_EXTRACT_AND_RUN=1 timeout 20 xvfb-run -a ./PokopiaLauncher.AppImage > ../launch.log 2>&1; echo "exit $?" >> ../launch.log) || true
+          cd build/stage/PokoMac-$VERSION
+          (APPIMAGE_EXTRACT_AND_RUN=1 timeout 20 xvfb-run -a ./PokoMac.AppImage > ../launch.log 2>&1; echo "exit $?" >> ../launch.log) || true
           cat ../launch.log
           grep -q "exit 124" ../launch.log || { echo "the launcher did not keep running"; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:
-          name: PokopiaRecomp-${{ env.VERSION }}-linux-x64
+          name: PokoMac-${{ env.VERSION }}-linux-x64
           path: build/rel/*.tar.gz
           compression-level: 0
 
@@ -351,4 +351,4 @@ jobs:
           gh release download "$REL_TAG" -R "$GITHUB_REPOSITORY" -p SHA256SUMS.txt -D build/sums
           sed -E 's/^([0-9a-f]+) \*?(.*)$/\1 *\2/' build/rel/linux.sha256 >> build/sums/SHA256SUMS.txt
           cat build/sums/SHA256SUMS.txt
-          gh release upload "$REL_TAG" -R "$GITHUB_REPOSITORY" build/rel/PokopiaRecomp-$VERSION-linux-x64.tar.gz build/sums/SHA256SUMS.txt --clobber
+          gh release upload "$REL_TAG" -R "$GITHUB_REPOSITORY" build/rel/PokoMac-$VERSION-linux-x64.tar.gz build/sums/SHA256SUMS.txt --clobber

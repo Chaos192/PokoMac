@@ -79,7 +79,7 @@ body.pad-nav .slider input:focus::-webkit-slider-thumb { outline: 3px solid var(
   letter-spacing: var(--tracking-title);
 }
 .brand > * { pointer-events: none; }
-.brand-logo { height: 28px; width: auto; }
+.brand-logo { height: 24px; width: auto; min-width: 0; max-width: 100%; object-fit: contain; object-position: left center; } /* the PokoMac wordmark is wide (about 5:1) */
 .brand-mark { display: none; width: 26px; height: 26px; flex: none; border-radius: 8px; box-shadow: var(--shadow-sm); }
 /* The Testing channel: the Testing mark (and a small tag next to the wordmark) replace the Stable look. [data-channel] is set by main.js. */
 .brand-mark-testing { display: none; width: 30px; height: 30px; flex: none; object-fit: contain; }

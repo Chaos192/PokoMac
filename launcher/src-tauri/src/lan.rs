@@ -13,7 +13,9 @@ use std::net::Ipv4Addr;
 pub const PUBLIC_WARNING: &str = "Windows treats this network as Public, so other PCs may not reach you. Set it to Private in Settings > Network.";
 #[cfg(windows)]
 pub const FIREWALL_HINT: &str = "If Windows Firewall asks about this program, allow it on Private networks. If it was answered wrongly once, remove the Block rules for the program in Windows Defender Firewall > Allow an app.";
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub const FIREWALL_HINT: &str = "If visitors cannot connect, the macOS firewall may block the game: in System Settings > Network > Firewall > Options, allow incoming connections for pkp and PokoMac (ports 47600 for a host, 47610 for a relay).";
+#[cfg(not(any(windows, target_os = "macos")))]
 pub const FIREWALL_HINT: &str = "If visitors cannot connect, the firewall may block the ports (47600 for a host, 47610 for a relay). With firewalld (Fedora, Bazzite): sudo firewall-cmd --add-port=47600/tcp --add-port=47600/udp --add-port=47610/tcp --add-port=47610/udp";
 
 /// IfType values we care about (IANA).
@@ -318,9 +320,74 @@ mod sys {
 mod sys {
     use super::*;
     use std::collections::HashMap;
+    #[cfg(not(target_os = "macos"))]
     use std::path::Path;
 
+    /// The interfaces that hold a default route, with their metric: /proc/net/route on Linux.
+    #[cfg(not(target_os = "macos"))]
+    fn routes() -> HashMap<String, u32> {
+        default_routes(&std::fs::read_to_string("/proc/net/route").unwrap_or_default())
+    }
+
+    /// macOS has no /proc: the interface `route -n get default` names ("interface: en0"), metric 0.
+    #[cfg(target_os = "macos")]
+    fn routes() -> HashMap<String, u32> {
+        let text = run("/sbin/route", &["-n", "get", "default"]);
+        text.lines().filter_map(|l| l.trim().strip_prefix("interface:")).map(|i| (i.trim().to_string(), 0)).collect()
+    }
+
+    /// The output of a system tool, empty when it fails.
+    #[cfg(target_os = "macos")]
+    fn run(program: &str, args: &[&str]) -> String {
+        let out = std::process::Command::new(program).args(args).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output();
+        out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
+    }
+
+    /// macOS: device -> hardware port, lower case ("en0" -> "wi-fi", "en5" -> "iphone usb", "bridge0" -> "thunderbolt bridge"), from
+    /// `networksetup -listallhardwareports` ("Hardware Port: Wi-Fi" then "Device: en0").
+    #[cfg(target_os = "macos")]
+    fn hardware_ports() -> HashMap<String, String> {
+        let (mut out, mut port) = (HashMap::new(), None);
+        for l in run("/usr/sbin/networksetup", &["-listallhardwareports"]).lines() {
+            if let Some(p) = l.strip_prefix("Hardware Port:") {
+                port = Some(p.trim().to_ascii_lowercase());
+            } else if let (Some(d), Some(p)) = (l.strip_prefix("Device:"), port.take()) {
+                out.insert(d.trim().to_string(), p);
+            }
+        }
+        out
+    }
+
+    /// macOS: (IfType, description) for `classify`, from the interface's name and its hardware port. Tailscale and other VPNs are
+    /// utun interfaces (Tailscale's address is in 100.64.0.0/10), ZeroTier's are feth; bridges are Internet Sharing's, a virtual
+    /// machine's or Thunderbolt Bridge.
+    #[cfg(target_os = "macos")]
+    fn kind(name: &str, loopback: bool, ip: Ipv4Addr, ports: &HashMap<String, String>) -> (u32, &'static str) {
+        let port = ports.get(name).map(String::as_str).unwrap_or("");
+        let o = ip.octets();
+        if loopback || name.starts_with("lo") {
+            (IF_LOOPBACK, "loopback")
+        } else if name.starts_with("utun") && o[0] == 100 && (64..128).contains(&o[1]) {
+            (IF_TUNNEL, "Tailscale")
+        } else if name.starts_with("feth") || name.starts_with("zt") {
+            (6, "ZeroTier")
+        } else if port.contains("iphone") || port.contains("ipad") || port.contains("android") {
+            (6, "USB-tethered phone (iPhone USB)")
+        } else if name.starts_with("ppp") {
+            (IF_PPP, "PPP link")
+        } else if ["utun", "ipsec", "gif", "stf", "tun", "tap"].iter().any(|p| name.starts_with(p)) {
+            (IF_TUNNEL, "VPN or tunnel")
+        } else if name.starts_with("bridge") || name.starts_with("vmenet") || name.starts_with("anpi") || port.contains("bridge") {
+            (6, "virtual bridge (pseudo-interface)")
+        } else if port.contains("wi-fi") || port.contains("airport") {
+            (IF_WIFI, "Wi-Fi")
+        } else {
+            (6, "Ethernet")
+        }
+    }
+
     /// /proc/net/route: interface -> lowest metric of its default routes (destination and mask 0).
+    #[cfg(not(target_os = "macos"))]
     pub fn default_routes(text: &str) -> HashMap<String, u32> {
         let mut out: HashMap<String, u32> = HashMap::new();
         for l in text.lines().skip(1) {
@@ -336,6 +403,7 @@ mod sys {
 
     /// (IfType, description) for `classify`, which reads the description the way it reads a Windows adapter's: what kind of
     /// link the interface is, from its name and sysfs.
+    #[cfg(not(target_os = "macos"))]
     fn kind(name: &str, loopback: bool) -> (u32, &'static str) {
         let sys = Path::new("/sys/class/net").join(name);
         let ty: u32 = std::fs::read_to_string(sys.join("type")).ok().and_then(|t| t.trim().parse().ok()).unwrap_or(1);
@@ -363,9 +431,11 @@ mod sys {
         }
     }
 
-    /// The IPv4 addresses of this PC's interfaces (getifaddrs). Linux has no Public/Private network profiles: `public` is None.
+    /// The IPv4 addresses of this PC's interfaces (getifaddrs). Linux and macOS have no Public/Private network profiles: `public` is None.
     pub fn adapters() -> Vec<Adapter> {
-        let routes = default_routes(&std::fs::read_to_string("/proc/net/route").unwrap_or_default());
+        let routes = routes();
+        #[cfg(target_os = "macos")]
+        let ports = hardware_ports();
         let mut out = Vec::new();
         // SAFETY: getifaddrs hands out a list that stays valid until freeifaddrs; only AF_INET entries are read as sockaddr_in
         unsafe {
@@ -383,7 +453,10 @@ mod sys {
                 let ip = Ipv4Addr::from(u32::from_be((*(a.ifa_addr as *const libc::sockaddr_in)).sin_addr.s_addr));
                 let name = std::ffi::CStr::from_ptr(a.ifa_name).to_string_lossy().into_owned();
                 let flags = a.ifa_flags as i32;
+                #[cfg(not(target_os = "macos"))]
                 let (if_type, description) = kind(&name, flags & libc::IFF_LOOPBACK != 0);
+                #[cfg(target_os = "macos")]
+                let (if_type, description) = kind(&name, flags & libc::IFF_LOOPBACK != 0, ip, &ports);
                 let route = routes.get(&name).copied();
                 out.push(Adapter {
                     up: flags & libc::IFF_UP != 0 && flags & libc::IFF_RUNNING != 0,

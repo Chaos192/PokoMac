@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Starts pkp.exe, watches it, and reports how it ended.
+//! Starts pkp.exe, watches it, and reports how it ended. On macOS the game is the native `pkp` (host::GAME_EXE); a crash ends it with
+//! a signal rather than an exit code, and the message names the signal.
 
 use serde::Serialize;
 use std::path::Path;
@@ -59,14 +60,15 @@ pub fn start(app: &AppHandle, game_dir: &Path, minimize: bool) -> Result<(), Str
             return Err("The game is already running.".into());
         }
     }
-    let exe = game_dir.join("pkp.exe");
+    let game = crate::host::GAME_EXE;
+    let exe = game_dir.join(game);
     if !exe.is_file() {
-        return Err(format!("pkp.exe was not found in {}. Put the launcher next to pkp.exe or set the game folder in Settings.", crate::dump::fwd(game_dir)));
+        return Err(format!("{0} was not found in {1}. Put the launcher next to {0} or set the game folder in Settings.", game, crate::dump::fwd(game_dir)));
     }
 
     let app2 = app.clone();
     let dir = game_dir.to_path_buf();
-    let tools = crate::exe_dir().join("tools");
+    let tools = crate::tools_dir();
     let first = if crate::shaders::needs_warm_up(game_dir) {
         "Collecting the shaders the game builds while it runs (once, about a minute)..."
     } else {
@@ -85,7 +87,7 @@ pub fn start(app: &AppHandle, game_dir: &Path, minimize: bool) -> Result<(), Str
         let mut cmd = match crate::events::override_for(&dir).and_then(|clock| game_command(&exe, &dir, clock)) {
             Ok(c) => c,
             Err(e) => {
-                set_status(&app2, Status { state: "exited".into(), crashed: true, message: format!("Could not start pkp.exe: {}", e), ..Default::default() });
+                set_status(&app2, Status { state: "exited".into(), crashed: true, message: format!("Could not start {}: {}", game, e), ..Default::default() });
                 return;
             }
         };
@@ -93,11 +95,12 @@ pub fn start(app: &AppHandle, game_dir: &Path, minimize: bool) -> Result<(), Str
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
-                set_status(&app2, Status { state: "exited".into(), crashed: true, message: format!("Could not start pkp.exe: {}", e), ..Default::default() });
+                set_status(&app2, Status { state: "exited".into(), crashed: true, message: format!("Could not start {}: {}", game, e), ..Default::default() });
                 return;
             }
         };
-        set_status(&app2, Status { state: "running".into(), message: format!("pkp.exe started (process {})", child.id()), ..Default::default() });
+        // the page tells this moment by "<game> started" (action.js gamePhase)
+        set_status(&app2, Status { state: "running".into(), message: format!("{} started (process {})", game, child.id()), ..Default::default() });
         if minimize {
             if let Some(w) = app2.get_webview_window("main") {
                 let _ = w.minimize();
@@ -107,6 +110,11 @@ pub fn start(app: &AppHandle, game_dir: &Path, minimize: bool) -> Result<(), Str
         let backups = crate::savebackup::Watch::start(&dir);
         let result = child.wait();
         backups.finish();
+        // macOS: a crash (SIGSEGV, SIGBUS, an abort) ends the native game with a signal and no exit code
+        #[cfg(target_os = "macos")]
+        let signal = result.as_ref().ok().and_then(std::os::unix::process::ExitStatusExt::signal);
+        #[cfg(not(target_os = "macos"))]
+        let signal: Option<i32> = None;
         let (code, wait_err) = match result {
             Ok(s) => (s.code(), None),
             Err(e) => (None, Some(e.to_string())),
@@ -121,11 +129,12 @@ pub fn start(app: &AppHandle, game_dir: &Path, minimize: bool) -> Result<(), Str
         let files = report_files(&dir, started);
         let crash_file = files.iter().any(|f| f.fresh && f.name != "pkp.log");
         let crashed = crash_file || code.map_or(true, |c| c != 0);
-        let message = match (&wait_err, code) {
-            (Some(e), _) => format!("Lost track of pkp.exe: {}", e),
-            (None, Some(0)) => "pkp.exe exited normally.".to_string(),
-            (None, Some(c)) => format!("pkp.exe exited with code {} (0x{:08X}).", c, c as u32),
-            (None, None) => "pkp.exe was ended by the system.".to_string(),
+        let message = match (&wait_err, code, signal) {
+            (Some(e), _, _) => format!("Lost track of {}: {}", game, e),
+            (None, Some(0), _) => format!("{} exited normally.", game),
+            (None, Some(c), _) => format!("{} exited with code {} (0x{:08X}).", game, c, c as u32),
+            (None, None, Some(s)) => format!("{} was ended by signal {} ({}).", game, s, signal_name(s)),
+            (None, None, None) => format!("{} was ended by the system.", game),
         };
         set_status(&app2, Status { state: "exited".into(), code, crashed, files, message: message + &prep + &shaders });
         if minimize {
@@ -138,10 +147,13 @@ pub fn start(app: &AppHandle, game_dir: &Path, minimize: bool) -> Result<(), Str
     Ok(())
 }
 
-/// How Play starts pkp.exe: in its folder, through Proton on Linux (host.rs). Every path (exefs, romfs, shader cache) comes
-/// from pkp.ini next to it.
+/// How Play starts pkp.exe: in its folder, through Proton on Linux (host.rs), natively on macOS. Every path (exefs, romfs, shader
+/// cache) comes from pkp.ini next to it. The run-time files beside it are brought up to date first (macOS: the app's runtime/ folder,
+/// Vulkan included; the runtime picks the Vulkan driver itself, so VK_DRIVER_FILES is left to the player's environment).
 fn game_command(exe: &Path, dir: &Path, clock: Option<crate::events::ClockOverride>) -> Result<std::process::Command, String> {
-    crate::host::sync_runtime_files(&crate::exe_dir(), dir)?;
+    if let Some(src) = crate::host::runtime_source(&crate::tools_dir()) {
+        crate::host::sync_runtime_files(&src, dir)?;
+    }
     let mut cmd = crate::host::windows_program(exe)?;
     cmd.current_dir(dir).args(["--log", "pkp.log"]);
     if let Some(clock) = clock {
@@ -157,15 +169,16 @@ fn game_command(exe: &Path, dir: &Path, clock: Option<crate::events::ClockOverri
 
 /// `--play`: what Play does, without the window, for a shortcut that starts the game directly (Steam, Sunshine). Checks
 /// that setup finished, prepares the run-time shaders, runs pkp.exe until it exits, then translates the shaders it built.
-/// Returns the game's exit code (1 when it could not start).
+/// Returns the game's exit code (1 when it could not start; macOS: 128 + the signal that ended it, as a shell reports it).
 pub fn run_cli(game_dir: &Path, tools: &Path) -> i32 {
     let fail = |m: String| {
         eprintln!("{}", m);
         1
     };
-    let exe = game_dir.join("pkp.exe");
+    let game = crate::host::GAME_EXE;
+    let exe = game_dir.join(game);
     if !exe.is_file() || (crate::gamebuild::is_package_b(tools) && !crate::gamebuild::is_built(game_dir, tools)) {
-        return fail(format!("pkp.exe in {} is missing or from an older release: open the launcher and press Set up.", crate::dump::fwd(game_dir)));
+        return fail(format!("{} in {} is missing or from an older release: open the launcher and press Set up.", game, crate::dump::fwd(game_dir)));
     }
     if !crate::shaders::is_complete(game_dir) || !game_dir.join(crate::settings::PKP_INI).is_file() {
         return fail("Setup has not finished: open the launcher and press Set up.".into());
@@ -184,9 +197,16 @@ pub fn run_cli(game_dir: &Path, tools: &Path) -> i32 {
         Err(e) => return fail(e),
     };
     let backups = crate::savebackup::Watch::start(game_dir);   // the same save backups as Play in the window
-    let status = game_command(&exe, game_dir, clock).and_then(|mut c| c.status().map_err(|e| format!("Could not start pkp.exe: {}", e)));
+    let status = game_command(&exe, game_dir, clock).and_then(|mut c| c.status().map_err(|e| format!("Could not start {}: {}", game, e)));
     backups.finish();
     let code = match status {
+        #[cfg(target_os = "macos")]
+        Ok(st) => st.code().unwrap_or_else(|| {
+            let s = std::os::unix::process::ExitStatusExt::signal(&st).unwrap_or(0);
+            eprintln!("{} was ended by signal {} ({}).", game, s, signal_name(s));
+            128 + s
+        }),
+        #[cfg(not(target_os = "macos"))]
         Ok(st) => st.code().unwrap_or(1),
         Err(e) => return fail(e),
     };
@@ -198,8 +218,25 @@ pub fn run_cli(game_dir: &Path, tools: &Path) -> i32 {
     code
 }
 
+/// The usual name of a signal that ends a crashed or stopped program (macOS numbers), for the message after the game ends.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn signal_name(s: i32) -> &'static str {
+    match s {
+        4 => "SIGILL, illegal instruction",
+        5 => "SIGTRAP, a trap or a failed check",
+        6 => "SIGABRT, aborted",
+        8 => "SIGFPE, arithmetic error",
+        9 => "SIGKILL, killed",
+        10 => "SIGBUS, bad memory access",
+        11 => "SIGSEGV, bad memory access",
+        13 => "SIGPIPE",
+        15 => "SIGTERM, asked to end",
+        _ => "a signal",
+    }
+}
+
 pub fn open_with_shell(path: &Path) -> Result<(), String> {
-    // explorer (Linux: xdg-open) opens a file in its default app and a folder in a window
+    // explorer (Linux: xdg-open, macOS: open) opens a file in its default app and a folder in a window
     crate::host::open(path.as_os_str())
 }
 

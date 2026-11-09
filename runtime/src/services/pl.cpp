@@ -24,6 +24,9 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 #include <fstream>
 #include <memory>
 #include <mutex>
@@ -119,6 +122,14 @@ std::filesystem::path exe_dir() {
     const DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
     if (n == 0 || n >= MAX_PATH) return {};
     return std::filesystem::path(buf).parent_path();
+#elif defined(__APPLE__)
+    uint32_t n = 0;
+    _NSGetExecutablePath(nullptr, &n);
+    std::string p(n, '\0');
+    if (_NSGetExecutablePath(p.data(), &n) != 0) return {};
+    std::error_code ec;
+    const std::filesystem::path real = std::filesystem::canonical(p.c_str(), ec);
+    return (ec ? std::filesystem::path(p.c_str()) : real).parent_path();
 #else
     return {};
 #endif

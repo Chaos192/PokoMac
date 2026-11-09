@@ -1,6 +1,7 @@
 # Your game files and everything generated from them. Never commit these.
 /game/
 /work/
+/release/
 build/
 shader_cache/
 bc7_cache/

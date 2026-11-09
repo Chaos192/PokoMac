@@ -7,7 +7,7 @@
 //! `install`: download, verify, extract, swap, all through `<install>/.update/`:
 //! 1. SHA256SUMS.txt first, so a release without a checksum for the package costs no 170 MB. The package is streamed to `.update/`
 //!    and hashed as it arrives. Nothing outside `.update/` has changed until step 3, so cancel and every failure here only delete it.
-//! 2. The system tar unpacks it to `.update/staged/`, and the tree is checked: launcher and tools/build in `PokopiaRecomp-<v>/`.
+//! 2. The system tar unpacks it to `.update/staged/`, and the tree is checked: launcher and tools/build in `PokoMac-<v>/`.
 //! 3. `apply`: each file of the package moves its old self to `.update/backup/` and takes its place, the launcher last. Files the
 //!    package does not hold are never looked at, and it can never replace `KEEP` even if a release shipped one. Every step records
 //!    its inverse; a failure runs them backwards. The `applying` marker covers a power cut: the next start restores the backup
@@ -17,6 +17,10 @@
 //!
 //! Renames only, inside one folder tree, so a swap cannot run out of disk space halfway. A second launcher window leaves a running
 //! update alone: `.update/lock` is held for the whole update.
+//! macOS: the package is `PokoMac-<v>-macos-arm64.zip` and the install is `PokoMac.app` alone (tools/ and the runtime
+//! live inside it; the folder around it may be /Applications, where nothing else belongs). The install root is the app's folder, and
+//! the app is the "launcher" of step 3: the old bundle is renamed to `<name>.app.old` and the new one renamed into its place, whole,
+//! so its signature stays sealed. The new app is started through LaunchServices (`open`).
 //! The pure parts take plain paths and no AppHandle: the tests below build a fake install and run them.
 
 use serde::{Deserialize, Serialize};
@@ -30,7 +34,7 @@ use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 use std::sync::Mutex;
 use std::time::Duration;
 
-const REPO: &str = "featureJosh/pokopia-recomp";
+const REPO: &str = "Chaos192/PokoMac";
 /// The releases list: small, so a whole-call limit, generous for a slow link.
 const API_TIMEOUT: Duration = Duration::from_secs(15);
 /// The package is ~170 MB: connect and silence limits, never a total one.
@@ -45,18 +49,27 @@ const UPDATE_DIR: &str = ".update";
 const SUMS_ASSET: &str = "SHA256SUMS.txt";
 const MARKER: &str = "applying";
 const LOCK: &str = "lock";
-const RUNTIME_DLL: &str = "pkp_rt.dll";
+const RUNTIME_DLL: &str = crate::host::RUNTIME_LIB;
 /// install_update's Err when the player cancelled, for the page to tell it from a failure.
 pub const CANCELLED: &str = "Update cancelled.";
 
 #[cfg(windows)]
 const ASSET_SUFFIX: &str = "-win64.zip";
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+const ASSET_SUFFIX: &str = "-macos-arm64.zip";
+#[cfg(not(any(windows, target_os = "macos")))]
 const ASSET_SUFFIX: &str = "-linux-x64.tar.gz";
 #[cfg(windows)]
-const PACKAGE_LAUNCHER: &str = "PokopiaLauncher.exe";
-#[cfg(not(windows))]
-const PACKAGE_LAUNCHER: &str = "PokopiaLauncher.AppImage";
+const PACKAGE_LAUNCHER: &str = "PokoMac.exe";
+#[cfg(target_os = "macos")]
+const PACKAGE_LAUNCHER: &str = "PokoMac.app";
+#[cfg(not(any(windows, target_os = "macos")))]
+const PACKAGE_LAUNCHER: &str = "PokoMac.AppImage";
+/// Where the package keeps tools/build, which `find_package` checks for: beside the launcher, or inside the app on macOS.
+#[cfg(target_os = "macos")]
+const PACKAGE_TOOLS: &str = "PokoMac.app/Contents/Resources/tools";
+#[cfg(not(target_os = "macos"))]
+const PACKAGE_TOOLS: &str = "tools";
 
 /// Top-level names that belong to the player. make-release.ps1 refuses to ship most of them; `apply` skips them all the same.
 /// Never replaced or removed by an update: the player's save, the copies of it (`save-backups`, savebackup.rs; `rollback-backups`, rollback.rs) and settings.
@@ -300,7 +313,7 @@ fn get(agent: &ureq::Agent, url: &str, limit: u64) -> Result<Vec<u8>, String> {
 }
 
 fn user_agent(version: &str) -> String {
-    format!("PokopiaRecomp-Launcher/{}", version)
+    format!("PokoMac/{}", version)
 }
 
 /// The parsed list of this session.
@@ -522,7 +535,7 @@ fn hash_copy(from: &mut dyn Read, to: &mut dyn Write, size: u64, cancel: &Atomic
     Ok((n, format!("{:x}", hash.finalize())))
 }
 
-/// The system's tar: bsdtar in System32 on Windows, which reads the zip too (never one found on PATH).
+/// The system's tar: bsdtar in System32 on Windows, which reads the zip too (never one found on PATH); macOS's tar is bsdtar too.
 fn tar() -> Command {
     #[cfg(windows)]
     {
@@ -574,11 +587,19 @@ pub fn extract(dir: &Path, archive: &str, out: &str, cancel: &AtomicBool) -> Res
     Err(format!("Could not unpack the update ({}). Check that the drive has free space, then try again. Nothing was changed.", if last.is_empty() { status.to_string() } else { last }))
 }
 
-/// `staged/PokopiaRecomp-<version>`, once it has the launcher and tools/build. Asked before the install is touched.
+/// `staged/PokoMac-<version>`, once it has the launcher and tools/build. Asked before the install is touched. macOS: the
+/// launcher is the app (a folder) and the top folder may also carry the package's name (`PokoMac-<version>-macos-arm64`).
 pub fn find_package(staged: &Path, version: &str, launcher: &str) -> Result<PathBuf, String> {
-    let root = staged.join(format!("PokopiaRecomp-{}", version));
-    if root.join(launcher).is_file() && root.join("tools").join("build").is_dir() {
-        return Ok(root);
+    let mut tops = vec![format!("PokoMac-{}", version)];
+    if cfg!(target_os = "macos") {
+        tops.push(format!("PokoMac-{}{}", version, ASSET_SUFFIX.trim_end_matches(".zip")));
+    }
+    for top in tops {
+        let root = staged.join(top);
+        let launcher_there = if cfg!(target_os = "macos") { root.join(launcher).join("Contents").join("Info.plist").is_file() } else { root.join(launcher).is_file() };
+        if launcher_there && root.join(PACKAGE_TOOLS).join("build").is_dir() {
+            return Ok(root);
+        }
     }
     Err("The downloaded package is not laid out as expected. Nothing was changed.".into())
 }
@@ -609,6 +630,15 @@ fn with_old(p: &Path) -> PathBuf {
     let mut s = p.as_os_str().to_os_string();
     s.push(".old");
     PathBuf::from(s)
+}
+
+/// Deletes a `.old` left by an update: a file, or on macOS the old app bundle (a folder).
+fn remove_old(p: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(p).is_ok_and(|m| m.is_dir()) {
+        fs::remove_dir_all(p)
+    } else {
+        fs::remove_file(p)
+    }
 }
 
 /// Every file (and symlink) under `dir`, relative to it, sorted.
@@ -675,7 +705,7 @@ fn rollback_message(failed: &[String]) -> String {
 pub struct Job<'a> {
     /// the install: the launcher's folder
     pub root: &'a Path,
-    /// the unpacked `PokopiaRecomp-<v>/`
+    /// the unpacked `PokoMac-<v>/`
     pub package: &'a Path,
     /// `.update/`, on the same drive as `root`
     pub work: &'a Path,
@@ -737,10 +767,10 @@ fn swap(job: &Job, undo: &mut Vec<Undo>, files: &[PathBuf], report: &mut dyn FnM
             fs::copy(&src, dst)?;
         }
     }
-    // last, so an install cut short by a power failure still starts the launcher that can restore it
+    // last, so an install cut short by a power failure still starts the launcher that can restore it (macOS: the whole app, a folder)
     let (src, dst) = (job.package.join(job.launcher_name), job.launcher);
     let old = with_old(dst);
-    let _ = fs::remove_file(&old);
+    let _ = remove_old(&old);
     if exists(dst) {
         step(dst, &old, undo, mover)?;
     }
@@ -756,7 +786,13 @@ pub fn apply(job: &Job, report: &mut dyn FnMut(&str, u64, u64)) -> Result<Applie
 /// `apply` with the move of the forward steps passed in, so a test can fail any one of them.
 fn apply_with(job: &Job, report: &mut dyn FnMut(&str, u64, u64), mut mover: Mover) -> Result<Applied, String> {
     let unreadable = |e: io::Error| format!("Could not read the unpacked update: {}. Nothing was changed.", e);
-    let files: Vec<PathBuf> = walk(job.package).map_err(unreadable)?.into_iter().filter(|r| !kept(r) && r != Path::new(job.launcher_name)).collect();
+    // macOS: the app is the whole install, swapped below as one; nothing of the package lands beside it (README and licences stay in
+    // the zip: the folder around the app may be /Applications)
+    let files: Vec<PathBuf> = if cfg!(target_os = "macos") {
+        Vec::new()
+    } else {
+        walk(job.package).map_err(unreadable)?.into_iter().filter(|r| !kept(r) && !r.starts_with(job.launcher_name)).collect()
+    };
     // a folder where the package has a file: the one conflict moving aside must not resolve, it would take the folder's content along
     if let Some(r) = files.iter().find(|r| job.root.join(r).is_dir()) {
         return Err(format!("{} is a folder in your game folder, but the update has a file of that name. Nothing was changed.", r.display()));
@@ -818,7 +854,7 @@ pub fn clean_start(root: &Path, old: &[PathBuf]) {
             break;
         }
         for p in left {
-            let _ = fs::remove_file(p);
+            let _ = remove_old(p);
         }
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -880,8 +916,12 @@ pub struct Paths {
     pub game_dir: PathBuf,
 }
 
-/// The game's pkp_rt.dll when the game folder is not the install.
+/// The game's pkp_rt.dll when the game folder is not the install. macOS: none; the new app's runtime/ reaches the game folder the
+/// next time the game starts (host::sync_runtime_files).
 fn game_dll(p: &Paths) -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        return None;
+    }
     let canon = |d: &Path| fs::canonicalize(d).unwrap_or_else(|_| d.to_path_buf());
     let dll = p.game_dir.join(RUNTIME_DLL);
     (canon(&p.game_dir) != canon(&p.install) && dll.is_file()).then_some(dll)
@@ -1002,6 +1042,14 @@ fn stages(t: &Target, p: &Paths, st: &UpdateState, work: &Path, report: &mut dyn
 /// Starts the launcher now at `path` with `--updated`. host::command keeps a new AppImage from inheriting the old one's mount. A launcher
 /// run with --appimage-extract-and-run (no FUSE) has no mount either, and the new one needs the same way in: the variable says it.
 pub fn relaunch(path: &Path, dir: &Path) -> io::Result<()> {
+    // macOS: `path` is the new app; LaunchServices starts it as a new instance (-n: this one is still running) and passes --updated
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = crate::host::command("/usr/bin/open");
+        c.arg("-n").arg(path).arg("--args");
+        c
+    };
+    #[cfg(not(target_os = "macos"))]
     let mut cmd = crate::host::command(path);
     #[cfg(not(windows))]
     if std::env::var("APPDIR").is_ok_and(|d| !d.is_empty() && !d.contains(".mount_")) {
@@ -1016,9 +1064,9 @@ mod channel_tests {
     use super::*;
 
     fn rel(tag: &str, prerelease: bool) -> String {
-        let asset = format!("PokopiaRecomp-{}-linux-x64.tar.gz", tag.trim_start_matches('v'));
+        let asset = format!("PokoMac-{}-linux-x64.tar.gz", tag.trim_start_matches('v'));
         format!(
-            r#"{{"tag_name":"{tag}","name":"{tag}","html_url":"https://github.com/featureJosh/Recompia/releases/tag/{tag}","draft":false,"prerelease":{prerelease},"assets":[{{"name":"{asset}","size":1,"browser_download_url":"https://github.com/featureJosh/Recompia/releases/download/{tag}/{asset}"}},{{"name":"SHA256SUMS.txt","size":1,"browser_download_url":"https://github.com/featureJosh/Recompia/releases/download/{tag}/SHA256SUMS.txt"}}]}}"#
+            r#"{{"tag_name":"{tag}","name":"{tag}","html_url":"https://github.com/Chaos192/PokoMac/releases/tag/{tag}","draft":false,"prerelease":{prerelease},"assets":[{{"name":"{asset}","size":1,"browser_download_url":"https://github.com/Chaos192/PokoMac/releases/download/{tag}/{asset}"}},{{"name":"SHA256SUMS.txt","size":1,"browser_download_url":"https://github.com/Chaos192/PokoMac/releases/download/{tag}/SHA256SUMS.txt"}}]}}"#
         )
     }
 
@@ -1121,7 +1169,7 @@ mod channel_tests {
 
     #[test]
     fn a_build_without_a_package_or_checksum_is_listed_but_not_installable() {
-        let body = format!("[{},{}]", rel("v0.8.1", false), r#"{"tag_name":"v0.8.0","name":"x","html_url":"https://github.com/featureJosh/Recompia/releases/tag/v0.8.0","draft":false,"prerelease":false,"assets":[]}"#);
+        let body = format!("[{},{}]", rel("v0.8.1", false), r#"{"tag_name":"v0.8.0","name":"x","html_url":"https://github.com/Chaos192/PokoMac/releases/tag/v0.8.0","draft":false,"prerelease":false,"assets":[]}"#);
         let all = parse_releases(body.as_bytes()).unwrap();
         let b = builds(&all, "0.8.1", "-linux-x64.tar.gz");
         assert_eq!(b.len(), 2);
@@ -1168,5 +1216,48 @@ mod keep_tests {
     #[test]
     fn an_update_never_touches_the_players_save_backups() {
         assert!(KEEP.contains(&"save-backups") && KEEP.contains(&"save"), "the save and its backups stay through an update");
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod mac_tests {
+    use super::*;
+
+    fn app(dir: &Path, text: &str) {
+        fs::create_dir_all(dir.join("Contents/MacOS")).unwrap();
+        fs::create_dir_all(dir.join("Contents/Resources/tools/build")).unwrap();
+        fs::write(dir.join("Contents/Info.plist"), "<plist/>").unwrap();
+        fs::write(dir.join("Contents/MacOS/pokopia-launcher"), text).unwrap();
+    }
+
+    #[test]
+    fn the_app_is_swapped_whole_and_nothing_lands_beside_it() {
+        let d = std::env::temp_dir().join(format!("pkp-update-mac-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        let (root, work) = (d.join("Applications"), d.join("Applications").join(UPDATE_DIR));
+        app(&root.join("PokoMac.app"), "old");
+        fs::write(root.join("PokoMac.app/Contents/Resources/stale.txt"), "only in the old app").unwrap();
+        let staged = work.join("staged");
+        let top = staged.join(format!("PokoMac-1.2.3{}", ASSET_SUFFIX.trim_end_matches(".zip")));
+        app(&top.join("PokoMac.app"), "new");
+        fs::write(top.join("README.txt"), "readme").unwrap();
+        let package = find_package(&staged, "1.2.3", PACKAGE_LAUNCHER).unwrap();
+        assert_eq!(package, top);
+        let launcher = root.join("PokoMac.app");
+        let job = Job { root: &root, package: &package, work: &work, launcher_name: PACKAGE_LAUNCHER, launcher: &launcher, game_dll: None };
+        let applied = apply(&job, &mut |_, _, _| {}).unwrap();
+        assert_eq!(fs::read_to_string(launcher.join("Contents/MacOS/pokopia-launcher")).unwrap(), "new");
+        assert!(!launcher.join("Contents/Resources/stale.txt").exists(), "the old bundle's files do not mix into the new one");
+        assert!(!root.join("README.txt").exists(), "nothing of the package lands beside the app");
+        assert!(with_old(&launcher).join("Contents/Resources/stale.txt").is_file());
+        // undone: the old app is back
+        assert!(undo_all(applied.0).is_empty());
+        assert_eq!(fs::read_to_string(launcher.join("Contents/MacOS/pokopia-launcher")).unwrap(), "old");
+        // done again, and the next start clears the old bundle away
+        let applied = apply(&job, &mut |_, _, _| {});
+        assert!(applied.is_ok());
+        clean_start(&root, &old_files(&launcher, &d.join("game")));
+        assert!(!with_old(&launcher).exists() && launcher.join("Contents/Info.plist").is_file());
+        let _ = fs::remove_dir_all(&d);
     }
 }

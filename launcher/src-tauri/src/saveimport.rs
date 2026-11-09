@@ -139,8 +139,18 @@ pub fn find_sources_here() -> Vec<Source> {
     let env_dir = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
     #[cfg(windows)]
     let (appdata, eden, ryujinx) = (PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default()), env_dir("EDEN_DIR"), env_dir("RYUJINX_DIR"));
+    // macOS: Ryujinx keeps its data in ~/Library/Application Support/Ryujinx (bis/user/save, as elsewhere); Eden, a yuzu fork, in
+    // ~/Library/Application Support/eden, or as yuzu did in the XDG folder ~/.local/share/eden: the first of the two that exists
+    #[cfg(target_os = "macos")]
+    let (appdata, eden, ryujinx) = {
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+        let support = home.join("Library").join("Application Support");
+        let xdg = env_dir("XDG_DATA_HOME").unwrap_or_else(|| home.join(".local").join("share")).join("eden");
+        let eden = [support.join("eden"), xdg].into_iter().find(|d| d.is_dir()).unwrap_or_else(|| support.join("eden"));
+        (support.clone(), env_dir("EDEN_DIR").or(Some(eden)), env_dir("RYUJINX_DIR").or(Some(support.join("Ryujinx"))))
+    };
     // Linux: Eden keeps its data in $XDG_DATA_HOME/eden, Ryujinx in $XDG_CONFIG_HOME/Ryujinx
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     let (appdata, eden, ryujinx) = {
         let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
         let data = env_dir("XDG_DATA_HOME").unwrap_or_else(|| home.join(".local").join("share"));
@@ -365,8 +375,13 @@ pub fn game_running() -> bool {
         .map(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains("pkp.exe"))
         .unwrap_or(false)
 }
+/// macOS: a process named pkp (the native game), also one started without the launcher.
+#[cfg(target_os = "macos")]
+pub fn game_running() -> bool {
+    crate::host::process_running(crate::host::GAME_EXE)
+}
 /// Linux: a process named pkp.exe (Wine names a Windows program's process after its exe), also one Steam started.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn game_running() -> bool {
     fs::read_dir("/proc")
         .map(|rd| rd.flatten().any(|e| fs::read_to_string(e.path().join("comm")).map(|c| c.trim() == "pkp.exe").unwrap_or(false)))

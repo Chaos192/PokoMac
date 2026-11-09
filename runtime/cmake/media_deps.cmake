@@ -7,6 +7,10 @@
 # decoders (NXRT_HAVE_LIBVPX=0) and Switch 2 movies are left out.
 set(NXRT_LIBVPX_ROOT "" CACHE PATH "vcpkg x64-windows-static install with libvpx (include/vpx, lib/vpx.lib); empty: look in the usual places")
 set(_nxrt_vpx_roots "${NXRT_LIBVPX_ROOT}" "C:/vcpkg/installed/x64-windows-static")
+if(APPLE)
+    # macOS: scripts/build_libvpx_mac.sh builds the same libvpx version (static, arm64) into ~/Library/Caches/nxrt/libvpx; Homebrew's also works
+    list(APPEND _nxrt_vpx_roots "$ENV{HOME}/Library/Caches/nxrt/libvpx" "/opt/homebrew" "/usr/local")
+endif()
 if(DEFINED ENV{VCPKG_ROOT})
     list(APPEND _nxrt_vpx_roots "$ENV{VCPKG_ROOT}/installed/x64-windows-static")
 endif()

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- SPDX-License-Identifier: GPL-3.0-or-later
+     macOS only: Tauri merges these keys into the app's Info.plist (Windows and Linux builds never read this file). The game (pkp)
+     runs as the launcher's child, so macOS asks on the launcher's behalf when Link Play reaches the local network. -->
+<plist version="1.0">
+<dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Link Play and the relay host connect to other players' Macs and PCs on your local network.</string>
+</dict>
+</plist>

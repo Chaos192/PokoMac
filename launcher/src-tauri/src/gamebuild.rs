@@ -8,7 +8,9 @@
 //! only if `pkp_build.py --check` says done.json matches the tools this release ships (lifter, main.sites, pkp_rt.lib, ...).
 //! An update extracted over an install leaves the old pkp.exe and done.json behind: the check calls that stale, so Play
 //! asks for Set up again and Set up rebuilds (the old pkp.exe stays until the new one is linked over it).
-//! On Linux the script runs with the Linux Python and Zig that host.rs fetches into `tools/linux`.
+//! On Linux the script runs with the Linux Python and Zig that host.rs fetches into `tools/linux`. On macOS it runs with the macOS ones
+//! (host.rs `native_tools`, outside the read-only app bundle, handed to the script as PKP_ZIG) and links the native `pkp` against
+//! `tools/build/sdk/libpkp_rt.dylib`; host::GAME_EXE and host::RUNTIME_LIB name the files of each system.
 //! Its only crate-local import is host.rs, which has none, so `examples/first_run.rs` can build the two files alone.
 
 use std::fs;
@@ -21,6 +23,9 @@ use std::time::Duration;
 pub struct Tools {
     pub python: PathBuf,
     pub script: PathBuf,
+    /// macOS: the Zig the script gets as PKP_ZIG (its default, tools/macos next to the script, is inside the read-only app)
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub zig: PathBuf,
 }
 
 /// Where setup writes its log lines (the launcher's setup.log); a closure so this file needs no crate-local import.
@@ -69,7 +74,7 @@ static CHECKED: std::sync::Mutex<Option<(CheckKey, Built)>> = std::sync::Mutex::
 
 /// Whether pkp.exe was built by this release's tools (`pkp_build.py --check`, the stamp's only implementation).
 pub fn built_state(game_dir: &Path, tools_dir: &Path) -> Built {
-    let exe = game_dir.join("pkp.exe");
+    let exe = game_dir.join(crate::host::GAME_EXE);
     let done = game_dir.join("build").join("done.json");
     let (Ok(em), Ok(dm)) = (fs::metadata(&exe), fs::metadata(&done)) else {
         return Built::No;
@@ -107,9 +112,12 @@ pub fn find_tools(tools_dir: &Path) -> Result<Tools, String> {
     let python = crate::host::python(tools_dir);
     let script = tools_dir.join("build").join("pkp_build.py");
     let mut missing = Vec::new();
-    for p in [python.clone(), script.clone(), crate::host::zig(tools_dir)]
+    let zig = crate::host::zig(tools_dir);
+    // what the link resolves the runtime's exports against: the import library, or on macOS the dylib itself
+    let rt = if cfg!(target_os = "macos") { "build/sdk/libpkp_rt.dylib" } else { "build/sdk/pkp_rt.lib" };
+    for p in [python.clone(), script.clone(), zig.clone()]
         .into_iter()
-        .chain(["build/sdk/pkp_rt.lib", "build/recomp/nxrecomp/__main__.py"].iter().map(|p| tools_dir.join(p)))
+        .chain([rt, "build/recomp/nxrecomp/__main__.py"].iter().map(|p| tools_dir.join(p)))
     {
         if !p.is_file() {
             missing.push(p.display().to_string());
@@ -118,7 +126,7 @@ pub fn find_tools(tools_dir: &Path) -> Result<Tools, String> {
     if !missing.is_empty() {
         return Err(format!("The game build cannot run, missing: {}. Extract the release zip again so tools/ is complete.", missing.join("; ")));
     }
-    Ok(Tools { python, script })
+    Ok(Tools { python, script, zig })
 }
 
 fn quiet(cmd: &mut Command, idle: bool) {
@@ -141,6 +149,8 @@ pub fn run(job: &Job, tools: &Tools, cancel: &AtomicBool, mut report: impl FnMut
     let mut cmd = crate::host::command(&tools.python);
     cmd.arg("-I").arg(&tools.script).arg("--exefs").arg(&job.exefs).arg("--game").arg(&job.game_dir);
     cmd.args(["--jobs", &job.jobs.max(1).to_string()]);
+    #[cfg(target_os = "macos")]
+    cmd.env("PKP_ZIG", &tools.zig);
     quiet(&mut cmd, job.idle);
     let say = |t: &str| {
         if let Some(f) = &job.log {

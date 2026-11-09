@@ -1,0 +1,33 @@
+Third-party software in the PokoMac package for macOS (PokoMac-<version>-macos-arm64), and what the launcher downloads. None of it
+contains game code or data. Paths are inside PokoMac.app/Contents/Resources/ unless they say otherwise; licence texts are in licenses/.
+
+Shipped in the app:
+- nxrecomp lifter (tools/build/recomp): GPL-3.0-or-later (tools/build/recomp/LICENSE).
+- spirv_harness (tools/spirv_harness), self-contained osx-arm64 .NET publish: built on Ryujinx's shader translator (MIT,
+  LICENSE.Ryujinx.MIT.txt, LICENSE.Ryubing.MIT.txt), with code from SuperMarioWonderRecomp (MIT), Mesa NAK (MIT) and smo-recomp
+  (GPL-3.0); the .NET runtime (MIT, LICENSE.dotnet.MIT.txt, with its THIRD-PARTY-NOTICES.dotnet.txt).
+- The runtime libpkp_rt.dylib (tools/build/sdk and runtime/): GPL-3.0-or-later. What is compiled into it, or what its code comes from,
+  is listed with its licence in THIRD_PARTY_NOTICES.md, with the texts in licenses/: SDL3 (zlib), volk (MIT), VulkanMemoryAllocator
+  (MIT), Vulkan-Headers (Apache-2.0 or MIT), Zstandard (BSD), Dear ImGui (MIT), hidapi (BSD), libvpx 1.16.0 (BSD-3-Clause and its
+  PATENTS grant), astc-encoder (Apache-2.0), bc7enc_rdo, LLVM libc++abi (Apache-2.0 WITH LLVM-exception), the NVN header (MIT), and code
+  after smo-recomp, ScarletNX and ssbu-recomp (GPL-3.0) and yuzu / Eden (GPL-2.0-or-later).
+- Vulkan, from the LunarG Vulkan SDK 1.4.363.1 for macOS (runtime/, copied next to pkp in the game folder), unchanged:
+  - libvulkan.1.dylib, the Khronos Vulkan loader: Apache-2.0 (LICENSE.Vulkan-Loader.txt).
+  - libvulkan_kosmickrisp.dylib, KosmicKrisp (LunarG's Vulkan driver on Metal, part of Mesa): MIT (LICENSE.KosmicKrisp.MIT.txt).
+  - libMoltenVK.dylib, MoltenVK (Vulkan portability driver on Metal): Apache-2.0 (LICENSE.MoltenVK.Apache-2.0.txt).
+  - vulkan/icd.d/*.json, their manifests, rewritten to name the dylib beside the game folder (../../<dylib>).
+  The SDK's own statement is LICENSE.VulkanSDK.txt.
+- DejaVu Sans (runtime/fonts and runtime/assets/fonts): Bitstream Vera licence (LICENSE.DejaVu.txt, and LICENSE-DejaVu.txt beside it).
+- Button prompt icons (runtime/assets/prompts) and keyboard and mouse prompt icons (runtime/assets/kbm_icons): Kenney Input Prompts, CC0
+  (LICENSE-Kenney-InputPrompts.txt in the prompts folder).
+
+Downloaded by the launcher on the first Set up, each pinned by size and SHA-256, into ~/Library/Application Support/PokoMac/tools/macos
+(not shipped in this package; their licences are included here all the same):
+- Python 3.13.16 (python-build-standalone 20261013, aarch64-apple-darwin): PSF License (LICENSE.Python.PSF.txt); the third-party
+  software built into that distribution carries its own notices inside it (python/share, python/lib/python3.13).
+- capstone 5.0.9 (BSD-3-Clause, LICENSE.capstone.txt) and lz4 4.4.5 (BSD-3-Clause, LICENSE.lz4.txt) Python packages: licences also in
+  python/lib/python3.13/site-packages/*.dist-info.
+- Zig 0.17.0 (aarch64-macos): MIT (LICENSE.zig.MIT.txt). The clang, lld, libc++, libunwind and compiler-rt inside it are LLVM projects,
+  Apache-2.0 WITH LLVM-exception; the macOS libc headers it carries keep their own notices in zig/lib/libc.
+
+Not on macOS: FSR 3 and the NVIDIA Streamline / DLSS files of the Windows package (they are Windows and NVIDIA only).

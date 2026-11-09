@@ -167,7 +167,11 @@ std::string parent_dir(const std::string& p) {
 std::string join(const std::string& a, const std::string& b) {
     if (a.empty()) return b;
     const char l = a.back();
+#ifdef _WIN32
     return (l == '\\' || l == '/') ? a + b : a + "\\" + b;
+#else
+    return (l == '\\' || l == '/') ? a + b : a + "/" + b;
+#endif
 }
 
 

@@ -1,263 +1,123 @@
-<h1 align="center">
-  <img src="docs/assets/logo.png" alt="Recompia" width="420">
-</h1>
+<h1 align="center">PokoMac</h1>
 
 <p align="center">
-  <b>Pokémon Pokopia (Switch 2) recompiled to run natively on Windows, with multiplayer support.</b>
+  <b>Pokémon Pokopia (Switch 2) recompiled to run natively on Apple silicon Macs.</b><br>
+  Native arm64, Vulkan over Metal: no emulator, no Wine, no Rosetta.
 </p>
 
 <p align="center">
-  <a href="https://github.com/featureJosh/pokopia-recomp/releases/latest"><img src="https://img.shields.io/github/v/release/featureJosh/pokopia-recomp?label=latest&color=d8b46a&labelColor=1b2740" alt="Latest release"></a>
-  <a href="https://github.com/featureJosh/pokopia-recomp/releases/latest"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FDittobyte%2Fpokopia%2Fbadges%2Flatest.json&label=latest%20downloads&labelColor=1b2740" alt="Latest release downloads"></a>
-  <a href="https://github.com/featureJosh/pokopia-recomp/releases"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FDittobyte%2Fpokopia%2Fbadges%2Fall.json&label=all%20downloads&labelColor=1b2740" alt="All downloads">
-  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FDittobyte%2Fpokopia%2Fbadges%2Fwin64.json&label=Windows%20downloads&labelColor=1b2740" alt="Windows downloads">
-  <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FDittobyte%2Fpokopia%2Fbadges%2Flinux-x64.json&label=Linux%20downloads&labelColor=1b2740" alt="Linux downloads"></a>
-  <a href="https://github.com/featureJosh/pokopia-recomp/releases"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FDittobyte%2Fpokopia%2Fbadges%2Ftesting.json&label=testing&labelColor=1b2740" alt="Latest Testing build"></a>
-  <img src="https://img.shields.io/badge/platform-Windows%2010%2F11-0078d6?logo=windows&logoColor=white&labelColor=1b2740" alt="Platform: Windows 10/11">
-  <img src="https://img.shields.io/badge/platform-Linux%20AppImage-e95420?logo=linux&logoColor=white&labelColor=1b2740" alt="Platform: Linux AppImage">
-  <a href="https://github.com/featureJosh/pokopia-recomp/commits/main"><img src="https://img.shields.io/github/last-commit/featureJosh/pokopia-recomp/main?label=last%20commit&color=58a6ff&labelColor=1b2740" alt="Last commit on main"></a>
-  <a href="https://github.com/featureJosh/pokopia-recomp/commits/testing"><img src="https://img.shields.io/github/last-commit/featureJosh/pokopia-recomp/testing?label=testing%20commit&color=d29922&labelColor=1b2740" alt="Last commit on testing"></a>
-  <a href="https://github.com/featureJosh/pokopia-recomp/issues"><img src="https://img.shields.io/github/issues/featureJosh/pokopia-recomp?label=open%20issues&color=db61a2&labelColor=1b2740" alt="Open issues"></a>
+  <a href="https://github.com/Chaos192/PokoMac/releases/latest"><b>Download</b></a> ·
+  <a href="#install-and-play">Install</a> ·
+  <a href="#common-problems">Help</a> ·
+  <a href="docs/MACOS.md">How it works</a> ·
+  <a href="https://github.com/Chaos192/PokoMac/issues">Issues</a>
 </p>
-
-<p align="center">
-  <a href="https://github.com/featureJosh/pokopia-recomp/releases/latest"><img src="https://img.shields.io/badge/%E2%AC%87_Download-latest_for_Windows-d8b46a?style=for-the-badge&labelColor=1b2740" alt="Download the latest release for Windows"></a>
-  <a href="https://github.com/featureJosh/pokopia-recomp/releases/latest"><img src="https://img.shields.io/badge/%E2%AC%87_Download-latest_for_Linux_(AppImage)-e95420?style=for-the-badge&labelColor=1b2740" alt="Download the latest release for Linux (AppImage)"></a>
-</p>
-
-<p align="center">
-  <b><a href="https://github.com/featureJosh/pokopia-recomp/releases">Releases</a></b> ·
-  <a href="CHANGELOG.md">Changelog</a> ·
-  <a href="CONTRIBUTING.md">Contributing</a> ·
-  <a href="CREDITS.md">Credits</a> ·
-  <a href="https://github.com/xFractals/pokopia-native">Parent: pokopia-native</a> ·
-  <a href="SECURITY.md">Security</a> ·
-  <a href="LEGAL.md">Legal</a> ·
-  <a href="https://github.com/featureJosh/pokopia-recomp/issues">Issues</a> ·
-  <a href="https://discord.gg/gN5g4MtWHr">Discord</a>
-</p>
-
-<!-- i18n-bar:start -->
-<p align="center">
-  <b>English</b> ·
-  <a href="docs/i18n/README.zh-CN.md">简体中文</a> ·
-  <a href="docs/i18n/README.es.md">Español</a> ·
-  <a href="docs/i18n/README.ar.md">العربية</a> ·
-  <a href="docs/i18n/README.hi.md">हिन्दी</a>
-</p>
-<!-- i18n-bar:end -->
 
 > [!IMPORTANT]
-> **No game files are included.** You need your own extracted copy of the game, version **2.0.1a**. This project provides no game files, keys or dumping tools. Not affiliated with Nintendo, The Pokémon Company or Koei Tecmo; Pokémon is a trademark of Nintendo, Creatures Inc. and GAME FREAK inc. (see [LEGAL.md](LEGAL.md)).
-
-> [!NOTE]
-> **Built with AI, supervised by a human.** This project is developed primarily with AI, with me as the supervisor. I have a handful of years of development experience, so it's not all slop. Every commit is reviewed, verified and tested by me before it lands.
+> **No game files are included.** You need your own dump of Pokémon Pokopia, version **2.0.1a** (the update installed). This project
+> provides no game files, keys or dumping tools. Not affiliated with Nintendo, The Pokémon Company or Koei Tecmo; Pokémon is a trademark of
+> Nintendo, Creatures Inc. and GAME FREAK inc. (see [LEGAL.md](LEGAL.md)).
 
 ## Screenshots
 
 <table>
   <tr>
-    <td width="50%"><img src="https://preview.redd.it/my-pokopia-title-screen-everybody-v0-etybucwfo4og1.jpeg?width=1080&crop=smart&auto=webp&s=c8c81f237e117baa364848b26d31364e734e566a" alt="Title screen"><br><sub>Title screen</sub></td>
-    <td width="50%"><img src="https://static0.polygonimages.com/wordpress/wp-content/uploads/2026/03/jlee_260302_1001_pokopia_beach_mountain.jpg" alt="Island gameplay"><br><sub>Building your island</sub></td>
+    <td width="50%"><img src="docs/screenshots/launcher.png" alt="The PokoMac launcher"><br><sub>The launcher</sub></td>
+    <td width="50%"><img src="docs/screenshots/title.png" alt="Title screen on a Mac"><br><sub>Title screen</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="https://oyster.ignimgs.com/mediawiki/apis.ign.com/pokemon-pokopia/7/76/Ign_dev_island_guide_%287%29.jpg" alt="New Aspect Ratios"><br><sub>Play on New Aspect Ratios</sub></td>
-    <td width="50%"><img src="https://static0.polygonimages.com/wordpress/wp-content/uploads/2026/03/pokemon-pokopia-gameshare.jpg?w=1600&h=900&fit=crop" alt="Link Play (screenshot placeholder)"><br><sub>Link Play with a friend</sub></td>
+    <td width="50%"><img src="docs/screenshots/island.png" alt="Playing on the island"><br><sub>On the island</sub></td>
+    <td width="50%"><img src="docs/screenshots/building.png" alt="Building"><br><sub>Building</sub></td>
   </tr>
 </table>
 
-## Features
+## What you need
 
-### Play together (Link Play)
-- **Visit a friend's island, or invite them to yours**, on the same Wi-Fi or over the internet.
-- **Cross-play with [pokopia-native](https://github.com/xFractals/pokopia-native) players**.
-- Set it up in the launcher's **Link Play** page. No files to edit.
-- Step-by-step guide: [Playing together](#playing-together).
+- A Mac with **Apple silicon** (M1 or newer). Intel Macs are not supported.
+- **macOS 14.4** or newer.
+- About **20 GB** free: the build files, the game program and the shader cache.
+- 16 GB of memory is comfortable.
 
-### Import your saves
-- **Already playing on Eden or Ryujinx?** One button in **Settings** finds your save and brings it over. Your emulator's copy isn't touched.
-- **Got a save somewhere else?** Pick its folder (the one with `B00`, `G00` and `S00` inside).
-- **Your current save is never deleted.** It's kept as a backup folder first.
-- If a save can't be written (a full disk, OneDrive or antivirus holding the file), your last good save is kept and the game tells you.
+Nothing else. The first Set up downloads the build tools (Python and Zig, about 100 MB). No Xcode needed.
 
-### Easy setup
-- **Use your dump as it comes:** a folder (with `base` and `updates`) or a single `.nup` file.
-- **Clear messages if something is wrong with your dump:** the wrong game version, a missing update, or files damaged while copying. The launcher tells you what to do.
-- **Checks before it starts:** enough disk space, a working graphics driver, enough memory.
-- **Use fewer cores** keeps your PC usable while it builds. You can pause and carry on later.
-- **Updates are quick:** only the parts that changed are rebuilt.
-- The launcher tells you when a new version is out.
+## Install and play
 
-### Controls
-- **Any controller:** Xbox, PlayStation, Switch Pro and more, with rumble and motion. Buttons follow the Switch layout by default.
-- **Keyboard and mouse.** The mouse also works in menus: click to confirm the highlighted item; scroll or use the arrow keys to move the highlight.
-- **Change any button** on the F1 **Controls** page.
-- **Joy-Con 2 mouse mode** for placing and breaking blocks with a pointer: press the middle mouse button. Change the key in **Settings > Mouse > Mouse Mode Key** or on the F1 **Controls** page.
-- **On-screen button icons match what you're holding:** keyboard, Xbox, PlayStation, Steam Controller or Switch.
-- **Typing your name** works with a controller, mouse or keyboard.
-- **Quit without Alt+F4:** hold Select and Start (View and Menu on an Xbox pad), or use **Quit game** in F1.
-- **Open the F1 menu from a controller:** off by default; set `[overlay] pad` in `controls.ini` (for example `left_shoulder+right_shoulder`). It cannot be the quit combination.
+1. Download `PokoMac-<version>-macos-arm64.zip` from the [latest release](https://github.com/Chaos192/PokoMac/releases/latest), unzip it and
+   move **PokoMac.app** to your Applications folder.
+2. The app is not notarized. The first time, **right-click it and choose Open**, then **Open** again (or System Settings, Privacy &
+   Security, **Open Anyway**).
+3. Pick your dump folder and press **Set up**. It checks your files, recompiles the game for your Mac (about 4 to 10 minutes), then
+   translates the game's shaders (about 10 minutes on an M-series Max, longer on smaller chips). You can pause and continue later.
+4. Press **Play**.
 
-### Steam Deck and handhelds
-- Steam Deck, Legion Go S and other handhelds are recognised: controller icons stay on screen and the picture size suits the screen.
-- 16:10 screens are filled edge to edge, with no black bars.
-- Runs through Proton on SteamOS, with handheld speed-ups (about 26 to 53 fps on a Steam Deck and 55 to 75 fps on a Legion Go S, measured by players).
-- The launcher runs on Linux and SteamOS too: see [Linux, SteamOS and the Steam Deck](#linux-steamos-and-the-steam-deck).
+**F1** opens the settings in the game. The middle mouse button toggles the Joy-Con 2 mouse mode (point and click to place and break blocks).
 
-### Graphics
-- **Play at any resolution**, 4K and above. Lower **Render scale** if it runs slowly.
-- **Quality presets** (Switch 2, High, Ultra) set how far you can see and how sharp textures are.
-- **HDR** on HDR screens.
-- **Window, borderless or full screen.** Choose the monitor, cap the frame rate, show an FPS counter. Alt+Enter switches modes while playing.
-- **Upscalers:** FSR 1 and NVIDIA Image Scaling work.
-- **FSR 3 and DLSS / DLAA are there but don't look good yet** and need rework. Leave them off for now.
-
-### In-game settings
-Press **F1** in the game to change graphics, controls and sound (volume, output device, mute when the window is in the background). Most changes apply straight away.
-
-## Quick start
-
-1. Download the zip from the [latest release](https://github.com/featureJosh/pokopia-recomp/releases/latest) and extract it anywhere.
-2. Run `PokopiaLauncher.exe`. If SmartScreen warns, choose **More info → Run anyway**. Pick your dump folder and press **Set up**: it compiles the game on your PC (about 7 minutes), then builds the shader cache (1 to 2 hours, you can pause and continue later).
-3. Press **Play**.
-
-F1 opens the settings in game. Middle mouse toggles Joy-Con 2 mouse mode (point and click to place and break blocks).
-
-### Linux, SteamOS and the Steam Deck
-
-1. In Steam, install **Proton Experimental** (Library, Tools; on a Steam Deck switch to Desktop Mode first).
-2. Download `PokopiaRecomp-<version>-linux-x64.tar.gz` from the [latest release](https://github.com/featureJosh/pokopia-recomp/releases/latest) and extract it anywhere (for example your home folder).
-3. Run `PokopiaLauncher.AppImage` in that folder (double-click it, or `./PokopiaLauncher.AppImage` in a terminal). Pick your dump folder and press **Set up**: the first time it downloads its build tools (Python and Zig, about 100 MB), compiles the game, then builds the shader cache through Proton. You can pause and continue later.
-4. Press **Play**. The game itself runs through Steam's Proton.
-
-If `PokopiaLauncher.AppImage` does not start on a system without FUSE, run `./PokopiaLauncher.AppImage --appimage-extract-and-run`.
-
-To start the game from Steam (Game Mode on the Deck): in Desktop Mode, **Add a Non-Steam Game**, pick `PokopiaLauncher.AppImage`, and set its launch options to `--play`. More detail, and what was tested, in [launcher/README.md](launcher/README.md#linux-steamos-the-steam-deck-bazzite-other-distributions).
-
-## Mods and translations
-
-You can layer a folder of replacement files (a text or texture mod, a translation) over the game without touching the game dump: **Settings > Game > Mods**, or `romfs_mod` under `[fs]` in `pkp.ini`. Nothing is bundled with this project; get a mod from its author.
-
-The folder you choose must look like the game's own `romfs`: the same files and folders, starting at the top level. Its files replace the game's files with the same path, folders are merged, and files that only the mod has are served as well.
+Your dump folder:
 
 ```text
-MyMod/                       <- choose this folder in Settings > Game > Mods
-├── LD_C0_R.BIN              <- same path as in the game's romfs
-├── LI_C0_R.IDX
-└── motor_asset_re/
-    └── ...
+Pokopia dump/
+├── aoc/                      <- add-on content (DLC), if you have it: installed automatically
+│   └── 0400A3A01EE4D001/
+│       └── romfs/
+├── base/
+│   └── exefs/
+└── updates/
+    └── 655360/
+        ├── exefs/
+        └── romfs/
 ```
 
-If a download has an outer folder (for example `2.0.1/romfs/...`), choose the inner `romfs` folder, the one that contains `LD_C0_R.BIN`, not the outer one. If the folder level is wrong, `pkp.log` says that none of the mod's files replaces a game file. Mods that replace files containing shaders are not supported.
+A single `.nup` file works too.
 
-### Mods e traduções (Português do Brasil)
+## Features
 
-Você pode colocar uma pasta de arquivos de substituição (um mod de texto ou de texturas, uma tradução) por cima do jogo sem mexer no dump: **Settings > Game > Mods**, ou `romfs_mod` em `[fs]` no `pkp.ini`. Este projeto não inclui nenhum mod; peça ao autor do mod.
-
-A pasta escolhida precisa ter a mesma estrutura da pasta `romfs` do jogo: os mesmos arquivos e pastas, a partir do nível mais alto. Os arquivos dela substituem os arquivos do jogo com o mesmo caminho, as pastas são mescladas, e arquivos que só existem no mod também são usados.
-
-Se o download tiver uma pasta externa (por exemplo `2.0.1/romfs/...`), escolha a pasta `romfs` de dentro, a que contém `LD_C0_R.BIN`, e não a pasta externa. Se o nível da pasta estiver errado, o `pkp.log` avisa que nenhum arquivo do mod substitui um arquivo do jogo. Mods que substituem arquivos com shaders não são suportados.
-
-## Updating from an older version
-
-Your saves, settings and shaders stay.
-
-**From 0.7.5 on:** press **Update** on Home (or in Settings > About). The launcher downloads the new release, checks it, swaps its own files and restarts.
-
-**From 0.7.0 or older:** download the new zip (Windows) or `PokopiaRecomp-<version>-linux-x64.tar.gz` (Linux) from the [latest release](https://github.com/featureJosh/pokopia-recomp/releases/latest), close the game and the launcher, and extract it over your install, into the same folder. It holds no saves, settings, shader cache or game files, so nothing of yours is replaced.
-
-**If Home shows Finish update after an update:** that release changed the game code, so the launcher builds the game program (`pkp.exe`) again from your game files. It also happens when you skipped such a release earlier and update later. This is a short wait, about 7 minutes on most PCs and a bit longer on a handheld, because your shaders and saves are kept. It is not the long first setup: shaders are only translated again when the release notes say so, and then only the ones that changed. The old `pkp.exe` stays until the new one is ready.
-
-Copy the `save` folder somewhere first if you want a backup. A save that a newer version wrote may not load in an older one.
-
-## Playing together
-
-Link Play puts several players on one island. Cross-play works with pokopia-native players on game version **2.0.1**. Players on game 1.0.5 cannot join.
-
-**What changed.** Link Play now speaks pokopia-native's co-op protocol. It does not work with earlier Link Play builds of this port, so everyone updates to this release. (The launcher keeps the old protocol under **Advanced**, for a session where everyone still has an old build.)
-
-**Each player needs their own save.** A copy of someone else's save cannot join its original.
-
-**Set it up.** In the launcher, open **Link Play** and pick one:
-
-| Choice | Use it for |
-|---|---|
-| Alone | No Link Play. |
-| Automatic (LAN) | The default. Same Wi-Fi or network: the host is found by itself. |
-| Visit by address | Join one host by its address, for example `192.0.2.10`. The host's Link Play page shows it. |
-| Internet | Play through a relay with a room code. |
-
-Changes apply the next time the game starts.
-
-**In the game**, open the PC in your first house, then **Link Play** (it unlocks after Environment Level 2 in the Withered Wasteland) and pick **Local connection**. (**Online connection** is Nintendo's own service and does not work here.) The host picks **Invite Others to Visit**, the others **Visit a Friend**.
-
-**Same network.** Everyone picks **Automatic (LAN)**. Steam Deck and other Proton or Linux devices find hosts and are found too, on whatever network they are on. If the host does not show up, the visitor picks **Visit by address** and types the host's LAN address. Cafe, hotel and guest Wi-Fi often keeps devices apart: there, play over the internet instead.
-
-**Over the internet.** Everyone picks **Internet** and goes through a relay:
-- The host picks **I host**. The page shows a room code. Give the visitors the relay address and the code. **Copy** and **New code** are on the page.
-- A visitor picks **I visit** and types the relay address and the code.
-- To run a relay yourself, press **Run a relay here** on the host's Link Play page (it works while the launcher stays open), or run `PokopiaLauncher --host` on a server. Any pokopia-native co-op relay works too.
-- Without a relay, leave the relay address empty on the host and forward TCP and UDP **47600** on the router. Visitors use **Visit by address** with the host's public address.
-- The relay checks the room code but does not encrypt the game's traffic.
-
-**Ports and firewall.** The first time you host, Windows Firewall asks about `pkp.exe`: allow **Private networks**. Your network must be Private too (Settings, Network & internet, your connection, Network profile type: **Private**).
-
-| Port | Who | Protocol |
-|---|---|---|
-| 47600 | the host | TCP and UDP |
-| 47610 | the relay | TCP, and UDP for the faster path |
-
-**Interact everywhere and Story co-op (experimental, off by default).** In the story areas the game puts visitors in Spectator Mode. **Interact everywhere** lets them use moves and items, pick up, place and build there. **Story co-op** lets them talk to the story characters, and turns Interact everywhere on. Every player needs the same two switches, or the host is not listed. Only the host's save keeps the story progress.
-
-Link Play: joining and walking around together work. See [docs/multiplayer](docs/multiplayer/README.md) for how it works and the `pkp.ini` keys.
-
-## Common problems
-
-- **The window is black, or the game stutters a lot, on the first launch.** The game makes some shaders while it runs. The launcher translates the ones it has seen before every start and again after you quit, so the first runs are rough and later ones are better. Give it a minute and keep playing. If the setup stopped half way, open **Game files** and press **Set up** to continue. It keeps finished work.
-- **The launcher says the game files are from an older version, or that the update is missing.** This release needs version 2.0.1a. Dump the game again with the update installed. The base game alone is not enough.
-- **The launcher says it found no usable game files, or Set up says a file does not match.** Pick the folder that holds `base` and `updates` (for example `Pokopia_v2.0.1a`). Each needs `exefs` (`main`, `sdk`, `subsdk0`, `rtld`, `main.npdm`) and `romfs`. A file that does not match is damaged. Dump it again, or copy it again.
-- **The launcher says the game data (romfs) is incomplete, or the game closed at start with "pkp.exe exited with code 4".** Your dumping tool wrote the update's `romfs` without the base game's files under it (an update only holds the files it changes). Keep the base game in the same dump (`base` next to `updates`, each with `exefs` and `romfs`) and pick the folder that holds both: the launcher adds the missing files from `base` itself. Then press **Set up** once more. Otherwise dump the game again with the update merged into the base game.
-- **The launcher says the dump was copied in text mode.** You copied it with FTP in text mode, which damages `main`, `sdk` and `subsdk0`. Copy the `exefs` and `romfs` folders again with the transfer type set to **Binary** (FileZilla: Transfer, Transfer type, Binary).
-- **Your dump is one file** (`.nsp`, `.xci`). The launcher takes the game as folders, or as a `.nup`. Extract the `.nsp` or `.xci` to folders with your dumping tool.
-- **Setup stops with an error about a file that cannot be opened or removed.** Put the folder somewhere plain, like `C:\Pokopia`, not in a folder that OneDrive syncs. Your antivirus may be scanning the files it is building: wait for it, or allow the folder. **Open setup log** shows where it stopped.
-- **Set up warns before it starts.** It checks free disk space (about 14 GB with packed shader files, the default, or about 31 GB with loose ones), Vulkan, memory and the processor first. On an Intel 13th or 14th generation desktop CPU, update the BIOS before you set up: without Intel's fix these CPUs can crash under long full load. If the PC gets hot or hard to use while it builds, tick **Use fewer cores**.
-- **Low frame rate, or a blurry picture.** The picture size is fixed when the game starts. It is the size of the window or screen at that moment (**Settings**, **Display**).
-  - Start in **Borderless** on a 4K screen and the game draws at 4K. That is heavy. Lower **Render scale**.
-  - Start **Windowed** (1280x720 by default) and press Alt+Enter, and the picture stays 720p, scaled up. Set **Window mode** before you press **Play**.
-  - Set **Frame rate limit** to what your screen can show.
-- **Link Play: the visitor cannot find the host.** Pick **Visit by address** and type the host's address (the host's Link Play page shows it). Check that the host started the game and picked **Invite Others to Visit**, that Windows Firewall allows `pkp.exe` on Private networks, and that the network is Private. Cafe, hotel and guest Wi-Fi that keeps devices apart blocks LAN play for everyone: use **Internet** with a relay and a room code. Over the internet, check the relay address and the room code. Changes on the Link Play page apply the next time the game starts.
-- **Link Play: the connection is refused.** The players do not match. Everyone needs game 2.0.1, the same release (or pokopia-native for cross-play), and the same mods and the same **Interact everywhere** and **Story co-op** switches.
-- **Link Play: "Communication error" (9005) when you visit.** You are both playing copies of the same save, so both have the same player ID. Each player needs their own save.
-- **The controller is not detected.** Open the game with F1 and look at the **Gamepad** line on the Controls page. It says "No gamepad open" when the game sees none. Connect it before you press **Play**, then try the other cable or port. Close other programs that may be holding the pad.
-
-If it is none of these, see [Reporting problems](#reporting-problems).
+- **Native on Apple silicon.** The game's code is recompiled for your Mac's processor on your Mac; graphics run on Vulkan over Metal
+  (KosmicKrisp by default, MoltenVK as an option: `[gfx] vulkan_driver = moltenvk` in `pkp.ini`).
+- **Any resolution**, Retina included, with **HDR** on XDR and HDR displays (EDR).
+- **Controllers:** PlayStation (DualSense, DualShock 4), Xbox, Switch Pro and more, with rumble and motion; on-screen button icons match
+  the pad you hold. **Keyboard and mouse** too, with the mouse working in menus. Change any button on the F1 **Controls** page.
+- **Link Play:** visit friends' islands on the same network or over the internet, with Mac, Windows, Linux and pokopia-native players.
+- **Add-on content** from your own dump, **save import** from Ryujinx or Eden, automatic save backups.
+- **Settings in the game** (F1): graphics, controls and sound, most changes at once. Upscaling with FSR 1 or NVIDIA Image Scaling.
+- **Updates** from this repository's releases, from the launcher.
 
 ## Where your saves, logs and settings are
 
-All of these are in the game folder: the folder with `PokopiaLauncher.exe` and `pkp.exe`, unless you chose another one in **Settings**, **Game folder**.
-
 | What | Where |
 |---|---|
-| Saves | `save` (**Settings** can point it elsewhere: **Save folder**) |
-| Settings | `pkp.ini` and `controls.ini` (F1 in game writes `controls.ini`) |
-| Log | `pkp.log`, written on every start from the launcher. A crash also writes `pkp_crash.txt`, `pkp_freeze.txt` or `pkp_fatal.txt`. |
-| Translated shaders | `shader_cache` (about 26 GB) |
-| Build files | `build` (the setup's work folder) |
-| Unpacked `.nup` | `nup_dump`, if you picked a `.nup` (its add-ons, if any, in `nup_dump/aoc`) |
-| Launcher settings | `%APPDATA%\org.pkp-recomp.launcher\launcher.json` (your dump folder and game folder) |
+| The game folder | `~/Library/Application Support/PokoMac` (Settings can choose another one) |
+| Saves | `save` in the game folder |
+| Settings | `pkp.ini` and `controls.ini` in the game folder |
+| Log | `pkp.log` in the game folder (a crash also writes `pkp_crash.txt`) |
+| Translated shaders | `shader_cache` in the game folder |
+| Launcher settings | `~/Library/Application Support/io.github.chaos192.pokomac/launcher.json` |
 
 Never attach game files, the `build` or `shader_cache` folders, or saves to an issue. `pkp.log` is enough.
 
-## Community
+## Common problems
 
-Questions, bug help, testing and chat: join the [Recompia Discord](https://discord.gg/gN5g4MtWHr). The launcher also has a **Join Discord** button under Settings > About > Community. Bugs that need a fix are still reported on [GitHub](https://github.com/featureJosh/pokopia-recomp/issues/new/choose).
+- **"PokoMac can't be opened" / "is damaged".** The app is not notarized: right-click, **Open**. If macOS still refuses, run
+  `xattr -dr com.apple.quarantine /Applications/PokoMac.app` in Terminal.
+- **The launcher says the game files are from an older version, or that the update is missing.** This needs version 2.0.1a. Dump the game
+  again with the update installed; the base game alone is not enough.
+- **The controller does nothing.** Connect it before you press Play, then check the F1 **Controls** page (the Gamepad line). Bluetooth
+  pads must be paired in System Settings first.
+- **Some things are missing or the first minutes stutter.** The game builds some shaders while it runs: the launcher translates them
+  before every start and after you quit, so the first runs are rough and later ones are smooth.
+- **Link Play: nobody finds you.** Allow PokoMac on the local network when macOS asks (System Settings, Privacy & Security, Local
+  Network), and check the macOS firewall.
 
-## Reporting problems
+If it is none of these, [open an issue](https://github.com/Chaos192/PokoMac/issues) with `pkp.log`, your Mac model and your macOS version.
 
-[Open an issue](https://github.com/featureJosh/pokopia-recomp/issues/new/choose) with `pkp.log` from the session where it happened, your GPU and your Windows version (on Linux: your distribution, the Proton version and the device).
+## Building from source
 
-**Linux, SteamOS and Linux handhelds:** I (Jerban) look after the Linux side, so Linux bugs get fixed and sent out quickly through the one-click updater. Sorry for the frequent updates, and thanks for your patience. Please keep reporting Linux bugs, always with your logs: `pkp.log`, and `setup.log` for problems with Set up (see [Where your saves, logs and settings are](#where-your-saves-logs-and-settings-are)). Anything outside Linux is reviewed by Josh first.
+See [docs/MACOS.md](docs/MACOS.md#building-from-source-on-a-mac).
+
+## Credits
+
+Based on **[Recompia](https://github.com/Dittobyte/Recompia) by Dittobyte**. The licences of the third-party code PokoMac contains
+ship with every release (`licenses/`) and are listed in [CREDITS.md](CREDITS.md).
 
 ## License
 
-GPL-3.0. Third-party code keeps its own licence, see [CREDITS.md](CREDITS.md).
+GPL-3.0, like the project it is based on. Third-party code keeps its own licence.

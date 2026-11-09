@@ -61,7 +61,7 @@ const CACHE_FILES: [&str; 4] = ["pipeline_cache.bin", "pipeline_keys.bin", "shad
 /// launcher.json keeps the places the launcher needs; everything else is a preference and goes back to its default.
 const LAUNCHER_KEEP: [&str; 3] = ["dump_dir", "game_dir", "channel"];
 /// Files whose old copies updates set aside (`pkp_rt.dll.0.7.6`); the file with the plain name is the current one and is never listed.
-const VERSIONED: [&str; 4] = ["pkp_rt.dll", "PokopiaLauncher.AppImage", "pkp.exe", "PokopiaLauncher.exe"];
+const VERSIONED: [&str; 4] = ["pkp_rt.dll", "PokoMac.AppImage", "pkp.exe", "PokoMac.exe"];
 /// Never a target of any action (a unit test checks that no plan names one).
 pub const PROTECTED: [&str; 11] = ["save", "save-backups", "rollback-backups", "profiles.json", "shader_cache", "build", "nup_dump", ".update", "tools", "pkp.exe", "pkp_rt.dll"];
 
@@ -447,7 +447,7 @@ mod tests {
         for f in CACHE_FILES {
             fs::write(game.join(f), b"cache").unwrap();
         }
-        for f in ["pkp_rt.dll.0.7.6", "PokopiaLauncher.AppImage.0.7.6", "pkp_rt.dll", "pkp.exe", "PokopiaLauncher.AppImage", "pkp.log.prev", "pkp_rt.dll.bak"] {
+        for f in ["pkp_rt.dll.0.7.6", "PokoMac.AppImage.0.7.6", "pkp_rt.dll", "pkp.exe", "PokoMac.AppImage", "pkp.log.prev", "pkp_rt.dll.bak"] {
             fs::write(game.join(f), f.as_bytes()).unwrap();
         }
         fs::write(game.join("profiles.json"), "{\"active\":\"default\"}").unwrap();
@@ -512,10 +512,10 @@ mod tests {
 
     #[test]
     fn only_old_versioned_copies_count_as_leftovers() {
-        for yes in ["pkp_rt.dll.0.7.6", "PokopiaLauncher.AppImage.0.7.9", "pkp.exe.0.7.5", "PokopiaLauncher.exe.1.0"] {
+        for yes in ["pkp_rt.dll.0.7.6", "PokoMac.AppImage.0.7.9", "pkp.exe.0.7.5", "PokoMac.exe.1.0"] {
             assert!(is_old_copy(yes), "{}", yes);
         }
-        for no in ["pkp_rt.dll", "PokopiaLauncher.AppImage", "pkp.exe", "pkp_rt.dll.bak", "pkp.log.prev", "pkp_rt.dll.", "save", "other.dll.0.7.6", ""] {
+        for no in ["pkp_rt.dll", "PokoMac.AppImage", "pkp.exe", "pkp_rt.dll.bak", "pkp.log.prev", "pkp_rt.dll.", "save", "other.dll.0.7.6", ""] {
             assert!(!is_old_copy(no), "{}", no);
         }
     }
@@ -525,7 +525,7 @@ mod tests {
         let (game, cfg) = install();
         let plan = plan(&game, &cfg, &all("")).unwrap();
         let files: Vec<&str> = plan.changes.iter().map(|c| c.file.as_str()).collect();
-        for want in ["pkp.ini", "controls.ini", "launcher.json", "pipeline_cache.bin", "pipeline_keys.bin", "shader_order.txt", "pkp_freeze.txt", "pkp_rt.dll.0.7.6", "PokopiaLauncher.AppImage.0.7.6"] {
+        for want in ["pkp.ini", "controls.ini", "launcher.json", "pipeline_cache.bin", "pipeline_keys.bin", "shader_order.txt", "pkp_freeze.txt", "pkp_rt.dll.0.7.6", "PokoMac.AppImage.0.7.6"] {
             assert!(files.contains(&want), "{} missing from {:?}", want, files);
         }
         assert_eq!(files.len(), 9, "{:?}", files);
@@ -549,10 +549,10 @@ mod tests {
             assert_eq!(snapshot(&game.join(d)), snap, "{} changed", d);
         }
         assert_eq!(fs::read(game.join("profiles.json")).unwrap(), profiles);
-        for keep in ["pkp.exe", "pkp_rt.dll", "PokopiaLauncher.AppImage", "pkp.log.prev", "pkp_rt.dll.bak"] {
+        for keep in ["pkp.exe", "pkp_rt.dll", "PokoMac.AppImage", "pkp.log.prev", "pkp_rt.dll.bak"] {
             assert!(game.join(keep).is_file(), "{} must stay", keep);
         }
-        for gone in ["controls.ini", "pipeline_cache.bin", "pkp_rt.dll.0.7.6", "PokopiaLauncher.AppImage.0.7.6"] {
+        for gone in ["controls.ini", "pipeline_cache.bin", "pkp_rt.dll.0.7.6", "PokoMac.AppImage.0.7.6"] {
             assert!(!game.join(gone).exists(), "{} should be gone", gone);
         }
         assert_eq!(fs::read_to_string(game.join("pkp.ini")).unwrap(), reset_ini_text(INI));

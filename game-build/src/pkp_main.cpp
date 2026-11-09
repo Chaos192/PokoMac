@@ -125,7 +125,7 @@ void check_romfs() {
     const nxrt::services::RomfsSummary r = nxrt::services::romfs_summary();
     if (!r.ok) {
         const std::string msg = "The game data (RomFS) cannot be read: " + r.error +
-                                ". Choose your game files again in the Pokopia launcher (or set [fs] romfs in pkp.ini).";
+                                ". Choose your game files again in the PokoMac launcher (or set [fs] romfs in pkp.ini).";
         die("%s", msg.c_str());
     }
     if (r.files >= gi.romfs_min_files && r.bytes >= gi.romfs_min_bytes) return;
@@ -134,7 +134,7 @@ void check_romfs() {
     std::snprintf(msg, sizeof msg,
                   "Your game data is incomplete, so %s cannot start: the RomFS in %s%s%s has %u files (%.2f GB), version %s has %u (%.2f GB).\n\n"
                   "This happens when the update is dumped without the base game's files under it (an update only holds the files it changes), "
-                  "or when a copy of the romfs folder stopped early. Choose your game files again in the Pokopia launcher: with the base game "
+                  "or when a copy of the romfs folder stopped early. Choose your game files again in the PokoMac launcher: with the base game "
                   "in the same dump (base/romfs next to updates/) it adds the missing files itself. Otherwise dump the game again with the "
                   "update merged into the base game.",
                   gi.short_title, nxrt::services::romfs_dir().c_str(), base.empty() ? "" : " over ", base.c_str(), r.files,
@@ -393,7 +393,7 @@ int main(int argc, char** argv) {
     if (!exefs_given) exefs = nxrt::config_get_str("fs", "exefs", installed ? "exefs" : exefs.c_str());
     nxrt::config_set("fs", "exefs", exefs.c_str());     // the one in use, for the About page
     nxrt::config_set("process", "program_id", "0x0400A3A01EE4C000");     // GetInfo(ProgramId); an ini value or the environment still wins
-    NXLOG_I("boot", "pkp %s (Pokémon Pokopia PC port)", PKP_VERSION);
+    NXLOG_I("boot", "pkp %s (PokoMac)", PKP_VERSION);
     NXLOG_I("boot", "Pokémon Pokopia %s: exefs '%s'", nxrt::game::info().version, exefs.c_str());
 
     if (prepare) return prepare_shaders_main(prepare_if_needed, prepare_threads, prepare_programs);
@@ -479,7 +479,7 @@ int main(int argc, char** argv) {
             m = nxrt::module_load_nso_memory(bytes.data(), bytes.size(), lo, &err);
         } else {
             if (!file_exists(widen_utf8(path)))
-                die("The game files were not found (%s). Choose your game files in the Pokopia launcher (or set [fs] exefs in pkp.ini), then start the game again.", path.c_str());
+                die("The game files were not found (%s). Choose your game files in the PokoMac launcher (or set [fs] exefs in pkp.ini), then start the game again.", path.c_str());
             m = nxrt::module_load_nso_file(path.c_str(), lo, &err);
         }
         if (!m) die("cannot load %s: %s", path.c_str(), err.c_str());

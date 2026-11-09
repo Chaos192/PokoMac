@@ -1,4 +1,4 @@
-# Pokopia Launcher
+# PokoMac launcher
 
 Tauri 2 launcher for the Pokopia PC port (`pkp.exe`). It ships no game files and never changes yours. It reads the game
 files you extracted from your own copy, writes `pkp.ini` next to `pkp.exe` and builds the shader cache from your romfs.
@@ -34,7 +34,7 @@ files you extracted from your own copy, writes `pkp.ini` next to `pkp.exe` and b
    next to it makes its folder the working directory, and every path comes from the ini (relative paths start there).
 
 `release\Play.bat` starts the game the same way without the launcher (after setup).
-`PokopiaLauncher --play [--game <folder>]` does what Play does without the window (it also prepares the run-time shaders
+`PokoMac --play [--game <folder>]` does what Play does without the window (it also prepares the run-time shaders
 before the start and translates the new ones after it) and waits for the game: for a Steam, Sunshine or desktop shortcut.
 The game folder is the launcher's own folder unless `--game` names another.
 
@@ -55,7 +55,7 @@ The launcher looks for its tools in `tools\` next to its own exe. A release fold
 
 ```
 pkp.exe                     the game (game-build, -Release)
-PokopiaLauncher.exe         this launcher (npm run tauri build)
+PokoMac.exe         this launcher (npm run tauri build)
 Play.bat                    release\Play.bat (optional)
 tools\
   spirv_harness\            self-contained publish of nx tools/shaders/harness:
@@ -74,8 +74,8 @@ If a file is missing, setup stops and names it. `pkp.exe` can live in another fo
 
 The launcher also builds as a native Linux program (`npm run tauri build -- --no-bundle` on Linux, or an AppImage with
 `--bundles appimage`). Tauri draws it with WebKitGTK there, so it needs no WebView2, which Proton lacks (the Windows launcher
-does not start under Proton). Releases ship it as `PokopiaRecomp-<version>-linux-x64.tar.gz`: the Windows package with
-`PokopiaLauncher.AppImage` in place of `PokopiaLauncher.exe` (built by the `linux` job of `.github/workflows/release.yml`). A
+does not start under Proton). Releases ship it as `PokoMac-<version>-linux-x64.tar.gz`: the Windows package with
+`PokoMac.AppImage` in place of `PokoMac.exe` (built by the `linux` job of `.github/workflows/release.yml`). A
 build of your own goes in the release folder next to `tools/`. The game stays the Windows
 `pkp.exe`; what differs on Linux is in `src-tauri/src/host.rs`:
 
@@ -84,12 +84,12 @@ build of your own goes in the release folder next to `tools/`. The game stays th
   `pkp_build.py` compiles with that Zig and reads free memory from `/proc/meminfo` there.
 - **Proton:** the shader translator and `pkp.exe` (the hidden first run and Play) run through Steam's Proton Experimental,
   else the newest Proton N.N Steam installed, inside the Steam Linux Runtime its `toolmanifest.vdf` asks for, as Steam starts a
-  game, with the prefix in `~/.local/share/pokopia-recomp/proton`. `PKP_PROTON=<folder>` picks another Proton build. Without
+  game, with the prefix in `~/.local/share/pokomac/proton`. `PKP_PROTON=<folder>` picks another Proton build. Without
   Steam: `umu-run`, then `wine`. Paths handed to them are `Z:\...`. Linux translates shaders in chunks of 5000 (every run also
   starts Proton); Pause kills the tool's process group, Proton's wine processes included; the hidden first run is stopped if it
   is still going 4 minutes after its 60 s.
   Every Proton run gets GPU driver shader caches of the game's own that are never trimmed
-  (`~/.local/share/pokopia-recomp/shadercache/{nvidia,mesa}`), as Steam sets them up for the games it starts.
+  (`~/.local/share/pokomac/shadercache/{nvidia,mesa}`), as Steam sets them up for the games it starts.
 - **The checks before Set up** read statvfs, `/proc` and `libvulkan.so.1`, and Set up refuses to start without Proton (it says
   so before the build, not after it).
 - **Desktop:** Link Play lists addresses from getifaddrs and `/proc/net/route` (Tailscale and ZeroTier as overlays; bridges,
@@ -104,6 +104,38 @@ build of your own goes in the release folder next to `tools/`. The game stays th
 Tested on Bazzite 45 (Ryzen 9 9900X, 16 GB, RTX 4070 Ti, Proton Experimental in the Steam Linux Runtime 4), end to end with a
 2.0.1 dump: Set up built pkp.exe in 12 minutes, translated the 99,012 shaders in 17 minutes (also paused and continued in the
 middle), the hidden first run collected 212 shaders, and Play ran the game; from the native binary and from the AppImage.
+
+## macOS (Apple silicon, macOS 14.4 or newer)
+
+On macOS everything is native: the runtime is `libpkp_rt.dylib`, Set up links the game as the arm64 program `pkp`, and the shader
+translator is an osx-arm64 build, so nothing runs through Wine or Proton (`src-tauri/src/host.rs`). The launcher is
+`PokoMac.app` (`npm run tauri build -- --bundles app`; `src-tauri/tauri.macos.conf.json` adds the bundle settings: ad hoc
+signature, LSMinimumSystemVersion 14.4, `icons/icon.icns`). The app must stay as it was signed, so nothing is ever written into it:
+
+- **In the app** (`Contents/Resources`, read only): `tools/` as in the Windows package (`build/` with pkp_build.py, the lifter and
+  `sdk/libpkp_rt.dylib`; `spirv_harness/spirv_harness`; `shaders/extract_corpus.py`) and `runtime/`, the files the game needs
+  beside it: `libpkp_rt.dylib`, the Vulkan loader `libvulkan.1.dylib`, the drivers `libvulkan_kosmickrisp.dylib` (default) and
+  `libMoltenVK.dylib` with their manifests in `vulkan/icd.d/` (library_path `../../<dylib>`), `fonts/` and `assets/`.
+- **Game folder**: `~/Library/Application Support/PokoMac` unless Settings names another. Before every run (Play, `--play`, the
+  hidden first run) the launcher copies `runtime/` into it, file by file when missing or different, each written beside its target
+  and renamed over it, so an updated app refreshes it. The runtime picks the Vulkan driver itself (VK_DRIVER_FILES is left to the
+  player's environment).
+- **Build tools**: the first Set up downloads Python 3.13 (python-build-standalone, aarch64-apple-darwin) with the macOS arm64 lz4
+  and capstone wheels, and Zig 0.17.0 (aarch64-macos), into `~/Library/Application Support/PokoMac/tools/macos`, each pinned by size
+  and SHA-256 as on Linux; pkp_build.py gets that Zig as `PKP_ZIG`. A launcher run outside a bundle (cargo run) keeps them in
+  `tools/macos` next to its own `tools/`.
+- **The checks before Set up** read the free space (statvfs), the RAM, the processor and the macOS version (sysctl): macOS 14.4 or
+  newer and Apple silicon are required; Vulkan is the app's own runtime, so its files are checked instead of a driver.
+- **Desktop**: save import looks in `~/Library/Application Support/Ryujinx` and `~/Library/Application Support/eden` (or
+  `~/.local/share/eden`); Steam's shortcuts in `~/Library/Application Support/Steam`; files and links open with `open`; Link Play
+  reads the default route from `route` and the hardware ports from `networksetup`; DLSS is not offered (no NVIDIA GPU). A crash ends
+  `pkp` with a signal, which the message after the game names.
+- **Updates**: the package is `PokoMac-<version>-macos-arm64.zip`; the in-app update replaces `PokoMac.app` as a
+  whole (the old one becomes `PokoMac.app.old` until the next start) and starts the new one with `open`.
+- **Release**: `game-build/scripts/make-release-mac.sh` assembles the package from the built app, `build/mac/libpkp_rt.dylib`, the
+  osx-arm64 translator (`tools/shaders/scripts/setup_ryujinx.sh`, then `dotnet publish -c Release -r osx-arm64 --self-contained true
+  tools/shaders/harness/SpirvHarness.csproj`) and the Vulkan SDK, signs the app again ad hoc and zips it. Players open an ad hoc
+  signed app with right-click, Open the first time.
 
 ## Development
 

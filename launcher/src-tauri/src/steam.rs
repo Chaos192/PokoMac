@@ -1,4 +1,4 @@
-//! Add to Steam: puts the launcher into Steam as a Non-Steam Game ("Recompia", or "Recompia (Testing)" on the Testing channel) with the
+//! Add to Steam: puts the launcher into Steam as a Non-Steam Game ("PokoMac", or "PokoMac (Testing)" on the Testing channel) with the
 //! launch option `--play`, and copies the artwork into Steam's `grid` folder, so Game Mode and Big Picture show it without a search.
 //!
 //! Files (the app id rule and the file layout are the ones Steam ROM Manager uses):
@@ -6,7 +6,7 @@
 //!    memory and writes it when it closes, so it is only edited while Steam is not running.
 //!  * `<Steam>/userdata/<account>/config/grid/<id>.png` (wide), `<id>p.png` (portrait), `<id>_hero.png`, `<id>_logo.png`, `<id>_icon.png`,
 //!    where `<id>` is the short app id: the CRC-32 of the quoted exe path followed by the name, with the top bit set.
-//! The old file is copied to `shortcuts.vdf.recompia-backup` before the first change and that copy is kept (never overwritten, so it stays the
+//! The old file is copied to `shortcuts.vdf.pokomac-backup` before the first change and that copy is kept (never overwritten, so it stays the
 //! file the user had). Only our own entry and our own artwork are added,
 //! replaced or removed; other shortcuts are kept as they are (unknown fields too).
 use std::fs;
@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-// ---- the artwork, embedded (the grids and hero are Koi's illustration with the wordmark; the icons are the launcher's: the R on a leaf, and the hammer R on Testing) ----
+// ---- the artwork, embedded (made by launcher/scripts/brand/render.mjs: the grids are the launcher's island picture with the PokoMac wordmark, the hero the picture alone, the icons the PokoMac mark: sunrise colours, sea colours on Testing) ----
 const WIDE: &[u8] = include_bytes!("../assets/steam/grid_wide.png");
 const PORTRAIT: &[u8] = include_bytes!("../assets/steam/grid_portrait.png");
 const HERO: &[u8] = include_bytes!("../assets/steam/hero.png");
@@ -231,6 +231,9 @@ fn roots() -> Vec<PathBuf> {
         v.push(home.join(".local/share/Steam"));
         v.push(home.join(".steam/steam"));
         v.push(home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam"));
+        // macOS: Steam keeps userdata/ in its Application Support folder
+        #[cfg(target_os = "macos")]
+        v.push(home.join("Library/Application Support/Steam"));
     }
     #[cfg(windows)]
     {
@@ -300,7 +303,12 @@ fn steam_running() -> bool {
             .map(|o| String::from_utf8_lossy(&o.stdout).to_ascii_lowercase().contains("steam.exe"))
             .unwrap_or(false)
     }
-    #[cfg(not(any(target_os = "linux", windows)))]
+    // macOS: Steam's client process is steam_osx
+    #[cfg(target_os = "macos")]
+    {
+        crate::host::process_running("steam_osx")
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         false
     }
@@ -334,7 +342,7 @@ fn art_bytes(kind: &str, testing: bool) -> &'static [u8] {
 }
 
 fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
-    let tmp = path.with_extension("recompia-tmp");
+    let tmp = path.with_extension("pokomac-tmp");
     fs::write(&tmp, data).map_err(|e| format!("could not write {}: {e}", path.display()))?;
     fs::rename(&tmp, path).map_err(|e| format!("could not replace {}: {e}", path.display()))
 }
@@ -350,7 +358,7 @@ fn load_root(file: &Path) -> Result<Vec<(String, Val)>, String> {
 /// Keeps a copy of Steam's shortcut list as the user had it: made once, the first time we change an existing file, and never overwritten
 /// (a later add or remove would otherwise replace it with a file that already has our entries).
 fn save_backup(cfg: &Path, file: &Path) -> Result<(), String> {
-    let backup = cfg.join("shortcuts.vdf.recompia-backup");
+    let backup = cfg.join("shortcuts.vdf.pokomac-backup");
     if file.exists() && !backup.exists() {
         fs::copy(file, &backup).map_err(|e| format!("could not save a backup of Steam's shortcut list: {e}"))?;
     }
@@ -426,8 +434,8 @@ impl Target {
     }
 }
 
-/// The shortcut for this launcher's own file (the AppImage when run from one). The game shortcut is named "Recompia" (the name the game
-/// goes by, so a SteamGridDB search for it finds the right title) and starts the game with `--play`; the launcher shortcut is "Recompia Launcher" and has no launch option.
+/// The shortcut for this launcher's own file (the AppImage when run from one). The game shortcut is named "PokoMac"
+/// and starts the game with `--play`; the launcher shortcut is "PokoMac Launcher" and has no launch option.
 pub fn spec_here(testing: bool, target: Target) -> Result<Spec, String> {
     let exe = std::env::var_os("APPIMAGE")
         .map(PathBuf::from)
@@ -446,10 +454,10 @@ pub fn spec_here(testing: bool, target: Target) -> Result<Spec, String> {
 
 pub fn shortcut_name(testing: bool, target: Target) -> String {
     match (target, testing) {
-        (Target::Game, false) => "Recompia".into(),
-        (Target::Game, true) => "Recompia (Testing)".into(),
-        (Target::Launcher, false) => "Recompia Launcher".into(),
-        (Target::Launcher, true) => "Recompia Launcher (Testing)".into(),
+        (Target::Game, false) => "PokoMac".into(),
+        (Target::Game, true) => "PokoMac (Testing)".into(),
+        (Target::Launcher, false) => "PokoMac Launcher".into(),
+        (Target::Launcher, true) => "PokoMac Launcher (Testing)".into(),
     }
 }
 
@@ -512,16 +520,16 @@ mod tests {
 
     fn spec(testing: bool) -> Spec {
         Spec {
-            name: if testing { "Recompia (Testing)" } else { "Recompia" }.into(),
-            exe: "\"/home/deck/Games/PokopiaRecomp/PokopiaLauncher.AppImage\"".into(),
-            start_dir: "\"/home/deck/Games/PokopiaRecomp\"".into(),
+            name: if testing { "PokoMac (Testing)" } else { "PokoMac" }.into(),
+            exe: "\"/home/deck/Games/PokoMac/PokoMac.AppImage\"".into(),
+            start_dir: "\"/home/deck/Games/PokoMac\"".into(),
             launch: "--play".into(),
             testing,
         }
     }
 
     fn tmp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("recompia-steam-test-{}-{tag}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("pokomac-steam-test-{}-{tag}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
@@ -570,13 +578,13 @@ mod tests {
     fn game_and_launcher_are_two_shortcuts() {
         let g = shortcut_name(false, Target::Game);
         let l = shortcut_name(false, Target::Launcher);
-        assert_eq!(g, "Recompia");
-        assert_eq!(l, "Recompia Launcher");
-        assert_eq!(shortcut_name(true, Target::Game), "Recompia (Testing)");
-        assert_eq!(shortcut_name(true, Target::Launcher), "Recompia Launcher (Testing)");
+        assert_eq!(g, "PokoMac");
+        assert_eq!(l, "PokoMac Launcher");
+        assert_eq!(shortcut_name(true, Target::Game), "PokoMac (Testing)");
+        assert_eq!(shortcut_name(true, Target::Launcher), "PokoMac Launcher (Testing)");
         assert!(Target::parse("game").is_ok() && Target::parse("launcher").is_ok() && Target::parse("x").is_err());
         let acc = tmp("two");
-        let exe = "\"/h/PokopiaLauncher.AppImage\"".to_string();
+        let exe = "\"/h/PokoMac.AppImage\"".to_string();
         let game = Spec { name: g, exe: exe.clone(), start_dir: "\"/h\"".into(), launch: "--play".into(), testing: false };
         let launcher = Spec { name: l, exe, start_dir: "\"/h\"".into(), launch: String::new(), testing: false };
         assert_ne!(short_id(&game.exe, &game.name), short_id(&launcher.exe, &launcher.name));
@@ -612,12 +620,12 @@ mod tests {
         b.extend_from_slice(&[8, 8, 8]);
         fs::write(cfg.join("shortcuts.vdf"), &b).unwrap();
         let mut launcher = spec(false);
-        launcher.name = "Recompia Launcher".into();
+        launcher.name = "PokoMac Launcher".into();
         launcher.launch = String::new();
         add_to_account(&acc, &spec(false)).unwrap();
         add_to_account(&acc, &launcher).unwrap();
         assert!(remove_from_account(&acc, &spec(false)).unwrap());
-        assert_eq!(fs::read(cfg.join("shortcuts.vdf.recompia-backup")).unwrap(), b);
+        assert_eq!(fs::read(cfg.join("shortcuts.vdf.pokomac-backup")).unwrap(), b);
         let _ = fs::remove_dir_all(&acc);
     }
 
@@ -636,7 +644,7 @@ mod tests {
         let out = write(&root);
         let back = parse(&out).unwrap();
         let s = String::from_utf8_lossy(&out).into_owned();
-        assert!(s.contains("appname") && s.contains("Extra") && s.contains("Recompia"));
+        assert!(s.contains("appname") && s.contains("Extra") && s.contains("PokoMac"));
         assert_eq!(back, root);
     }
 
@@ -656,7 +664,7 @@ mod tests {
         let first = fs::read(cfg.join("shortcuts.vdf")).unwrap();
         add_to_account(&acc, &s).unwrap();
         assert_eq!(fs::read(cfg.join("shortcuts.vdf")).unwrap(), first);
-        assert_eq!(fs::read(cfg.join("shortcuts.vdf.recompia-backup")).unwrap(), first);
+        assert_eq!(fs::read(cfg.join("shortcuts.vdf.pokomac-backup")).unwrap(), first);
         // a file the user changed is not deleted on remove
         fs::write(cfg.join("grid").join(format!("{id}_hero.png")), b"mine").unwrap();
         assert!(remove_from_account(&acc, &s).unwrap());

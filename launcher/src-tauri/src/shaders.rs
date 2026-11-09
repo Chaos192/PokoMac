@@ -12,7 +12,8 @@
 //! `corpus/unique.tsv`, rewritten per chunk) into `shader_cache/stage`, and a chunk counts only once its `.spv` files are
 //! moved into `spirv/` and its rows appended to `spirv/results.tsv`. A block with a row there is never translated again.
 //! `shader_cache/setup.json` records what is done. The tools run at below-normal priority.
-//! On Linux the extractor runs with the Linux Python and the translator (a Windows program) through Proton (host.rs).
+//! On Linux the extractor runs with the Linux Python and the translator (a Windows program) through Proton (host.rs). On macOS both are
+//! native: the macOS Python and the osx-arm64 build of the translator, `tools/spirv_harness/spirv_harness` (host::HARNESS_EXE).
 //! Compact storage (shader_archive.rs): when the cache has a shader archive, or a new setup asks for one (`Job::compact`), every chunk is
 //! moved into the archive as soon as it is committed, so the loose files never pile up. A cache of loose files stays loose until the
 //! player makes it smaller (main.rs compact_shaders).
@@ -39,8 +40,9 @@ pub const RUNTIME_REL: &str = "shader_cache/runtime";
 /// Run-time blocks a translator fix changes whose old translation is in the shader archive (it cannot be deleted one by one there):
 /// one hash per line. translate_missing translates them again, as if they had no translation, and empties the list.
 const RETRANSLATE_REL: &str = "shader_cache/runtime/retranslate.txt";
-/// Blocks per translator run. Under Proton every run also starts Proton (a few seconds), so Linux runs fewer, larger chunks.
-const CHUNK: usize = if cfg!(windows) { 1000 } else { 5000 };
+/// Blocks per translator run. Under Proton every run also starts Proton (a few seconds), so Linux runs fewer, larger chunks; macOS runs
+/// the translator natively, as Windows does.
+const CHUNK: usize = if cfg!(any(windows, target_os = "macos")) { 1000 } else { 5000 };
 /// Workers for the extractor. It maps each asset file into memory and decompresses it, so one worker per CPU thread can
 /// thrash a machine's memory and disk (issue #194: 15 workers on a hard drive); a few already saturate the disk. The
 /// translator (spirv_harness) keeps the full `job.jobs`.
@@ -276,11 +278,11 @@ fn on_path(exe: &str) -> Vec<PathBuf> {
 }
 
 /// Finds the tools in `tools_dir` (the launcher's `tools/` folder). Python: `tools/python/python.exe` (Linux:
-/// `tools/linux/python/bin/python3`), else the first python.exe (python3) on PATH that has `lz4`. Every missing piece is named
+/// `tools/linux/python/bin/python3`, macOS: host.rs `native_tools`), else the first python.exe (python3) on PATH that has `lz4`. Every missing piece is named
 /// in the error.
 pub fn find_tools(tools_dir: &Path) -> Result<Tools, String> {
     let mut missing = Vec::new();
-    let harness = tools_dir.join("spirv_harness").join("spirv_harness.exe");
+    let harness = tools_dir.join("spirv_harness").join(crate::host::HARNESS_EXE);
     if !harness.is_file() {
         missing.push(format!("the shader translator ({})", harness.display()));
     }
@@ -502,7 +504,7 @@ pub fn translate_missing(game_dir: &Path, tools_dir: &Path) -> Result<usize, Str
     }
     fs::write(input.join("manifest.tsv"), text).map_err(|e| format!("cannot write {}: {}", input.display(), e))?;
     let jobs = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2).to_string();
-    let mut cmd = crate::host::windows_program(&tools_dir.join("spirv_harness").join("spirv_harness.exe"))?;
+    let mut cmd = crate::host::windows_program(&tools_dir.join("spirv_harness").join(crate::host::HARNESS_EXE))?;
     cmd.arg("--batch").arg(crate::host::win_path(&input)).arg("--out").arg(crate::host::win_path(&stage)).args(["--jobs", &jobs, "--no-val"]);
     cmd.env("DOTNET_gcServer", "1");
     if !run_tool(cmd, &AtomicBool::new(false), false, None, None, |_| {})? {
@@ -530,10 +532,10 @@ pub fn warm_up(game_dir: &Path, tools_dir: &Path, cancel: &AtomicBool) -> Result
     let scratch = cache_dir(game_dir).join("warmup");
     let _ = fs::remove_dir_all(&scratch);
     fs::create_dir_all(scratch.join("save")).map_err(|e| format!("cannot create {}: {}", scratch.display(), e))?;
-    if let Some(install) = tools_dir.parent() {
-        crate::host::sync_runtime_files(install, game_dir)?;
+    if let Some(src) = crate::host::runtime_source(tools_dir) {
+        crate::host::sync_runtime_files(&src, game_dir)?;
     }
-    let mut cmd = crate::host::windows_program(&game_dir.join("pkp.exe"))?;
+    let mut cmd = crate::host::windows_program(&game_dir.join(crate::host::GAME_EXE))?;
     cmd.current_dir(game_dir).arg("--headless").args(["--max-seconds", &WARMUP_SECONDS.to_string()]).arg("--log").arg(crate::host::win_path(&scratch.join("warmup.log")));
     // environment variables win over pkp.ini
     cmd.env("NXRT_FS_SAVE_DIR", crate::host::win_path(&scratch.join("save"))).env("NXRT_NVN_DUMP_MISSING", MISSING_REL).env("NXRT_AUDIO_SINK", "null");

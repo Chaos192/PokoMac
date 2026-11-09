@@ -2,6 +2,8 @@
 //! Optional DLSS download. The release carries FSR 3 and the Streamline DLLs (upscalers/), but not NVIDIA's nvngx_dlss.dll: its
 //! licence (NVIDIA RTX SDKs LICENSE) does not fit a GPL-3.0 package. This runs the bundled `tools/build/fetch_dlss.py`, which
 //! downloads the file from NVIDIA's own GitHub repository at a fixed tag and checks its sha256, into `<game>/upscalers/streamline`.
+//! macOS: DLSS is an NVIDIA (Windows, Linux) feature and the Mac has no NVIDIA GPU: the download is never offered there (`available`
+//! false hides it on the Settings page) and `fetch` refuses.
 
 use serde::Serialize;
 use std::io::{BufRead, BufReader};
@@ -37,11 +39,15 @@ fn tools(tools_dir: &Path) -> (PathBuf, PathBuf) {
 pub fn status(game_dir: &Path, tools_dir: &Path) -> Status {
     let (py, script) = tools(tools_dir);
     let dir = target_dir(game_dir);
-    Status { available: py.is_file() && script.is_file(), present: dir.join("nvngx_dlss.dll").is_file(), dir: crate::dump::fwd(&dir) }
+    let available = !cfg!(target_os = "macos") && py.is_file() && script.is_file();
+    Status { available, present: dir.join("nvngx_dlss.dll").is_file(), dir: crate::dump::fwd(&dir) }
 }
 
 /// Runs the download. Progress lines are `@progress download <done> <total> <text>`, a failure is `@error <text>`.
 pub fn fetch(game_dir: &Path, tools_dir: &Path, mut report: impl FnMut(Progress)) -> Result<(), String> {
+    if cfg!(target_os = "macos") {
+        return Err("DLSS needs an NVIDIA graphics card, so it is not available on macOS. Use FSR 1 or the other upscalers instead.".into());
+    }
     let (py, script) = tools(tools_dir);
     if !script.is_file() {
         return Err("This package has no DLSS download tool. Extract the release zip again so tools/ is complete.".into());

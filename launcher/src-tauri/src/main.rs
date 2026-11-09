@@ -45,7 +45,7 @@ static UPDATED: AtomicBool = AtomicBool::new(false);
 struct Config {
     /// Root of the decrypted dump (the folder with base/ and updates/).
     dump_dir: String,
-    /// Folder with pkp.exe. Empty: the folder the launcher is in.
+    /// Folder with pkp.exe. Empty: the folder the launcher is in (macOS: default_game_dir, outside the app).
     game_dir: String,
     minimize_on_play: bool,
     /// Set up with fewer cores at idle priority (preflight.rs jobs_for)
@@ -90,9 +90,41 @@ fn exe_dir() -> PathBuf {
     std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())).unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// The release's `tools/`: next to the launcher. macOS: inside the app, `PokoMac.app/Contents/Resources/tools` (read only;
+/// what Set up downloads goes to host::native_tools); a build that is not in a bundle (cargo run) keeps it next to itself.
+fn tools_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    if let Some(app) = host::bundle_of(&exe_dir()) {
+        return app.join("Contents").join("Resources").join("tools");
+    }
+    exe_dir().join("tools")
+}
+
+/// The game folder when Settings names none: the launcher's own folder. macOS: `~/Library/Application Support/PokoMac`
+/// (host::support_dir), since the app bundle must stay as it was signed; an unbundled build keeps its own folder.
+fn default_game_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    if host::bundle_of(&exe_dir()).is_some() {
+        // unlike the launcher's own folder elsewhere, it may not exist yet (a first start): pkp.ini and setup.log go straight into it
+        let dir = host::support_dir();
+        let _ = fs::create_dir_all(&dir);
+        return dir;
+    }
+    exe_dir()
+}
+
+/// The folder an update installs into: the launcher's. macOS: the folder holding the app, which update.rs replaces as a whole.
+fn install_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    if let Some(parent) = host::bundle_of(&exe_dir()).and_then(|app| app.parent().map(Path::to_path_buf)) {
+        return parent;
+    }
+    exe_dir()
+}
+
 fn game_dir_of(cfg: &Config) -> PathBuf {
     if cfg.game_dir.trim().is_empty() {
-        exe_dir()
+        default_game_dir()
     } else {
         PathBuf::from(cfg.game_dir.trim())
     }
@@ -149,8 +181,12 @@ fn refuse_during_update(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// The launcher file itself: the AppImage, not the program inside its mount.
+/// The launcher file itself: the AppImage, not the program inside its mount. macOS: the .app bundle, not the program inside it.
 fn launcher_path() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    if let Some(app) = host::bundle_of(&exe_dir()) {
+        return Some(app);
+    }
     std::env::var_os("APPIMAGE").map(PathBuf::from).or_else(|| std::env::current_exe().ok())
 }
 
@@ -198,7 +234,7 @@ fn run_update(app: &AppHandle, st: &update::UpdateState, wanted: Option<Wanted>)
         }
     };
     let paths = update::Paths {
-        install: exe_dir(),
+        install: install_dir(),
         launcher: launcher_path().ok_or("Could not find the launcher's own file.")?,
         game_dir: game_dir_of(&load_config(app)),
     };
@@ -279,9 +315,9 @@ fn open_release_url(url: String) -> Result<(), String> {
     play::open_url(&url)
 }
 
-/// The links the launcher opens in the browser: GitHub (releases, issues) and the project's Discord invite. No spaces, quotes or `&`.
+/// The links the launcher opens in the browser: GitHub only (releases, issues, the project it is based on). No spaces, quotes or `&`.
 fn openable_link(url: &str) -> bool {
-    (url.starts_with("https://github.com/") || url.starts_with("https://discord.gg/")) && !url.chars().any(|c| c.is_whitespace() || c == '"' || c == '&')
+    url.starts_with("https://github.com/") && !url.chars().any(|c| c.is_whitespace() || c == '"' || c == '&')
 }
 
 #[cfg(test)]
@@ -289,10 +325,10 @@ mod link_tests {
     use super::openable_link;
 
     #[test]
-    fn only_github_and_the_discord_invite_open() {
-        assert!(openable_link("https://github.com/featureJosh/Recompia/releases/tag/v0.8.0"));
-        assert!(openable_link("https://discord.gg/gN5g4MtWHr"));
-        for bad in ["http://github.com/x", "https://github.com.evil.example/x", "https://discord.com/invite/x", "https://discord.gg/ab cd", "https://discord.gg/a&b", "file:///etc/passwd", "javascript:alert(1)", ""] {
+    fn only_github_opens() {
+        assert!(openable_link("https://github.com/Chaos192/PokoMac/releases/tag/v1.0.0"));
+        assert!(openable_link("https://github.com/Dittobyte/Recompia"));
+        for bad in ["http://github.com/x", "https://github.com.evil.example/x", "https://discord.gg/gN5g4MtWHr", "https://discord.com/invite/x", "https://github.com/a b", "https://github.com/a&b", "file:///etc/passwd", "javascript:alert(1)", ""] {
             assert!(!openable_link(bad), "{bad:?}");
         }
     }
@@ -302,9 +338,9 @@ fn overview_of(cfg: &Config) -> Overview {
     let dir = game_dir_of(cfg);
     Overview {
         game_dir: dump::fwd(&dir),
-        default_game_dir: dump::fwd(&exe_dir()),
-        exe_exists: dir.join("pkp.exe").is_file(),
-        builds_exe: gamebuild::is_package_b(&exe_dir().join("tools")),
+        default_game_dir: dump::fwd(&default_game_dir()),
+        exe_exists: dir.join(host::GAME_EXE).is_file(),
+        builds_exe: gamebuild::is_package_b(&tools_dir()),
     }
 }
 
@@ -474,9 +510,12 @@ struct ReadyFacts {
 
 fn readiness_of(f: &ReadyFacts) -> Readiness {
     if !f.builds_exe && !f.exe_exists {
-        return Readiness::of("no_exe", format!("pkp.exe was not found in {}. Put the launcher next to pkp.exe.", f.game_dir));
+        return Readiness::of("no_exe", format!("{0} was not found in {1}. Put the launcher next to {0}.", host::GAME_EXE, f.game_dir));
     }
     if f.exe_exists && f.runtime_missing {
+        #[cfg(target_os = "macos")]
+        return Readiness::of("no_runtime", format!("libpkp_rt.dylib was not found next to pkp in {} nor in the launcher app (Contents/Resources/runtime). Download the release again and replace the app.", f.game_dir));
+        #[cfg(not(target_os = "macos"))]
         return Readiness::of("no_runtime", format!("pkp_rt.dll was not found next to pkp.exe in {} nor next to the launcher. Extract the release again so the launcher's folder has it, or set the game folder in Settings.", f.game_dir));
     }
     let unfinished = || {
@@ -551,7 +590,7 @@ fn readiness(cfg: &Config) -> Probe {
         (GamePaths { exefs: chosen.exefs, romfs: chosen.romfs, romfs_base: chosen.romfs_base, aoc_dir: report.aoc_dir }, dump)
     };
     let dir = game_dir_of(cfg);
-    let tools_dir = exe_dir().join("tools");
+    let tools_dir = tools_dir();
     let builds_exe = gamebuild::is_package_b(&tools_dir);
     // the base game's files now fill in an update that lacks them (#128): its shaders were never extracted, so Set up runs once more
     let base_changed = !paths.romfs_base.is_empty() && {
@@ -560,8 +599,8 @@ fn readiness(cfg: &Config) -> Probe {
     };
     let readiness = readiness_of(&ReadyFacts {
         game_dir: dump::fwd(&dir),
-        exe_exists: dir.join("pkp.exe").is_file(),
-        runtime_missing: !dir.join("pkp_rt.dll").is_file() && !exe_dir().join("pkp_rt.dll").is_file(),
+        exe_exists: dir.join(host::GAME_EXE).is_file(),
+        runtime_missing: !dir.join(host::RUNTIME_LIB).is_file() && !host::runtime_source(&tools_dir).is_some_and(|s| s.join(host::RUNTIME_LIB).is_file()),
         builds_exe,
         built: if builds_exe { gamebuild::built_state(&dir, &tools_dir) } else { gamebuild::Built::Current },
         needs_retranslation: shaders::needs_retranslation(&dir),
@@ -637,7 +676,7 @@ fn setup_status(app: AppHandle, state: State<Arc<SetupState>>) -> SetupStatus {
     if progress.state.is_empty() {
         progress.state = "idle".into();
     }
-    let tools_dir = exe_dir().join("tools");
+    let tools_dir = tools_dir();
     let state = if gamebuild::is_package_b(&tools_dir) { gamebuild::built_state(&dir, &tools_dir) } else { gamebuild::Built::Current };
     let started = setup_started(&dir);
     SetupStatus {
@@ -659,10 +698,10 @@ fn start_setup(app: AppHandle, state: State<Arc<SetupState>>, gentle: Option<boo
     let report = dump::scan(&cfg.dump_dir);
     let chosen = report.chosen.ok_or_else(|| "Choose usable game files first.".to_string())?;
     let dir = game_dir_of(&cfg);
-    let tools_dir = exe_dir().join("tools");
+    let tools_dir = tools_dir();
     let package_b = gamebuild::is_package_b(&tools_dir);
-    if !package_b && !dir.join("pkp.exe").is_file() {
-        return Err(format!("pkp.exe was not found in {}. Put the launcher next to pkp.exe or set the game folder in Settings.", dump::fwd(&dir)));
+    if !package_b && !dir.join(host::GAME_EXE).is_file() {
+        return Err(format!("{0} was not found in {1}. Put the launcher next to {0} or set the game folder in Settings.", host::GAME_EXE, dump::fwd(&dir)));
     }
     // the build, the shader tools and pkp.ini all write in the game folder: a blocked one fails here, in words (writecheck.rs)
     writecheck::check(&dir).map_err(|e| e.message())?;
@@ -704,15 +743,15 @@ fn start_setup(app: AppHandle, state: State<Arc<SetupState>>, gentle: Option<boo
             let _ = app.emit("setup-status", p);
         };
         let result = (|| {
-            // Linux: the native Python and Zig that the build and the shader extractor run with, fetched once
+            // Linux and macOS: the native Python and Zig that the build and the shader extractor run with, fetched once
             let tools_ready = host::prepare_tools(&tools_dir, &st.cancel, &mut |done, total, message| {
                 emit(shaders::Progress { state: "running".into(), phase: "tools".into(), done, total, message })
             })?;
             if !tools_ready {
                 return Ok(false);
             }
-            // Linux: the translator and the hidden run need Proton; say so now, not after the build
-            #[cfg(not(windows))]
+            // Linux: the translator and the hidden run need Proton; say so now, not after the build (macOS runs both natively)
+            #[cfg(not(any(windows, target_os = "macos")))]
             log(&format!("Windows programs run with: {}", host::runner()?.label));
             // no build yet, or one from an older release (stale tools stamp): build pkp.exe (again)
             if package_b && !gamebuild::is_built(&build_job.game_dir, &tools_dir) {
@@ -758,7 +797,7 @@ async fn preflight(app: AppHandle) -> Result<preflight::Report, String> {
     let cfg = load_config(&app);
     let dir = game_dir_of(&cfg);
     let compact = !cfg.loose_shaders;
-    let tools_dir = exe_dir().join("tools");
+    let tools_dir = tools_dir();
     tauri::async_runtime::spawn_blocking(move || {
         let build_pending = gamebuild::is_package_b(&tools_dir) && !gamebuild::is_built(&dir, &tools_dir);
         let facts = preflight::probe(&dir, &preflight::remaining_of(&dir, build_pending, compact));
@@ -938,7 +977,7 @@ fn cancel_shader_storage(state: State<Arc<StorageState>>) {
 
 #[tauri::command]
 fn dlss_status(app: AppHandle) -> dlss::Status {
-    dlss::status(&game_dir_of(&load_config(&app)), &exe_dir().join("tools"))
+    dlss::status(&game_dir_of(&load_config(&app)), &tools_dir())
 }
 
 /// Downloads NVIDIA's nvngx_dlss.dll (see dlss.rs) on a worker thread, with "dlss-progress" events.
@@ -946,7 +985,7 @@ fn dlss_status(app: AppHandle) -> dlss::Status {
 async fn fetch_dlss(app: AppHandle) -> Result<(), String> {
     refuse_during_update(&app)?;
     let dir = game_dir_of(&load_config(&app));
-    let tools_dir = exe_dir().join("tools");
+    let tools_dir = tools_dir();
     tauri::async_runtime::spawn_blocking(move || {
         dlss::fetch(&dir, &tools_dir, |p| {
             let _ = app.emit("dlss-progress", p);
@@ -1239,7 +1278,7 @@ fn room_code_host(app: AppHandle) -> Option<String> {
 fn run_headless(args: &[String]) -> i32 {
     #[cfg(windows)]
     win_console::attach_and_hook_ctrl_c();
-    const USAGE: &str = "Usage: PokopiaLauncher --host [--listen <IPv4>[:<port>]] [--port N] [--no-udp] [--rooms N] [--peers N] [--links N] [--per-ip N] [--new-per-ip N] [--nofind-per-min N] [--room-hours H] [--room-mib M] [--link-kib K] [--wait-s S] [--idle-s S] [--stats S] [--quiet]";
+    const USAGE: &str = "Usage: PokoMac --host [--listen <IPv4>[:<port>]] [--port N] [--no-udp] [--rooms N] [--peers N] [--links N] [--per-ip N] [--new-per-ip N] [--nofind-per-min N] [--room-hours H] [--room-mib M] [--link-kib K] [--wait-s S] [--idle-s S] [--stats S] [--quiet]";
     let mut ip = std::net::Ipv4Addr::UNSPECIFIED;
     let mut port = relay::DEFAULT_PORT;
     let mut cfg = relay::Config::default();
@@ -1401,8 +1440,8 @@ fn main() {
     if args.iter().any(|a| a == "--play") {
         #[cfg(windows)]
         win_console::attach_and_hook_ctrl_c();
-        let game = args.iter().position(|a| a == "--game").and_then(|i| args.get(i + 1)).map(PathBuf::from).unwrap_or_else(exe_dir);
-        std::process::exit(play::run_cli(&game, &exe_dir().join("tools")));
+        let game = args.iter().position(|a| a == "--game").and_then(|i| args.get(i + 1)).map(PathBuf::from).unwrap_or_else(default_game_dir);
+        std::process::exit(play::run_cli(&game, &tools_dir()));
     }
     UPDATED.store(args.iter().any(|a| a == "--updated"), Ordering::SeqCst);
     // WebKitGTK's DMA-BUF renderer leaves the window blank or kills it ("Error 71 (Protocol error)") on NVIDIA's driver
@@ -1450,7 +1489,7 @@ fn main() {
                 let st = app.state::<Arc<update::UpdateState>>().inner().clone();
                 st.set_cleaning(true);
                 std::thread::spawn(move || {
-                    let (root, game) = (exe_dir(), game_dir_of(&load_config(&handle)));
+                    let (root, game) = (install_dir(), game_dir_of(&load_config(&handle)));
                     update::clean_start(&root, &update::old_files(&launcher, &game));
                     st.set_cleaning(false);
                 });

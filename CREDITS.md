@@ -1,7 +1,14 @@
 # Credits
 
-Parent project: [pokopia-native](https://github.com/xFractals/pokopia-native) (MIT; its `ampere-lower/` is GPL-3.0-or-later), whose updates this project follows. Built on [nxrecomp](https://github.com/drakolordx7/nxrecomp). Uses code from [Ryujinx](https://github.com/Ryubing/Ryujinx), [Mesa](https://gitlab.freedesktop.org/mesa/mesa), [pokopia-native](https://github.com/xFractals/pokopia-native), smo-recomp, ScarletNX, ssbu-recomp, SuperMarioWonderRecomp, yuzu, Eden, libnx, [astc-encoder](https://github.com/ARM-software/astc-encoder), [bc7enc_rdo](https://github.com/richgel999/bc7enc_rdo), [libvpx](https://chromium.googlesource.com/webm/libvpx), AMD FidelityFX, NVIDIA Image Scaling, [SDL3](https://github.com/libsdl-org/SDL), [Tauri](https://tauri.app), [Zig](https://ziglang.org) and Python, plus [Kenney input prompts](https://kenney.nl/assets/input-prompts), DejaVu fonts, and in the launcher [Inter](https://rsms.me/inter/) (SIL OFL 1.1) and [Lucide](https://lucide.dev) icons (ISC). Design ideas (no code) from totk-pc-recomp (shadow storage for guest memory) and ultratears (memory pool copies).
+PokoMac is based on **[Recompia](https://github.com/Dittobyte/Recompia) by Dittobyte** (GPL-3.0). The recompiler, the runtime, the
+launcher and the game work come from it; PokoMac adds the macOS platform layer, build and packaging ([docs/MACOS.md](docs/MACOS.md)).
 
-The Linux launcher (`launcher/src-tauri/src/host.rs`) runs Proton the way [pokopia-recomp-linux](https://github.com/tinfoil-chewer/pokopia-recomp-linux) (GPL-3.0) does, inside the Steam Linux Runtime, and follows it for an AppImage's environment and the pinned Linux Zig.
+## Third-party licences
 
-Licences are in `runtime/THIRD_PARTY_NOTICES.md`, `recomp/THIRD_PARTY.md` and `tools/shaders/licenses/`.
+PokoMac contains or downloads third-party code under its own licences. The licence texts are in `runtime/THIRD_PARTY_NOTICES.md`,
+`recomp/THIRD_PARTY.md` and `tools/shaders/licenses/` in this repository, and in the `licenses/` folder of every release. They include
+Ryujinx (MIT), Mesa (MIT), pokopia-native (MIT), nxrecomp, smo-recomp, ScarletNX, ssbu-recomp and SuperMarioWonderRecomp, yuzu and Eden,
+libnx, SDL3 (zlib), astc-encoder and bc7enc_rdo (Apache-2.0), libvpx (BSD-3-Clause), ImGui (MIT), Vulkan Memory Allocator (MIT), volk (MIT),
+zstd (BSD), miniz (MIT), AMD FidelityFX and NVIDIA Image Scaling (MIT), Tauri (MIT / Apache-2.0), Zig (MIT), Python (PSF), the .NET runtime
+(MIT), the Khronos Vulkan loader (Apache-2.0), KosmicKrisp (MIT) and MoltenVK (Apache-2.0), Kenney input prompts (CC0), the DejaVu fonts,
+Inter (SIL OFL 1.1) and Lucide icons (ISC).

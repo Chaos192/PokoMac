@@ -33,7 +33,7 @@ export function render(el) {
     <div class="banner danger">${icon('circle-x')}<div class="grow">Danger banner</div></div>
     <div class="card glass">
       <h2>Card</h2>
-      <dl class="kv"><dt>Game folder</dt><dd class="path">C:/Games/PokopiaRecomp-0.7.0</dd><dt>Game files</dt><dd>Update 2.0.1a</dd></dl>
+      <dl class="kv"><dt>Game folder</dt><dd class="path">C:/Games/PokoMac</dd><dt>Game files</dt><dd>Update 2.0.1a</dd></dl>
     </div>
     <progress max="100" value="42"></progress>
     <div class="empty glass">${icon('newspaper')}<strong>Nothing here yet</strong><span>An empty state</span></div>

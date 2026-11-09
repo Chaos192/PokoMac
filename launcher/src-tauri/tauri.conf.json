@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "PokopiaLauncher",
+  "productName": "PokoMac",
   "version": "0.1.1",
-  "identifier": "org.pkp-recomp.launcher",
+  "identifier": "io.github.chaos192.pokomac",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Pokopia Launcher",
+        "title": "PokoMac",
         "width": 1040,
         "height": 600,
         "minWidth": 900,

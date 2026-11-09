@@ -7,7 +7,7 @@ import { emit } from '@tauri-apps/api/event';
 const params = new URLSearchParams(location.search);
 const scenario = params.get('s') || 'ready';
 
-const GAME_DIR = 'C:/Games/PokopiaRecomp-0.7.0';
+const GAME_DIR = 'C:/Games/PokoMac';
 const DUMP = { path: 'D:/Dumps/Pokopia/updates/2.0.1a', kind: 'update', version: '2.0.1a' };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -42,7 +42,7 @@ const RELEASE_BODIES = {
 
 ### Known issues
 - Link Play cross-play passes pokopia-native's protocol tests but has not been confirmed in a full two-player session yet, and Story co-op has not been tried. Please report what you find.
-- The larger graphics pools for 4K have not been confirmed in game yet ([#164](https://github.com/featureJosh/pokopia-recomp/issues/164)).`,
+- The larger graphics pools for 4K have not been confirmed in game yet ([#164](https://github.com/Chaos192/PokoMac/issues/164)).`,
   'v0.6.2': `### Highlights
 - The 3D world is drawn in the right place again below 100% scene size on Steam Deck, Legion Go S, 1440p and ultrawide screens.
 - Frame limits above 60 and unlimited work again.
@@ -58,19 +58,19 @@ const RELEASE_BODIES = {
 - The launcher no longer loses the game folder after a move.`,
 };
 
-const release = (tag, name, date) => ({ tag, name, date, body: RELEASE_BODIES[tag], url: `https://github.com/featureJosh/pokopia-recomp/releases/tag/${tag}` });
+const release = (tag, name, date) => ({ tag, name, date, body: RELEASE_BODIES[tag], url: `https://github.com/Chaos192/PokoMac/releases/tag/${tag}` });
 
 const RELEASES = [
-  release('v0.7.0', 'Pokopia Recomp 0.7.0 (build K: Kangaroo)', '2026-10-30T18:12:00Z'),
-  release('v0.6.2', 'Pokopia Recomp 0.6.2 (build J: Jackrabbit)', '2026-10-11T09:40:00Z'),
-  release('v0.6.1', 'Pokopia Recomp 0.6.1 (build J: Jackal)', '2026-09-27T20:05:00Z'),
+  release('v0.7.0', 'PokoMac 0.7.0 (build K: Kangaroo)', '2026-10-30T18:12:00Z'),
+  release('v0.6.2', 'PokoMac 0.6.2 (build J: Jackrabbit)', '2026-10-11T09:40:00Z'),
+  release('v0.6.1', 'PokoMac 0.6.1 (build J: Jackal)', '2026-09-27T20:05:00Z'),
 ];
 
 const NEXT = {
   tag: 'v0.7.1',
-  name: 'Pokopia Recomp 0.7.1 (build K: Koala)',
+  name: 'PokoMac 0.7.1 (build K: Koala)',
   date: '2026-11-05T17:30:00Z',
-  url: 'https://github.com/featureJosh/pokopia-recomp/releases/tag/v0.7.1',
+  url: 'https://github.com/Chaos192/PokoMac/releases/tag/v0.7.1',
   body: `Install it from the launcher, or extract it over your 0.7.0 install.
 
 ### Highlights
@@ -115,7 +115,7 @@ const SCENARIOS = {
   'long-strings': {
     readiness: { kind: 'resume', detail: `Setup has not finished, and this is a very long sentence about ${'C:/Users/somebody/Games/With a really long folder name/'.repeat(3)}` },
     setup: sstatus({ complete: false, started: true }),
-    releases: [{ ...RELEASES[0], name: 'Pokopia Recomp 0.7.0 (build K: Kangaroo with an absurdly long release name that goes on and on and on and on)', body: `### Highlights\n- ${'A very long highlight line that will not fit on the card. '.repeat(8)}` }, { ...RELEASES[1], date: 'not a date', body: '' }],
+    releases: [{ ...RELEASES[0], name: 'PokoMac 0.7.0 (build K: Kangaroo with an absurdly long release name that goes on and on and on and on)', body: `### Highlights\n- ${'A very long highlight line that will not fit on the card. '.repeat(8)}` }, { ...RELEASES[1], date: 'not a date', body: '' }],
     version: '0.7.0-dev+g1234567890abcdef1234567890',
   },
   'api-down': { down: true },
@@ -134,14 +134,14 @@ let mockRepair = null;
 // the builds the launcher offers, as list_builds returns them, for a launcher that is 0.8.1-beta.6
 const BACK = ['The game files may have to be built again for the older version, so Set up again can be asked (about 15 to 20 minutes).', 'Files that only the newer version has stay in the folder; they are not removed.'];
 const MOCK_BUILDS = [
-  { tag: 'v0.8.1-beta.7', name: 'Pokopia Recomp 0.8.1-beta.7 (Testing)', date: '2026-11-09T12:00:00Z', prerelease: true, installable: true, relation: 'newer', risk: 'none', reasons: [], url: 'https://github.com/featureJosh/Recompia/releases/tag/v0.8.1-beta.7',
+  { tag: 'v0.8.1-beta.7', name: 'PokoMac 0.8.1-beta.7 (Testing)', date: '2026-11-09T12:00:00Z', prerelease: true, installable: true, relation: 'newer', risk: 'none', reasons: [], url: 'https://github.com/Chaos192/PokoMac/releases/tag/v0.8.1-beta.7',
     notes: '### Regressions and known problems\n- Going back to an older build has only been tried in tests so far\n\n### What to test\n- Open Choose a version and read a note. Report: what the list showed' },
-  { tag: 'v0.8.1-beta.6', name: 'Pokopia Recomp 0.8.1-beta.6 (Testing)', date: '2026-11-08T17:00:00Z', prerelease: true, installable: true, relation: 'installed', risk: 'none', reasons: [], url: '', notes: '### Changes in this build\n- #298 The version in pkp.log' },
-  { tag: 'v0.8.1-beta.5', name: 'Pokopia Recomp 0.8.1-beta.5 (Testing)', date: '2026-11-08T15:11:00Z', prerelease: true, installable: true, relation: 'older', risk: 'low', reasons: BACK, url: '', notes: '### What to test\n- Repair and reset' },
-  { tag: 'v0.8.0', name: 'Pokopia Recomp 0.8.0 (build L: Lykoi)', date: '2026-11-08T11:32:00Z', prerelease: false, installable: true, relation: 'older', risk: 'low', reasons: BACK, url: '', notes: '### Highlights\n- Profiles\n- Update channels' },
-  { tag: 'v0.7.9', name: 'Pokopia Recomp 0.7.9 (build K: Kiwi)', date: '2026-11-08T02:12:00Z', prerelease: false, installable: true, relation: 'older', risk: 'high',
+  { tag: 'v0.8.1-beta.6', name: 'PokoMac 0.8.1-beta.6 (Testing)', date: '2026-11-08T17:00:00Z', prerelease: true, installable: true, relation: 'installed', risk: 'none', reasons: [], url: '', notes: '### Changes in this build\n- #298 The version in pkp.log' },
+  { tag: 'v0.8.1-beta.5', name: 'PokoMac 0.8.1-beta.5 (Testing)', date: '2026-11-08T15:11:00Z', prerelease: true, installable: true, relation: 'older', risk: 'low', reasons: BACK, url: '', notes: '### What to test\n- Repair and reset' },
+  { tag: 'v0.8.0', name: 'PokoMac 0.8.0 (build L: Lykoi)', date: '2026-11-08T11:32:00Z', prerelease: false, installable: true, relation: 'older', risk: 'low', reasons: BACK, url: '', notes: '### Highlights\n- Profiles\n- Update channels' },
+  { tag: 'v0.7.9', name: 'PokoMac 0.7.9 (build K: Kiwi)', date: '2026-11-08T02:12:00Z', prerelease: false, installable: true, relation: 'older', risk: 'high',
     reasons: ['Profiles (a separate save and name for each player) arrived in 0.8.0. An older version ignores profiles.json and uses one save, so a second player\'s save may not be found.', ...BACK], url: '', notes: '### Highlights\n- Frame pacing fixes' },
-  { tag: 'v0.7.0', name: 'Pokopia Recomp 0.7.0 (build K: Kangaroo)', date: '2026-10-30T18:12:00Z', prerelease: false, installable: false, relation: 'older', risk: 'high', reasons: BACK, url: '', notes: 'Old notes' },
+  { tag: 'v0.7.0', name: 'PokoMac 0.7.0 (build K: Kangaroo)', date: '2026-10-30T18:12:00Z', prerelease: false, installable: false, relation: 'older', risk: 'high', reasons: BACK, url: '', notes: 'Old notes' },
 ];
 const mockBackups = [
   { version: 1, name: '20261108-143000-auto', created: '2026-11-08T19:30:00Z', kind: 'auto', key: 'k', profile: 'Player', files: 6, bytes: 17825792, hash: 'a' },
@@ -312,7 +312,7 @@ function handle(cmd, args) {
       return { readiness, game_dir: GAME_DIR, default_game_dir: GAME_DIR, exe_exists: sc.exe_exists, builds_exe: true, dump: sc.dump, version: sc.version || '0.7.0', updated: !!sc.updated };
     case 'setup_status': return structuredClone(setup);
     case 'game_status': return game;
-    case 'get_releases': return { releases: sc.releases ?? (mockChannel === 'testing' ? [{ ...release('v0.8.1-beta.2', 'Pokopia Recomp 0.8.1-beta.2 (Testing)', '2026-11-12T12:00:00Z'), prerelease: true }, { ...release('v0.8.1-beta.1', 'Pokopia Recomp 0.8.1-beta.1 (Testing)', '2026-11-10T12:00:00Z'), prerelease: true }, ...(sc.update ? [NEXT, ...RELEASES] : RELEASES)] : (sc.update ? [NEXT, ...RELEASES] : RELEASES)), update: sc.update ? { tag: NEXT.tag, name: NEXT.name, url: NEXT.url, size: 148_000_000 } : null };
+    case 'get_releases': return { releases: sc.releases ?? (mockChannel === 'testing' ? [{ ...release('v0.8.1-beta.2', 'PokoMac 0.8.1-beta.2 (Testing)', '2026-11-12T12:00:00Z'), prerelease: true }, { ...release('v0.8.1-beta.1', 'PokoMac 0.8.1-beta.1 (Testing)', '2026-11-10T12:00:00Z'), prerelease: true }, ...(sc.update ? [NEXT, ...RELEASES] : RELEASES)] : (sc.update ? [NEXT, ...RELEASES] : RELEASES)), update: sc.update ? { tag: NEXT.tag, name: NEXT.name, url: NEXT.url, size: 148_000_000 } : null };
     case 'install_update': return runUpdate();
     case 'cancel_update': return updateStop?.();
     case 'play': return runPlay();
@@ -369,8 +369,8 @@ function handle(cmd, args) {
       console.info('[mock] install_version', args.tag, 'accepted', args.accepted);
       return runUpdate();
     }
-    case 'steam_status': return { ...mockSteam, game_name: mockChannel === 'testing' ? 'Recompia (Testing)' : 'Recompia', launcher_name: mockChannel === 'testing' ? 'Recompia Launcher (Testing)' : 'Recompia Launcher' };
-    case 'steam_add': mockSteam[`${args.target}_added`] = 1; return `Added "${args.target === 'game' ? 'Recompia' : 'Recompia Launcher'}" to Steam for 1 account. Start Steam again to see it, with its artwork.`;
+    case 'steam_status': return { ...mockSteam, game_name: mockChannel === 'testing' ? 'PokoMac (Testing)' : 'PokoMac', launcher_name: mockChannel === 'testing' ? 'PokoMac Launcher (Testing)' : 'PokoMac Launcher' };
+    case 'steam_add': mockSteam[`${args.target}_added`] = 1; return `Added "${args.target === 'game' ? 'PokoMac' : 'PokoMac Launcher'}" to Steam for 1 account. Start Steam again to see it, with its artwork.`;
     case 'steam_remove': mockSteam[`${args.target}_added`] = 0; return 'Removed it from Steam. Start Steam again.';
     case 'backup_status': return { settings: { minutes: 0, keep: 10, on_exit: true }, count: mockBackups.length, bytes: mockBackups.reduce((n, b) => n + b.bytes, 0), last: mockBackups[0] ?? null };
     case 'backup_list': return structuredClone(mockBackups);

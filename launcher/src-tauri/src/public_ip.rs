@@ -22,7 +22,7 @@ pub fn lookup() -> Option<String> {
     }
     let agent = ureq::AgentBuilder::new()
         .timeout(TIMEOUT)
-        .user_agent(&format!("PokopiaRecomp-Launcher/{}", env!("CARGO_PKG_VERSION")))
+        .user_agent(&format!("PokoMac/{}", env!("CARGO_PKG_VERSION")))
         .build();
     for url in SERVICES {
         let Ok(resp) = agent.get(url).call() else { continue };

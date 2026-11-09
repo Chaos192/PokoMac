@@ -100,6 +100,10 @@ impl WriteError {
     }
 
     pub fn title(&self) -> &'static str {
+        #[cfg(target_os = "macos")]
+        if self.cause == Cause::Blocked {
+            return "macOS is blocking writes in the game folder";
+        }
         match self.cause {
             Cause::Blocked => "Windows is blocking writes in the game folder",
             Cause::ReadOnly => "The game folder's drive is write-protected",
@@ -110,12 +114,37 @@ impl WriteError {
 
     /// What happened and what to do, for the pre-flight list and the error of Set up and the .nup unpack.
     pub fn message(&self) -> String {
+        #[cfg(target_os = "macos")]
+        return self.message_macos();
+        #[cfg(not(target_os = "macos"))]
+        self.message_windows()
+    }
+
+    /// macOS: the folders macOS guards (Desktop, Documents, Downloads, removable and network volumes) need the launcher to be allowed
+    /// in Privacy & Security; the paths stay as macOS writes them.
+    #[cfg(target_os = "macos")]
+    fn message_macos(&self) -> String {
+        let what = format!("{} in {} failed: {}", self.step.what(), self.dir.display(), self.os);
+        let default = "~/Library/Application Support/PokoMac";
+        match self.cause {
+            Cause::Blocked => format!(
+                "macOS is blocking writes in this folder ({}). Desktop, Documents, Downloads and external drives are protected: allow PokoMac in System Settings > Privacy & Security > Files and Folders (or Full Disk Access), or clear the game folder in Settings to use the default, {}.",
+                what, default
+            ),
+            Cause::ReadOnly => format!("The volume is read-only ({}). Clear the game folder in Settings to use the default, {}, or pick a folder on a writable drive.", what, default),
+            Cause::DiskFull => format!("The drive is full ({}). Free some space, or move the game folder to a bigger drive.", what),
+            Cause::Other => format!("Setup cannot write in this folder ({}). Check its permissions in Finder (Get Info), or clear the game folder in Settings to use the default, {}.", what, default),
+        }
+    }
+
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    fn message_windows(&self) -> String {
         let dir = self.dir.to_string_lossy().replace('/', "\\");
         let dir = dir.strip_prefix(r"\\?\").unwrap_or(&dir).to_string();
         let what = format!("{} in {} failed: {}", self.step.what(), dir, self.os);
         match self.cause {
             Cause::Blocked => format!(
-                "Windows is blocking writes in this folder ({}). This is most likely Windows Security's Controlled folder access or an antivirus, which block programs in Documents, Desktop, Downloads and Pictures. Allow PokopiaLauncher.exe, pkp.exe and the tools it runs (python.exe, zig.exe and spirv_harness.exe in the tools folder) in Windows Security > Virus & threat protection > Ransomware protection > Allow an app through Controlled folder access, or in your antivirus. Or move the game folder somewhere like C:\\Games.",
+                "Windows is blocking writes in this folder ({}). This is most likely Windows Security's Controlled folder access or an antivirus, which block programs in Documents, Desktop, Downloads and Pictures. Allow PokoMac.exe, pkp.exe and the tools it runs (python.exe, zig.exe and spirv_harness.exe in the tools folder) in Windows Security > Virus & threat protection > Ransomware protection > Allow an app through Controlled folder access, or in your antivirus. Or move the game folder somewhere like C:\\Games.",
                 what
             ),
             Cause::ReadOnly => format!("The drive is write-protected ({}). Move the game folder to another drive, somewhere like C:\\Games.", what),
@@ -133,7 +162,7 @@ pub fn probe(dir: &Path) -> Result<(), WriteError> {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
     let name = format!(".pkp-write-test-{}-{}-{}", std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed), nanos);
     let path = dir.join(&name);
-    let body = format!("Pokopia launcher write test {}\n", name);
+    let body = format!("PokoMac write test {}\n", name);
     let fail = |step: Step, e: io::Error| WriteError::from_io(dir, step, &e);
     let res = (|| {
         let mut f = fs::OpenOptions::new().write(true).create_new(true).open(&path).map_err(|e| fail(Step::Create, e))?;

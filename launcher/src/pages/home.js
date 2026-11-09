@@ -60,12 +60,11 @@ const repackMessage = (r) => {
 
 const QUIET = new Set(['ready', 'no_files', 'setup', 'resume']);
 const LINK_PLAY_LABEL = { off: 'Off', lan: 'Same network', internet: 'Internet' };
-const DISCORD_URL = 'https://discord.gg/gN5g4MtWHr';
 
 export function render(el, ctx) {
   el.innerHTML = `<div class="page home">
     <div class="home-hero">
-      <h1 class="display"><img class="home-logo" src="${logoUrl}" alt="Pokopia" /></h1>
+      <h1 class="display"><img class="home-logo" src="${logoUrl}" alt="PokoMac" /></h1>
       <div class="home-actions">
         <button class="btn primary big" id="primary"></button>
         <button class="btn big on-art" id="update" data-act="update" hidden>${icon('download')}Update</button>
@@ -145,7 +144,6 @@ export function render(el, ctx) {
     if (!t || t.disabled) return;
     if (t.id === 'primary') store.perform(primaryAction(store.state).run, ctx.go);
     if (t.id === 'link-chip') ctx.go('linkplay');
-    if (t.id === 'discord-chip') api('open_release_url', { url: DISCORD_URL }).catch((err) => toast(errText(err), 'error'));
     if (t.dataset.tag) ctx.go('news', { tag: t.dataset.tag });
     if (t.dataset.open) api('open_game_file', { name: t.dataset.open }).catch((err) => toast(errText(err), 'error'));
     switch (t.dataset.act) {
@@ -162,8 +160,7 @@ export function render(el, ctx) {
   // a settings file that cannot be read just leaves the chip out
   let linkChip = '';
   let profileChip = '';
-  const discordChip = `<button class="chip on-art" id="discord-chip">${icon('globe')}Discord</button>`;
-  const drawChips = () => { part('link').innerHTML = profileChip + linkChip + discordChip; };
+  const drawChips = () => { part('link').innerHTML = profileChip + linkChip; };
   drawChips();
   api('read_settings').then((data) => {
     linkChip = `<button class="chip on-art" id="link-chip">${icon('users')}Link Play: ${LINK_PLAY_LABEL[viewOf(readIni(data.pkp))]}</button>`;

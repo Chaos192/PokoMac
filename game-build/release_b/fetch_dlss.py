@@ -48,7 +48,7 @@ def main():
         say('progress', 'download', 0, SIZE, 'Downloading nvngx_dlss.dll from NVIDIA (github.com/NVIDIA/DLSS, v310.9.16)...')
         h = hashlib.sha256()
         done = 0
-        req = urllib.request.Request(URL, headers={'User-Agent': 'PokopiaLauncher'})
+        req = urllib.request.Request(URL, headers={'User-Agent': 'PokoMac'})
         with urllib.request.urlopen(req, timeout=30) as r, open(part, 'wb') as out:
             while True:
                 b = r.read(1 << 20)

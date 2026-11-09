@@ -95,7 +95,7 @@ const game::Info& data_info() {
         game::Info g;
         g.id = "pkp";
         g.title = "Pokémon Pokopia";
-        g.product = "Pokémon Pokopia PC";
+        g.product = "PokoMac";
         g.short_title = "Pokopia";
         g.program_id = 0x0400A3A01EE4C000ull;
         g.version = "2.0.1";
@@ -108,7 +108,11 @@ const game::Info& data_info() {
         g.launcher_ini = "pkp_launcher.ini";
         g.game_ini = "pkp.ini";
         g.shader_pack = "shader_cache.pkpshc";
+#if defined(__APPLE__)
+        g.save_folder = "PokoMac";
+#else
         g.save_folder = "PokopiaRecompPC";
+#endif
         // 2.0.1a (update 655360) merged over the base game: 36 files, 8 folders, 7,246,052,773 bytes in every complete dump seen in the issue
         // logs (#44, #47, #49, #69, #76, #95, #119). Keep in step with game-build/release_b/dump_hashes.json "romfs".
         g.romfs_min_files = 36;

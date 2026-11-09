@@ -5,7 +5,7 @@
 //
 // Images (`![alt](url)`) become their alt text: the app's CSP allows no remote images.
 
-const ISSUES = 'https://github.com/featureJosh/pokopia-recomp/issues/';
+const ISSUES = 'https://github.com/Chaos192/PokoMac/issues/';
 
 // What open_release_url accepts, tested on escaped text: an escaped & " ' < > starts with "&", so it never gets through.
 const SAFE_URL = /^https:\/\/github\.com\/[^\s&\\\u0001\u0002]*$/;
@@ -193,7 +193,7 @@ export function highlights(md, count = 2) {
   return [firstSentence(plain(first.type === 'para' ? first.text : first.items[0].text))];
 }
 
-/** "Pokopia Recomp 0.7.0 (build K: Kangaroo)" -> { version: '0.7.0', build: 'Kangaroo' }. The tag stands in for a name without a version. */
+/** "PokoMac 0.7.0 (build K: Kangaroo)" -> { version: '0.7.0', build: 'Kangaroo' }. The tag stands in for a name without a version. */
 export function parseReleaseName(name, tag = '') {
   const text = String(name ?? '');
   return {
