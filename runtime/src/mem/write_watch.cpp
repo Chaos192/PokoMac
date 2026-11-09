@@ -39,8 +39,21 @@
 
 namespace nxrt::mem::ww {
 
+// The tracking unit: the host page, since page protection cannot be finer. 4 KiB on x64; 16 KiB on Apple silicon, where one tracker page
+// holds kSub guest pages (kPage). The API keeps 4 KiB page indices (relative to the region as created): arm / guard / invalidate cover every
+// tracker page that holds part of the requested run, and take_written reports every guest page of a written tracker page, so callers see a
+// superset (more copying, never a missed write).
+#if defined(__APPLE__) && defined(__aarch64__)
+constexpr uint64_t kWP = 0x4000;
+#else
+constexpr uint64_t kWP = kPage;
+#endif
+constexpr uint64_t kSub = kWP / kPage;
+
 struct Region {
-    uint64_t base = 0;          // address of page 0
+    uint64_t base = 0;          // address of tracker page 0 (kWP aligned)
+    uint64_t api_base = 0;      // address of guest page 0 of the API (the created range, kPage aligned)
+    uint64_t api_pages = 0;     // guest pages in the API view
     uint64_t npages = 0;
     uint64_t nwords = 0;
     std::unique_ptr<std::atomic<uint64_t>[]> prot, valid, written, ban;
@@ -178,15 +191,15 @@ bool release_page(Region* r, uint64_t page) {
     r->valid[w].fetch_and(~b, std::memory_order_acq_rel);
     r->written[w].fetch_or(b, std::memory_order_acq_rel);
     r->wsum[w >> 6].fetch_or(uint64_t{1} << (w & 63), std::memory_order_acq_rel);
-    const uint64_t addr = r->base + page * kPage;
+    const uint64_t addr = r->base + page * kWP;
     if (old & b) {
         bool ok = true;
         DWORD was = 0;
-        if (!VirtualProtect(reinterpret_cast<void*>(addr), kPage, PAGE_READWRITE, &was)) {
+        if (!VirtualProtect(reinterpret_cast<void*>(addr), kWP, PAGE_READWRITE, &was)) {
             ok = false;
         } else if ((was & 0xff) != PAGE_READONLY) {    // somebody else set this protection: give it back and let the fault through
             DWORD tmp = 0;
-            VirtualProtect(reinterpret_cast<void*>(addr), kPage, was, &tmp);
+            VirtualProtect(reinterpret_cast<void*>(addr), kWP, was, &tmp);
             ok = false;
         }
         rel.fetch_sub(1, std::memory_order_seq_cst);
@@ -245,7 +258,7 @@ void unguard_locked(Region* r, uint64_t first, uint64_t count) {
         while (q < first + count && test(r->guard.get(), q)) ++q;
         // protection first, then the bit: a fault that finds the bit clear must find the page accessible (the read path takes no lock)
         DWORD was = 0;
-        VirtualProtect(reinterpret_cast<void*>(r->base + p * kPage), static_cast<SIZE_T>((q - p) * kPage), PAGE_READONLY, &was);
+        VirtualProtect(reinterpret_cast<void*>(r->base + p * kWP), static_cast<SIZE_T>((q - p) * kWP), PAGE_READONLY, &was);
         set_bits(r->guard.get(), p, q - p, false);
         p = q;
     }
@@ -257,14 +270,20 @@ bool guarded_at(uint64_t addr) {
     const int hi = g_hi.load(std::memory_order_seq_cst);
     for (int i = 0; i < hi && !any; ++i) {
         Region* r = g_slots[i].load(std::memory_order_seq_cst);
-        if (!r || addr < r->base || addr >= r->base + r->npages * kPage) continue;
-        any = test(r->guard.get(), (addr - r->base) / kPage);
+        if (!r || addr < r->base || addr >= r->base + r->npages * kWP) continue;
+        any = test(r->guard.get(), (addr - r->base) / kWP);
     }
     g_busy.fetch_sub(1, std::memory_order_seq_cst);
     return any;
 }
 
 void drop_guard(uint64_t addr, uint64_t size);   // below
+
+// The guard handler makes one guest page (kPage) current: a tracker page asks it for each of its guest pages.
+void call_guard(uint64_t tracker_page_addr) {
+    if (GuardHandler fn = g_guard_fn.load(std::memory_order_acquire))
+        for (uint64_t i = 0; i < kSub; ++i) fn(tracker_page_addr + i * kPage);
+}
 
 LONG CALLBACK on_fault(EXCEPTION_POINTERS* ep) {
     if (!ep || !ep->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
@@ -279,8 +298,8 @@ LONG CALLBACK on_fault(EXCEPTION_POINTERS* ep) {
     // again on the read-only page and is tracked as usual.
     if (guarded_at(addr)) {
         g_guard_faults.fetch_add(1, std::memory_order_relaxed);
-        if (GuardHandler fn = g_guard_fn.load(std::memory_order_acquire)) fn(addr & ~(kPage - 1));
-        drop_guard(addr & ~(kPage - 1), kPage);   // still guarded (no handler, or it found nothing): read-only again, as it is
+        call_guard(addr & ~(kWP - 1));
+        drop_guard(addr & ~(kWP - 1), kWP);   // still guarded (no handler, or it found nothing): read-only again, as it is
         return EXCEPTION_CONTINUE_EXECUTION;
     }
     if (kind != 1) {
@@ -291,7 +310,7 @@ LONG CALLBACK on_fault(EXCEPTION_POINTERS* ep) {
             const int hi0 = g_hi.load(std::memory_order_seq_cst);
             for (int i = 0; i < hi0 && !in_region; ++i) {
                 Region* r = g_slots[i].load(std::memory_order_seq_cst);
-                in_region = r && addr >= r->base && addr < r->base + r->npages * kPage;
+                in_region = r && addr >= r->base && addr < r->base + r->npages * kWP;
             }
             if (in_region) return EXCEPTION_CONTINUE_EXECUTION;
         }
@@ -302,9 +321,9 @@ LONG CALLBACK on_fault(EXCEPTION_POINTERS* ep) {
     const int hi = g_hi.load(std::memory_order_seq_cst);
     for (int i = 0; i < hi; ++i) {
         Region* r = g_slots[i].load(std::memory_order_seq_cst);
-        if (!r || addr < r->base || addr >= r->base + r->npages * kPage) continue;
+        if (!r || addr < r->base || addr >= r->base + r->npages * kWP) continue;
         SharedLock lk(r);
-        const bool mine = release_page(r, (addr - r->base) / kPage);
+        const bool mine = release_page(r, (addr - r->base) / kWP);
         if (mine) fault_stat(r, addr);
         ours |= mine;
     }
@@ -323,9 +342,9 @@ void for_regions(uint64_t addr, uint64_t size, Fn&& fn) {
     for (int i = 0; i < hi; ++i) {
         Region* r = g_slots[i].load(std::memory_order_seq_cst);
         if (!r) continue;
-        const uint64_t lo = std::max(addr, r->base), end = std::min(addr + size, r->base + r->npages * kPage);
+        const uint64_t lo = std::max(addr, r->base), end = std::min(addr + size, r->base + r->npages * kWP);
         if (lo >= end) continue;
-        const uint64_t first = (lo - r->base) / kPage, last = (end - 1 - r->base) / kPage;
+        const uint64_t first = (lo - r->base) / kWP, last = (end - 1 - r->base) / kWP;
         SharedLock lk(r);
         fn(r, first, last - first + 1);
     }
@@ -339,9 +358,9 @@ void drop_guard(uint64_t addr, uint64_t size) {
     for (int i = 0; i < hi; ++i) {
         Region* r = g_slots[i].load(std::memory_order_seq_cst);
         if (!r) continue;
-        const uint64_t lo = std::max(addr, r->base), end = std::min(addr + size, r->base + r->npages * kPage);
+        const uint64_t lo = std::max(addr, r->base), end = std::min(addr + size, r->base + r->npages * kWP);
         if (lo >= end) continue;
-        const uint64_t first = (lo - r->base) / kPage, last = (end - 1 - r->base) / kPage;
+        const uint64_t first = (lo - r->base) / kWP, last = (end - 1 - r->base) / kWP;
         if (!any_set(r->guard.get(), first, last - first + 1)) continue;
         ExclusiveLock lk(r);
         unguard_locked(r, first, last - first + 1);
@@ -365,11 +384,13 @@ Gauges g_gauges;
 
 Region* region_create(uint64_t addr, uint64_t size) {
     if (!size || !heap_exists()) return nullptr;
-    const uint64_t start = addr & ~(kPage - 1), end = (addr + size + kPage - 1) & ~(kPage - 1);
+    const uint64_t start = addr & ~(kWP - 1), end = (addr + size + kWP - 1) & ~(kWP - 1);
     if (start < kHeapBase || end > kHeapBase + heap_reserved()) return nullptr;
     auto r = std::make_unique<Region>();
     r->base = start;
-    r->npages = (end - start) / kPage;
+    r->npages = (end - start) / kWP;
+    r->api_base = addr & ~(kPage - 1);
+    r->api_pages = (((addr + size + kPage - 1) & ~(kPage - 1)) - r->api_base) / kPage;
     r->nwords = (r->npages + 63) / 64;
     for (auto* bm : {&r->prot, &r->valid, &r->written, &r->ban, &r->guard}) {
         bm->reset(new std::atomic<uint64_t>[r->nwords]);
@@ -404,7 +425,7 @@ Region* region_create(uint64_t addr, uint64_t size) {
     heap_alias_ranges(views);
     for (const auto& v : views) {
         const uint64_t lo = std::max(start, kHeapBase + v.first), hi = std::min(end, kHeapBase + v.first + v.second);
-        if (lo < hi) set_bits(r->ban.get(), (lo - start) / kPage, (hi - lo) / kPage, true);
+        if (lo < hi) set_bits(r->ban.get(), (lo - start) / kWP, (hi - lo) / kWP, true);
     }
     return r.release();
 }
@@ -421,7 +442,7 @@ void region_destroy(Region* r) {
         set_bits(r->prot.get(), p, q - p, false);
         set_bits(r->guard.get(), p, q - p, false);
         DWORD was = 0;
-        VirtualProtect(reinterpret_cast<void*>(r->base + p * kPage), static_cast<SIZE_T>((q - p) * kPage), PAGE_READWRITE, &was);
+        VirtualProtect(reinterpret_cast<void*>(r->base + p * kWP), static_cast<SIZE_T>((q - p) * kWP), PAGE_READWRITE, &was);
         p = q;
     }
     }
@@ -434,15 +455,15 @@ void region_destroy(Region* r) {
     delete r;
 }
 
-uint64_t region_base(const Region* r) { return r ? r->base : 0; }
-uint64_t region_pages(const Region* r) { return r ? r->npages : 0; }
+uint64_t region_base(const Region* r) { return r ? r->api_base : 0; }
+uint64_t region_pages(const Region* r) { return r ? r->api_pages : 0; }
 
-bool arm(Region* r, uint64_t first, uint64_t count) {
+static bool t_arm(Region* r, uint64_t first, uint64_t count) {
     if (!r || !count || first >= r->npages || count > r->npages - first) return false;
     nxrt::HitchTimer ht(nxrt::kHpWwArm);
     ExclusiveLock lk(r);
     if (any_set(r->ban.get(), first, count)) return false;
-    const uint64_t a = r->base + first * kPage, n = count * kPage;
+    const uint64_t a = r->base + first * kWP, n = count * kWP;
     // A file read (or a mapping change in memory.cpp) into these pages is in progress: leave them alone. Its scope is published before it
     // releases pages under the shared lock, so either this sees it, or its release waits for this arm and undoes it.
     if (os_write_overlaps(a, a + n)) return false;
@@ -451,8 +472,8 @@ bool arm(Region* r, uint64_t first, uint64_t count) {
         MEMORY_BASIC_INFORMATION mbi{};
         if (VirtualQuery(reinterpret_cast<void*>(cur), &mbi, sizeof mbi) != sizeof mbi || mbi.State != MEM_COMMIT) return false;
         const DWORD pr = mbi.Protect & 0xff;
-        const bool already = pr == PAGE_READONLY && all_set(r->prot.get(), (cur - r->base) / kPage,
-                                                            (std::min<uint64_t>(a + n, reinterpret_cast<uint64_t>(mbi.BaseAddress) + mbi.RegionSize) - cur) / kPage);
+        const bool already = pr == PAGE_READONLY && all_set(r->prot.get(), (cur - r->base) / kWP,
+                                                            (std::min<uint64_t>(a + n, reinterpret_cast<uint64_t>(mbi.BaseAddress) + mbi.RegionSize) - cur) / kWP);
         if ((pr != PAGE_READWRITE && !already) || (mbi.Protect & PAGE_GUARD)) return false;
         cur = std::min<uint64_t>(a + n, reinterpret_cast<uint64_t>(mbi.BaseAddress) + mbi.RegionSize);
     }
@@ -469,15 +490,15 @@ bool arm(Region* r, uint64_t first, uint64_t count) {
     return true;
 }
 
-bool all_valid(const Region* r, uint64_t first, uint64_t count) {
+static bool t_all_valid(const Region* r, uint64_t first, uint64_t count) {
     if (!r || !count || first >= r->npages || count > r->npages - first) return false;
     return all_set(r->valid.get(), first, count);
 }
 
-bool page_valid(const Region* r, uint64_t page) { return r && page < r->npages && test(r->valid.get(), page); }
-bool page_banned(const Region* r, uint64_t page) { return !r || page >= r->npages || test(r->ban.get(), page); }
+static bool t_page_valid(const Region* r, uint64_t page) { return r && page < r->npages && test(r->valid.get(), page); }
+static bool t_page_banned(const Region* r, uint64_t page) { return !r || page >= r->npages || test(r->ban.get(), page); }
 
-void invalidate(Region* r, uint64_t first, uint64_t count) {
+static void t_invalidate(Region* r, uint64_t first, uint64_t count) {
     if (!r || first >= r->npages) return;
     count = std::min(count, r->npages - first);
     if (count) set_bits(r->valid.get(), first, count, false);
@@ -485,11 +506,11 @@ void invalidate(Region* r, uint64_t first, uint64_t count) {
 
 void set_guard_handler(GuardHandler fn) { g_guard_fn.store(fn, std::memory_order_release); }
 
-bool guard(Region* r, uint64_t first, uint64_t count) {
+static bool t_guard(Region* r, uint64_t first, uint64_t count) {
     if (!r || !count || first >= r->npages || count > r->npages - first) return false;
     ExclusiveLock lk(r);
     if (!all_set(r->prot.get(), first, count) || any_set(r->ban.get(), first, count)) return false;
-    const uint64_t a = r->base + first * kPage, n = count * kPage;
+    const uint64_t a = r->base + first * kWP, n = count * kWP;
     if (os_write_overlaps(a, a + n)) return false;
     set_bits(r->guard.get(), first, count, true);
     DWORD was = 0;
@@ -501,7 +522,7 @@ bool guard(Region* r, uint64_t first, uint64_t count) {
     return true;
 }
 
-void unguard(Region* r, uint64_t first, uint64_t count) {
+static void t_unguard(Region* r, uint64_t first, uint64_t count) {
     if (!r || first >= r->npages) return;
     count = std::min(count, r->npages - first);
     if (!count || !any_set(r->guard.get(), first, count)) return;
@@ -509,7 +530,7 @@ void unguard(Region* r, uint64_t first, uint64_t count) {
     unguard_locked(r, first, count);
 }
 
-bool all_armed(const Region* r, uint64_t first, uint64_t count) {
+static bool t_all_armed(const Region* r, uint64_t first, uint64_t count) {
     if (!r || !count || first >= r->npages || count > r->npages - first) return false;
     return all_set(r->prot.get(), first, count);
 }
@@ -532,7 +553,7 @@ void take_word(Region* r, uint64_t w, std::vector<uint64_t>& out) {
 // A write that completed before this call (its fault handler returned: both its written bit and its summary bit are set) is found: the
 // summary bit is cleared (exchange) before its word is read, so a bit set in between is either read now or leaves its summary bit for the
 // next call. Same result as reading every word; a write racing with the call shows here or in the next call, as before.
-void take_written(Region* r, std::vector<uint64_t>& out) {
+static void t_take_written(Region* r, std::vector<uint64_t>& out) {
     if (!r) return;
     const size_t n0 = out.size();
     g_st_takes.fetch_add(1, std::memory_order_relaxed);
@@ -572,7 +593,7 @@ TakeStats take_stats() {
 namespace {
 // An OS-call slot over [p, p + n) (OsWriteScope, OsReadScope): arm() and guard() leave the range alone while it is held.
 int os_slot_acquire(const void* p, uint64_t n) {
-    const uint64_t lo = reinterpret_cast<uint64_t>(p) & ~(kPage - 1), hi = (reinterpret_cast<uint64_t>(p) + n + kPage - 1) & ~(kPage - 1);
+    const uint64_t lo = reinterpret_cast<uint64_t>(p) & ~(kWP - 1), hi = (reinterpret_cast<uint64_t>(p) + n + kWP - 1) & ~(kWP - 1);
     for (int i = 0; i < kOsSlots; ++i) {
         uint64_t expect = 0;
         if (g_os[i].hi.load(std::memory_order_relaxed) == 0 && g_os[i].lo.compare_exchange_strong(expect, lo | 1, std::memory_order_seq_cst)) {
@@ -616,22 +637,22 @@ void before_os_read(const void* p, uint64_t n) {
     // guarded pages only: their owner makes them current and they become read-only (armed) again, which the OS can read. Armed pages
     // stay armed: a read does not change them.
     if (!n || g_live.load(std::memory_order_acquire) == 0) return;
-    const uint64_t lo = reinterpret_cast<uint64_t>(p) & ~(kPage - 1), hi = reinterpret_cast<uint64_t>(p) + n;
-    for (uint64_t a = lo; a < hi; a += kPage)
+    const uint64_t lo = reinterpret_cast<uint64_t>(p) & ~(kWP - 1), hi = reinterpret_cast<uint64_t>(p) + n;
+    for (uint64_t a = lo; a < hi; a += kWP)
         if (guarded_at(a)) {
-            if (GuardHandler fn = g_guard_fn.load(std::memory_order_acquire)) fn(a);
-            drop_guard(a, kPage);
+            call_guard(a);
+            drop_guard(a, kWP);
         }
 }
 
 void before_os_write(const void* p, uint64_t n) {
     // guarded pages first: their owner makes them current (the write may cover only part of a page), outside the region locks
     if (n && g_live.load(std::memory_order_acquire) != 0) {
-        const uint64_t lo = reinterpret_cast<uint64_t>(p) & ~(kPage - 1), hi = reinterpret_cast<uint64_t>(p) + n;
-        for (uint64_t a = lo; a < hi; a += kPage)
+        const uint64_t lo = reinterpret_cast<uint64_t>(p) & ~(kWP - 1), hi = reinterpret_cast<uint64_t>(p) + n;
+        for (uint64_t a = lo; a < hi; a += kWP)
             if (guarded_at(a)) {
-                if (GuardHandler fn = g_guard_fn.load(std::memory_order_acquire)) fn(a);
-                drop_guard(a, kPage);
+                call_guard(a);
+                drop_guard(a, kWP);
             }
     }
     for_regions(reinterpret_cast<uint64_t>(p), n, [](Region* r, uint64_t first, uint64_t count) {
@@ -647,7 +668,7 @@ void forget(uint64_t addr, uint64_t size, bool ban) {
         for (uint64_t q = first; q < first + count; ++q)           // guarded pages: read-only first (the owner's newer copy is dropped)
             if (test(r->guard.get(), q)) {              // protection first, then the bit (see unguard_locked)
                 DWORD was = 0;
-                VirtualProtect(reinterpret_cast<void*>(r->base + q * kPage), kPage, PAGE_READONLY, &was);
+                VirtualProtect(reinterpret_cast<void*>(r->base + q * kWP), kWP, PAGE_READONLY, &was);
                 r->guard[q >> 6].fetch_and(~bit(q), std::memory_order_acq_rel);
             }
         for (uint64_t q = first; q < first + count; ++q)           // armed pages go back to read-write (the caller may then set its own)
@@ -662,5 +683,65 @@ void ban_section(uint64_t offset, uint64_t size) { forget(kHeapBase + offset, si
 
 uint64_t faults() { return g_faults.load(std::memory_order_relaxed); }
 uint64_t fault_waits() { return g_waits.load(std::memory_order_relaxed); }
+
+// ---- the API: guest pages (kPage) of the created range, mapped onto tracker pages (kWP) ----------------------------------------------
+namespace {
+// Guest pages [first, first + count) to the tracker pages that hold them. False when the run is empty or leaves the region.
+bool to_tracker(const Region* r, uint64_t first, uint64_t count, uint64_t* tf, uint64_t* tc) {
+    if (!r || !count || first >= r->api_pages || count > r->api_pages - first) return false;
+    const uint64_t a = r->api_base + first * kPage, e = a + count * kPage;
+    *tf = (a - r->base) / kWP;
+    *tc = (e - 1 - r->base) / kWP - *tf + 1;
+    return true;
+}
+uint64_t tracker_of(const Region* r, uint64_t page) { return (r->api_base + page * kPage - r->base) / kWP; }
+}  // namespace
+
+bool arm(Region* r, uint64_t first, uint64_t count) {
+    uint64_t f, c;
+    return to_tracker(r, first, count, &f, &c) && t_arm(r, f, c);
+}
+bool all_valid(const Region* r, uint64_t first, uint64_t count) {
+    uint64_t f, c;
+    return to_tracker(r, first, count, &f, &c) && t_all_valid(r, f, c);
+}
+bool page_valid(const Region* r, uint64_t page) { return r && page < r->api_pages && t_page_valid(r, tracker_of(r, page)); }
+bool page_banned(const Region* r, uint64_t page) { return !r || page >= r->api_pages || t_page_banned(r, tracker_of(r, page)); }
+void invalidate(Region* r, uint64_t first, uint64_t count) {
+    if (!r || first >= r->api_pages) return;
+    uint64_t f, c;
+    if (to_tracker(r, first, std::min(count, r->api_pages - first), &f, &c)) t_invalidate(r, f, c);
+}
+bool guard(Region* r, uint64_t first, uint64_t count) {
+    uint64_t f, c;
+    return to_tracker(r, first, count, &f, &c) && t_guard(r, f, c);
+}
+void unguard(Region* r, uint64_t first, uint64_t count) {
+    if (!r || first >= r->api_pages) return;
+    uint64_t f, c;
+    if (to_tracker(r, first, std::min(count, r->api_pages - first), &f, &c)) t_unguard(r, f, c);
+}
+bool all_armed(const Region* r, uint64_t first, uint64_t count) {
+    uint64_t f, c;
+    return to_tracker(r, first, count, &f, &c) && t_all_armed(r, f, c);
+}
+void take_written(Region* r, std::vector<uint64_t>& out) {
+    if (!r) return;
+    if constexpr (kSub == 1) {
+        t_take_written(r, out);          // one guest page per tracker page and the same base: the indices are the API's
+        return;
+    }
+    thread_local std::vector<uint64_t> tp;
+    tp.clear();
+    t_take_written(r, tp);
+    const uint64_t lo = r->api_base, hi = r->api_base + r->api_pages * kPage;
+    for (uint64_t t : tp) {
+        const uint64_t a = r->base + t * kWP;
+        for (uint64_t i = 0; i < kSub; ++i) {
+            const uint64_t g = a + i * kPage;
+            if (g >= lo && g < hi) out.push_back((g - lo) / kPage);
+        }
+    }
+}
 
 }  // namespace nxrt::mem::ww

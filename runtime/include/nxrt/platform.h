@@ -84,6 +84,10 @@ uint64_t ticks_ns();                          // SDL_GetTicksNS
 // Vulkan: the instance extensions SDL needs (VK_KHR_surface + the platform one) and surface creation/destruction. The Vulkan
 // handles are passed as integers so that this header needs no Vulkan include.
 const char* const* vulkan_instance_extensions(uint32_t* count);
+#if defined(__APPLE__)
+// macOS: loads the Vulkan loader next to the executable (or the SDK's) and picks the driver manifest (platform/mac/gfx/vulkan_mac.cpp).
+bool mac_load_vulkan();
+#endif
 bool create_vulkan_surface(void* vk_instance, uint64_t* surface_out);
 void destroy_vulkan_surface(void* vk_instance, uint64_t surface);
 

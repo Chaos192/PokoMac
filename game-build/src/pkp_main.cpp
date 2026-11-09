@@ -465,7 +465,11 @@ int main(int argc, char** argv) {
         lo.name = g.file;
         lo.base = g.base;
         std::string err;
+#ifdef _WIN32
         const std::string path = exefs + "\\" + g.file;
+#else
+        const std::string path = exefs + "/" + g.file;
+#endif
         nxrt::Module* m = nullptr;
         if (packaged) {
             auto it = std::find_if(pkg.exefs.begin(), pkg.exefs.end(), [&](const nxrt::nup::File& f) { return f.path == g.file; });

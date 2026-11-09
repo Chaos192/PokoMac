@@ -415,6 +415,12 @@ const std::vector<AddOnContent>& add_on_contents() {
 std::string save_dir() {
     std::string d = config_get_str("fs", "save_dir", "");
     if (!d.empty()) return d;
+#ifndef _WIN32
+    // macOS: ~/Library/Application Support/<save folder>/save (the launcher normally sets [fs] save_dir to the game folder's save/)
+    const char* home = std::getenv("HOME");
+    const char* mfolder = game::info().save_folder;
+    return std::string(home && *home ? home : ".") + "/Library/Application Support/" + (mfolder && *mfolder ? mfolder : "nxrt") + "/save";
+#endif
     const char* appdata = std::getenv("APPDATA");
     const char* folder = game::info().save_folder;
     return std::string(appdata && *appdata ? appdata : ".") + "\\" + (folder && *folder ? folder : "nxrt") + "\\save";

@@ -183,6 +183,9 @@ bool init(const Config& cfg) {
         heap = static_cast<uint64_t>(gb) << 30;
     }
     g_default_heap.store(align_up(heap, kAllocGranularity));
+#if defined(__APPLE__)
+    mac_log_guest_window();
+#endif
 
     if (cfg.reserve_regions) {
         if (!reserve_fixed(kStackBase, kStackSize, "stack")) {
@@ -764,4 +767,15 @@ VmInfo vm_query(uint64_t addr) {
     return VmInfo{0, gap_end, kMemFree, 0};
 }
 
+}  // namespace nxrt::mem
+
+namespace nxrt::mem {
+uint64_t host_page_size() {
+    static const uint64_t n = [] {
+        SYSTEM_INFO si{};
+        GetSystemInfo(&si);
+        return si.dwPageSize ? static_cast<uint64_t>(si.dwPageSize) : kPage;
+    }();
+    return n;
+}
 }  // namespace nxrt::mem

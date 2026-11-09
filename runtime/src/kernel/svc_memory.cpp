@@ -98,6 +98,11 @@ constexpr uint64_t kMapRegionBase = 0x0008000000ull, kMapRegionSize = 0x7FF80000
 // The guest layout owns [kMainBase, kKernelBase + kKernelSize) (images, HLE thunks, heap view, stacks, kernel region): only the alias
 // region of that span and everything below the main image is open for map calls.
 bool in_map_region(uint64_t addr, uint64_t size) {
+#if defined(__APPLE__)
+    // macOS: the guest window held at load time, minus the HLE thunk addresses; a range something already occupies is refused by the reservation.
+    const bool hle = addr < mem::kHleBase + mem::kHleSize && mem::kHleBase < addr + size;
+    return within(addr, size, mem::kGuestWindowLo, mem::kGuestWindowHi - mem::kGuestWindowLo) && !hle;
+#endif
     return within(addr, size, kMapRegionBase, mem::kMainBase - kMapRegionBase) || within(addr, size, mem::kAliasBase, mem::kAliasSize);
 }
 

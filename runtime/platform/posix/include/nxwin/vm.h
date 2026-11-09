@@ -77,6 +77,11 @@ size_t host_page();                                   // 16384 on Apple silicon
 // Reads n bytes at src into dst without faulting; false (and nothing guaranteed in dst) when any page is not readable.
 bool safe_read(void* dst, const void* src, size_t n);
 bool safe_write(void* dst, const void* src, size_t n);
+// Holds: address space claimed early (inaccessible) so that nothing else in the process takes it. A fixed reservation or a section view
+// that lies wholly inside a hold replaces the hold's pages (where Windows would see free space), and releasing it gives them back to the hold.
+// Reserves every free part of [addr, addr + size); returns the bytes it could not take (already mapped by someone else). Safe to call from
+// an early constructor (no dynamic initialisation involved).
+uint64_t vm_hold(uint64_t addr, uint64_t size);
 }  // namespace nxwin
 
 LPVOID VirtualAlloc(LPVOID addr, SIZE_T size, DWORD type, DWORD prot);

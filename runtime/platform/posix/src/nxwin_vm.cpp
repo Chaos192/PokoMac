@@ -81,11 +81,53 @@ std::map<uint64_t, Region>::iterator region_at(uint64_t addr) {
     return addr < it->first + it->second.size ? it : g_regions.end();
 }
 
+// ---- holds: plain arrays (vm_hold runs from an early constructor, before any C++ static initialisation of this file) ----
+constexpr int kMaxHolds = 256;
+uint64_t g_hold_lo[kMaxHolds], g_hold_hi[kMaxHolds];
+int g_holds = 0;
+
+// [a, a + size) lies wholly inside held address space (the pieces vm_hold took, which may be adjacent).
+bool in_hold(uint64_t a, uint64_t size) {
+    uint64_t cur = a;
+    const uint64_t end = a + size;
+    for (bool moved = true; moved && cur < end;) {
+        moved = false;
+        for (int i = 0; i < g_holds; ++i)
+            if (g_hold_lo[i] <= cur && cur < g_hold_hi[i]) {
+                cur = g_hold_hi[i];
+                moved = true;
+            }
+    }
+    return cur >= end;
+}
+// Gives [a, a + size) (inside held space) back to the hold: inaccessible again, no memory.
+void rehold(uint64_t a, uint64_t size) {
+    mach_vm_address_t p = a;
+    mach_vm_map(mach_task_self(), &p, size, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, MACH_PORT_NULL, 0, FALSE, VM_PROT_NONE, VM_PROT_ALL,
+                VM_INHERIT_DEFAULT);
+}
+// Whether [a, a + size) overlaps a reservation or view this module made (with g_m held).
+bool overlaps_region(uint64_t a, uint64_t size) {
+    auto it = g_regions.lower_bound(a + size);
+    if (it == g_regions.begin()) return false;
+    --it;
+    return it->first + it->second.size > a;
+}
+
 bool fixed_alloc(uint64_t at, uint64_t size, int prot) {
     mach_vm_address_t a = at;
-    if (mach_vm_allocate(mach_task_self(), &a, size, VM_FLAGS_FIXED) != KERN_SUCCESS) return false;
+    int flags = VM_FLAGS_FIXED;
+    if (in_hold(at, size)) {
+        if (overlaps_region(at, size)) return false;   // our own reservation is there: taken, as on Windows
+        flags |= VM_FLAGS_OVERWRITE;
+    }
+    if (mach_vm_allocate(mach_task_self(), &a, size, flags) != KERN_SUCCESS) return false;
     if (prot != (PROT_READ | PROT_WRITE)) mprotect(reinterpret_cast<void*>(a), size, prot);
     return true;
+}
+void release_range(uint64_t a, uint64_t size) {
+    if (in_hold(a, size)) rehold(a, size);
+    else mach_vm_deallocate(mach_task_self(), a, size);
 }
 uint64_t anywhere_alloc(uint64_t size, int prot) {
     mach_vm_address_t a = 0;
@@ -105,6 +147,42 @@ void section_commit(SectionObj* s, uint64_t off_start, uint64_t off_end, int pro
     }
 }
 }  // namespace
+
+uint64_t vm_hold(uint64_t addr, uint64_t size) {
+    // Walk the range: reserve each gap between existing mappings (inaccessible, no memory), skip what is mapped already.
+    uint64_t missed = 0;
+    uint64_t cur = addr;
+    const uint64_t end = addr + size;
+    while (cur < end) {
+        mach_vm_address_t r = cur;
+        mach_vm_size_t rs = 0;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t obj;
+        const bool found = mach_vm_region(mach_task_self(), &r, &rs, VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&info), &cnt,
+                                          &obj) == KERN_SUCCESS;
+        const uint64_t gap_end = found ? std::min<uint64_t>(r, end) : end;   // free until the next mapping
+        if (gap_end > cur) {
+            mach_vm_address_t p = cur;
+            if (mach_vm_map(mach_task_self(), &p, gap_end - cur, 0, VM_FLAGS_FIXED, MACH_PORT_NULL, 0, FALSE, VM_PROT_NONE, VM_PROT_ALL,
+                            VM_INHERIT_DEFAULT) == KERN_SUCCESS &&
+                g_holds < kMaxHolds) {
+                g_hold_lo[g_holds] = cur;
+                g_hold_hi[g_holds] = gap_end;
+                ++g_holds;
+            } else {
+                missed += gap_end - cur;
+            }
+            cur = gap_end;
+            continue;
+        }
+        // cur is inside an existing mapping: skip it
+        const uint64_t next = std::min<uint64_t>(r + rs, end);
+        missed += next - cur;
+        cur = next;
+    }
+    return missed;
+}
 
 bool safe_read(void* dst, const void* src, size_t n) {
     if (!n) return true;
@@ -166,7 +244,7 @@ BOOL VirtualFree(LPVOID addr_in, SIZE_T size, DWORD type) {
     if (it == g_regions.end() || it->second.sec) { SetLastError(ERROR_INVALID_ADDRESS); return FALSE; }
     if (type & MEM_RELEASE) {
         if (size || it->first != (addr & ~(kGran - 1))) { SetLastError(ERROR_INVALID_PARAMETER); return FALSE; }
-        mach_vm_deallocate(mach_task_self(), it->first, it->second.size);
+        release_range(it->first, it->second.size);
         g_regions.erase(it);
         return TRUE;
     }
@@ -205,11 +283,33 @@ BOOL VirtualProtect(LPVOID addr_in, SIZE_T size, DWORD prot, PDWORD old) {
         *old = mach_vm_region(mach_task_self(), &a, &sz, VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&info), &cnt, &obj) ==
                        KERN_SUCCESS && a <= addr ? win_prot(info.protection) : PAGE_NOACCESS;
     }
-    const uint64_t s = page_down(addr), e = page_up(addr + (size ? size : 1));
-    if (mprotect(reinterpret_cast<void*>(s), e - s, prot_of(prot)) != 0) {
+    // Host pages wholly inside the range get exactly `prot`. A host page the range covers only partly also holds guest pages (4 KiB) the
+    // caller did not name: it gets the union of `prot` and what it has, so no neighbouring page loses access it had (more permissive, never less).
+    const uint64_t pg = vm_page_size, a0 = addr, a1 = addr + (size ? size : 1);
+    const uint64_t s = page_down(a0), e = page_up(a1), fs = page_up(a0), fe = page_down(a1);
+    const int np = prot_of(prot);
+    auto fail = [] {
         SetLastError(errno == ENOMEM ? ERROR_INVALID_ADDRESS : errno_to_win32(errno));
         return FALSE;
+    };
+    if (fs == s && fe == e) {
+        if (mprotect(reinterpret_cast<void*>(s), e - s, np) != 0) return fail();
+        return TRUE;
     }
+    auto cur_prot = [](uint64_t p) {
+        mach_vm_address_t a = p;
+        mach_vm_size_t sz = 0;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t obj;
+        if (mach_vm_region(mach_task_self(), &a, &sz, VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&info), &cnt, &obj) != KERN_SUCCESS ||
+            a > p)
+            return PROT_NONE;
+        return static_cast<int>(info.protection & (VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE));
+    };
+    if (fs < fe && mprotect(reinterpret_cast<void*>(fs), fe - fs, np) != 0) return fail();
+    if (s < fs && mprotect(reinterpret_cast<void*>(s), pg, np | cur_prot(s)) != 0) return fail();
+    if (fe < e && fe >= fs && mprotect(reinterpret_cast<void*>(fe), pg, np | cur_prot(fe)) != 0) return fail();
     return TRUE;
 }
 
@@ -280,8 +380,12 @@ LPVOID MapViewOfFileEx(HANDLE h, DWORD access, DWORD off_hi, DWORD off_lo, SIZE_
     std::lock_guard<std::mutex> g(g_m);
     mach_vm_address_t a = reinterpret_cast<uint64_t>(base);
     const vm_prot_t cur = s->reserve ? VM_PROT_NONE : maxp;
-    const kern_return_t kr = mach_vm_map(mach_task_self(), &a, size, base ? 0 : kGran - 1, base ? VM_FLAGS_FIXED : VM_FLAGS_ANYWHERE, s->entry, off,
-                                         FALSE, cur, maxp, VM_INHERIT_NONE);
+    int flags = base ? VM_FLAGS_FIXED : VM_FLAGS_ANYWHERE;
+    if (base && in_hold(a, size)) {
+        if (overlaps_region(a, size)) { SetLastError(ERROR_INVALID_ADDRESS); return nullptr; }
+        flags |= VM_FLAGS_OVERWRITE;
+    }
+    const kern_return_t kr = mach_vm_map(mach_task_self(), &a, size, base ? 0 : kGran - 1, flags, s->entry, off, FALSE, cur, maxp, VM_INHERIT_NONE);
     if (kr != KERN_SUCCESS) {
         SetLastError(kr == KERN_NO_SPACE ? ERROR_INVALID_ADDRESS : ERROR_NOT_ENOUGH_MEMORY);
         return nullptr;
@@ -307,7 +411,7 @@ BOOL UnmapViewOfFile(LPCVOID view) {
         std::lock_guard<std::mutex> g(g_m);
         auto it = g_regions.find(reinterpret_cast<uint64_t>(view));
         if (it == g_regions.end() || !it->second.sec) { SetLastError(ERROR_INVALID_ADDRESS); return FALSE; }
-        mach_vm_deallocate(mach_task_self(), it->first, it->second.size);
+        release_range(it->first, it->second.size);
         s = it->second.sec;
         g_regions.erase(it);
     }

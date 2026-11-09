@@ -58,6 +58,7 @@ if(APPLE)
     target_compile_options(nxwin PUBLIC "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include nxwin/msvcrt.h>")
     file(GLOB NXRT_MAC_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/platform/mac/core/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/platform/mac/core/*.mm")
     list(APPEND NXRT_SOURCES ${NXRT_MAC_SOURCES})
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/platform/mac/core/movie_avf.mm" PROPERTIES COMPILE_OPTIONS "-fobjc-arc")   # movie:: on AVFoundation is ARC code
 endif()
 add_library(nxrt STATIC ${NXRT_SOURCES})
 target_include_directories(nxrt PUBLIC include)
@@ -67,7 +68,7 @@ endif()
 if(WIN32)
     target_link_libraries(nxrt PUBLIC psapi)
 else()
-    target_link_libraries(nxrt PUBLIC nxwin "-framework CoreFoundation" "-framework CoreAudio" "-framework AudioToolbox"
+    target_link_libraries(nxrt PUBLIC nxwin "-framework CoreFoundation" "-framework CoreAudio" "-framework AudioToolbox" "-framework AVFoundation"
                           "-framework VideoToolbox" "-framework CoreMedia" "-framework CoreVideo" "-framework ImageIO"
                           "-framework CoreGraphics" "-framework UniformTypeIdentifiers" "-framework Foundation")
 endif()

@@ -110,7 +110,8 @@ endif()
 if(WIN32)
     target_link_options(pkp PRIVATE /MAP /STACK:134217728 /HIGHENTROPYVA:NO /DEBUG /MANIFEST:NO)   # res/pkp.rc carries the manifest
 else()
-    target_link_options(pkp PRIVATE -Wl,-stack_size,0x8000000 "-Wl,-map,${CMAKE_CURRENT_BINARY_DIR}/pkp.map")
+    # SDK version 12.0 in the header: no randomly slid kernel data range in the guest window (runtime include/nxrt/memory.h)
+    target_link_options(pkp PRIVATE -Wl,-stack_size,0x8000000 "-Wl,-map,${CMAKE_CURRENT_BINARY_DIR}/pkp.map" "-Wl,-platform_version,macos,12.0,12.0")
 endif()
 
 # The ASTC decoder DLLs astc2bc7 loads at run time (NVN textures in ASTC are transcoded to BC7 on first use): next to pkp.exe.

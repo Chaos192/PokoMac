@@ -512,13 +512,25 @@ void LoaderAccess::protect(Module& m) {
         uint64_t first = (align_up(m.relro_start_, mem::kPage) - lo) / mem::kPage, last = (align_down(m.relro_start_ + m.relro_size_, mem::kPage) - lo) / mem::kPage;
         for (uint64_t p = first; p < last && p < pages; p++) perm[p] &= ~static_cast<uint8_t>(PF_W);
     }
+    // The host protects whole host pages: where one holds several guest pages (16 KiB on Apple silicon), it gets the union of their
+    // permissions, so a gap page or the image's tail never takes the neighbouring segment's pages away. svcQueryMemory keeps the guest pages'
+    // own values (perm / has).
+    std::vector<uint8_t> hperm = perm, hhas = has;
+    const size_t sub = static_cast<size_t>(std::max<uint64_t>(1, mem::host_page_size() / mem::kPage));
+    if (sub > 1) {
+        for (size_t g = 0; g < pages; g += sub) {
+            uint8_t u = 0, h = 0;
+            for (size_t i = g; i < g + sub && i < pages; i++) { u |= perm[i]; h |= has[i]; }
+            for (size_t i = g; i < g + sub && i < pages; i++) { hperm[i] = u; hhas[i] = h; }
+        }
+    }
     for (size_t p = 0; p < pages;) {
         size_t q = p;
-        while (q < pages && perm[q] == perm[p] && has[q] == has[p]) q++;
-        uint8_t f = perm[p];
-        mem::Prot pr = !has[p] || !(f & (PF_R | PF_W | PF_X)) ? mem::Prot::None
-                       : (f & PF_X) ? ((f & PF_W) ? mem::Prot::RWX : mem::Prot::RX)
-                       : (f & PF_W) ? mem::Prot::RW : mem::Prot::R;
+        while (q < pages && perm[q] == perm[p] && has[q] == has[p] && hperm[q] == hperm[p] && hhas[q] == hhas[p]) q++;
+        uint8_t f = perm[p], hf = hperm[p];
+        mem::Prot pr = !hhas[p] || !(hf & (PF_R | PF_W | PF_X)) ? mem::Prot::None
+                       : (hf & PF_X) ? ((hf & PF_W) ? mem::Prot::RWX : mem::Prot::RX)
+                       : (hf & PF_W) ? mem::Prot::RW : mem::Prot::R;
         uint64_t addr = m.base_ + p * mem::kPage, len = (q - p) * mem::kPage;
         mem::protect(addr, len, pr);
         // svcQueryMemory reports Horizon permission bits (R = 1, W = 2, X = 4), not the ELF ones (X = 1, W = 2, R = 4).

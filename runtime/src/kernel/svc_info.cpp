@@ -25,8 +25,14 @@ constexpr uint32_t kInvalidCombination = 0xE801;   // kernel result 116 (Invalid
 constexpr uint64_t kCoreMaskAppSwitch2 = 0x3f;                  // Switch 2: cores 0..5 (Pokopia NPDM ThreadInfo cores 0-5)
 constexpr uint64_t kCoreMaskApp = 0x7;                          // nxrt: cores 0..2, the three application cores
 constexpr uint64_t kPriorityMaskApp = 0x0FFFFFFFF0000000ull;    // nxrt: bits 28..59 = HOS priorities 0x1C..0x3B (kernel.h: applications 28..59)
+#if defined(__APPLE__)
+// macOS: the guest space is [0x71_0000_0000, 0x80_0000_0000) (include/nxrt/memory.h); random placement stays inside it.
+constexpr uint64_t kAslrRegionAddress = mem::kGuestWindowLo;
+constexpr uint64_t kAslrRegionSize = mem::kGuestWindowHi - mem::kGuestWindowLo;
+#else
 constexpr uint64_t kAslrRegionAddress = 0x0008000000ull;       // chosen value (Switchbrew: no value given)
 constexpr uint64_t kAslrRegionSize = 0x7FF8000000ull;           // chosen value (Switchbrew: no value given)
+#endif
 constexpr uint64_t kTotalMemorySwitch2 = 0x2A0000000ull;        // Switch 2 application: 10.5 GiB (nxrt choice; Pokopia alone pools ~8 GiB)
 constexpr uint64_t kTotalMemoryAvailable = 0xCD500000ull;       // chosen value: ~3.2 GiB, like an application ([memory] app_memory_mb overrides)
 constexpr uint64_t kUsedMemoryOverhead = 0x4000000ull;          // chosen value: 64 MiB added to the heap size for "used"

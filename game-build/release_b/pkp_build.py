@@ -43,16 +43,22 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RECOMP = os.path.join(HERE, 'recomp')
 SDK = os.path.join(HERE, 'sdk')
 # Windows: the bundled Zig. Linux (the native launcher): a Linux build of the same Zig version, which it fetches into
-# tools/linux/zig (PKP_ZIG overrides it); it cross-compiles the same x86_64-windows-gnu objects
+# tools/linux/zig (PKP_ZIG overrides it); it cross-compiles the same x86_64-windows-gnu objects.
+# macOS: the launcher fetches the macOS build of the same Zig into tools/macos/zig; the game is a native arm64 Mach-O program `pkp`
+# linked against libpkp_rt.dylib (the runtime built for macOS), which sits next to it.
+MACOS = sys.platform == 'darwin'
 ZIG = (os.path.join(HERE, 'zig', 'zig.exe') if os.name == 'nt'
-       else os.environ.get('PKP_ZIG') or os.path.join(os.path.dirname(HERE), 'linux', 'zig', 'zig'))
+       else os.environ.get('PKP_ZIG') or os.path.join(os.path.dirname(HERE), 'macos' if MACOS else 'linux', 'zig', 'zig'))
+EXE = 'pkp' if MACOS else 'pkp.exe'
+RT_LIB = 'libpkp_rt.dylib' if MACOS else 'pkp_rt.lib'     # in sdk/: what the link resolves the runtime's exports against
+TARGET = ['-target', 'aarch64-macos', '-mcpu=apple_m1'] if MACOS else ['-target', 'x86_64-windows-gnu', '-mcpu=x86_64+cx16']
 FORMAT = 2          # bump when the build layout or the stamp changes: older builds (partial or done) are then started over
 # the lifter as game-build/scripts/make-release.ps1 ships it: paths under RECOMP, the same in the zip (tools/build/recomp/...)
 # and in the repo (recomp/...)
 LIFTER = ['nxrecomp', 'include/nxrecomp', 'games/pkp/CMakeLists.txt', 'games/pkp/config.py']
 SITES = 'games/pkp/main.sites'
 # what the link takes from sdk/ besides the lifted objects and pkp_rt.lib (stamped on its own, as 'runtime')
-SDK_FILES = ['pkp_stub.cpp', 'pkp_rt_api.h', 'pkp.rc', 'pkp.manifest']
+SDK_FILES = ['pkp_stub.cpp', 'pkp_rt_api.h'] + ([] if MACOS else ['pkp.rc', 'pkp.manifest'])
 
 # name, NSO file, guest base, NxModule.index, translation units (as recomp/games/pkp/CMakeLists.txt)
 MODULES = [
@@ -62,8 +68,8 @@ MODULES = [
     ('rtld', 'rtld', 0x7700000000, 3, 1),
 ]
 # recomp/cmake/NxRecomp.cmake flags for the lifted code, in clang (not clang-cl) syntax
-CXXFLAGS = ['-target', 'x86_64-windows-gnu', '-mcpu=x86_64+cx16', '-std=c++20', '-O1', '-w', '-fno-exceptions', '-fno-rtti',
-            '-fno-strict-aliasing', '-ffp-contract=off', '-fno-threadsafe-statics']
+CXXFLAGS = TARGET + ['-std=c++20', '-O1', '-w', '-fno-exceptions', '-fno-rtti',
+                     '-fno-strict-aliasing', '-ffp-contract=off', '-fno-threadsafe-statics']
 COMPILER = [ZIG, 'c++']                 # the compile command before the flags (tests put a fake one here)
 CACHE_MB = 3072                         # default size cap of <game>/build/objcache
 CREATE_NO_WINDOW = 0x08000000
@@ -119,23 +125,23 @@ def tree_hash(root, rels):
 def tool_stamp():
     """The part of the build stamp this package decides: a release that changes any of it rebuilds pkp.exe."""
     return {'lifter': tree_hash(RECOMP, LIFTER), 'sites': tree_hash(RECOMP, [SITES]), 'sdk': tree_hash(SDK, SDK_FILES),
-            'runtime': sha256(os.path.join(SDK, 'pkp_rt.lib')), 'cxxflags': CXXFLAGS, 'modules': [list(m) for m in MODULES]}
+            'runtime': sha256(os.path.join(SDK, RT_LIB)), 'cxxflags': CXXFLAGS, 'modules': [list(m) for m in MODULES]}
 
 
 def check(game):
     """Whether pkp.exe and <game>/build/done.json were built with this package's tools: (current, reason)."""
-    if not os.path.isfile(os.path.join(game, 'pkp.exe')):
-        return False, 'pkp.exe is not built yet'
+    if not os.path.isfile(os.path.join(game, EXE)):
+        return False, '%s is not built yet' % EXE
     done = read_json(os.path.join(game, 'build', 'done.json'))
     if not isinstance(done, dict):
-        return False, 'pkp.exe has no finished build record'
+        return False, '%s has no finished build record' % EXE
     if done.get('format') != FORMAT or not isinstance(done.get('tools'), dict):
-        return False, 'pkp.exe was built by an older release'
+        return False, '%s was built by an older release' % EXE
     want = tool_stamp()
     changed = [k for k in want if done['tools'].get(k) != want[k]]
     if changed:
         return False, 'this release changes ' + ', '.join(changed)
-    return True, 'pkp.exe matches this release'
+    return True, '%s matches this release' % EXE
 
 
 def read_json(path):
@@ -508,6 +514,35 @@ def clear_high_entropy_va(exe):
         f.write(dc.to_bytes(2, 'little'))
 
 
+def macho_set_sdk_version(path, major):
+    """macOS: writes SDK version `major`.0 (and the same minimum OS) into the executable's LC_BUILD_VERSION. The kernel lays out a process
+    whose executable says SDK 12 the classic way, without the randomly slid 23 GiB data range it gives newer programs, which would land in
+    the guest's address window (runtime include/nxrt/memory.h). zig's linker has no -platform_version, so the header is patched and the
+    image signed again (ad hoc) afterwards."""
+    LC_BUILD_VERSION, LC_VERSION_MIN_MACOSX = 0x32, 0x24
+    ver = major << 16
+    with open(path, 'r+b') as f:
+        hdr = f.read(32)
+        if struct.unpack_from('<I', hdr, 0)[0] != 0xFEEDFACF:
+            raise Fail('%s is not a 64-bit Mach-O image' % path)
+        ncmds = struct.unpack_from('<I', hdr, 16)[0]
+        off, done = 32, False
+        for _ in range(ncmds):
+            f.seek(off)
+            cmd, size = struct.unpack('<II', f.read(8))
+            if cmd == LC_BUILD_VERSION:          # platform, minos, sdk
+                f.seek(off + 12)
+                f.write(struct.pack('<II', ver, ver))
+                done = True
+            elif cmd == LC_VERSION_MIN_MACOSX:   # version, sdk
+                f.seek(off + 8)
+                f.write(struct.pack('<II', ver, ver))
+                done = True
+            off += size
+        if not done:
+            raise Fail('%s has no build version load command' % path)
+
+
 def link(runner, obj, game, env):
     progress('link', 0, 1, 'Linking pkp.exe')
     libs = []
@@ -525,17 +560,29 @@ def link(runner, obj, game, env):
         if rc != 0:
             raise Fail('Archiving %s failed (exit %d):\n%s' % (name, rc, tail))
         libs.append(a)
-    tmp = os.path.join(obj, 'pkp.exe')
-    cmd = [ZIG, 'c++', '-target', 'x86_64-windows-gnu', '-mcpu=x86_64+cx16', '-O1', '-fno-exceptions', '-fno-rtti', '-I', SDK,
-           os.path.join(SDK, 'pkp_stub.cpp'), os.path.join(SDK, 'pkp.rc')] + libs + [os.path.join(SDK, 'pkp_rt.lib'),
-           '-o', tmp, '-Wl,--stack,134217728', '-Wl,--subsystem,windows']
+    tmp = os.path.join(obj, EXE)
+    if MACOS:
+        # libpkp_rt.dylib is found next to pkp at run time (@executable_path); the main thread gets the 128 MiB stack the
+        # lifted code needs (the Windows exe's /STACK). zig's linker signs the arm64 image ad hoc, which macOS requires.
+        cmd = [ZIG, 'c++'] + TARGET + ['-O1', '-fno-exceptions', '-fno-rtti', '-I', SDK, os.path.join(SDK, 'pkp_stub.cpp')] + libs + [
+            os.path.join(SDK, RT_LIB), '-o', tmp, '-Wl,-rpath,@executable_path', '-Wl,-stack_size,0x8000000']
+    else:
+        cmd = [ZIG, 'c++'] + TARGET + ['-O1', '-fno-exceptions', '-fno-rtti', '-I', SDK,
+               os.path.join(SDK, 'pkp_stub.cpp'), os.path.join(SDK, 'pkp.rc')] + libs + [os.path.join(SDK, RT_LIB),
+               '-o', tmp, '-Wl,--stack,134217728', '-Wl,--subsystem,windows']
     rc, tail = runner.run(cmd, env=env, cwd=SDK)
     if rc != 0:
-        raise Fail('Linking pkp.exe failed (exit %d):\n%s' % (rc, tail))
-    clear_high_entropy_va(tmp)
-    dst = os.path.join(game, 'pkp.exe')
+        raise Fail('Linking %s failed (exit %d):\n%s' % (EXE, rc, tail))
+    if MACOS:
+        macho_set_sdk_version(tmp, 12)
+        rc, tail = runner.run(['/usr/bin/codesign', '-s', '-', '-f', tmp], env=env)
+        if rc != 0:
+            raise Fail('Signing %s failed (exit %d):\n%s' % (EXE, rc, tail))
+    else:
+        clear_high_entropy_va(tmp)
+    dst = os.path.join(game, EXE)
     os.replace(tmp, dst)
-    progress('link', 1, 1, 'pkp.exe built')
+    progress('link', 1, 1, '%s built' % EXE)
     return dst
 
 
@@ -605,7 +652,7 @@ def main():
                 shutil.rmtree(os.path.join(build, d), ignore_errors=True)
         done = dict(stamp, exe_sha256=sha256(exe), seconds=times, finished=time.strftime('%Y-%m-%d %H:%M:%S'))
         write_json(os.path.join(build, 'done.json'), done)
-        progress('finish', 1, 1, 'pkp.exe is ready (%d s)' % (time.time() - t0))
+        progress('finish', 1, 1, '%s is ready (%d s)' % (EXE, time.time() - t0))
         return 0
     except Cancelled:
         say('cancelled', 'Build paused. Set up again continues where it stopped.')

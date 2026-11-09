@@ -88,7 +88,12 @@ bool to_wide(const std::string& s, std::wstring& out) {
 }
 
 // Host paths that may exceed MAX_PATH get the extended-length prefix. The input must already use backslashes.
+// (macOS: host paths keep forward slashes and have no length prefix.)
 std::wstring long_path(std::wstring p) {
+#ifndef _WIN32
+    std::replace(p.begin(), p.end(), L'\\', L'/');
+    return p;
+#endif
     std::replace(p.begin(), p.end(), L'/', L'\\');
     if (p.size() < kLongPath || p.compare(0, 4, L"\\\\?\\") == 0) return p;
     if (p.compare(0, 2, L"\\\\") == 0) return L"\\\\?\\UNC\\" + p.substr(2);
