@@ -4765,7 +4765,9 @@ void note_frame_for_pacing() {
     if (low == 1) low_since = now;
     static const double boot_s = std::max(0.0, nxrt::config_get_double("display", "unpaced_loading_s", 20.0));
     const bool boot_run = !full && now - low_since < std::chrono::duration<double>(boot_s);
-    const bool want = low >= 3 && (now - last_stall < std::chrono::milliseconds(1500) || boot_run);
+    // After the first real scene, a loading screen in the world needs half a second of light frames (30), not 3: a menu or a fade with one
+    // slow frame (common on a busy machine) otherwise unpaced the game for 1.5 s and the frame rate jumped (Pokopia on a Mac).
+    const bool want = low >= (full ? 30 : 3) && (now - last_stall < std::chrono::milliseconds(1500) || boot_run);
     if (want != g_loading) {
         g_loading = want;
         ft::mark(want ? "pace.loading" : "pace.playing", static_cast<uint32_t>(per));
@@ -4773,10 +4775,13 @@ void note_frame_for_pacing() {
             NXLOG_I(kTag, "%s (present %llu, %llu draws; pacing unchanged: [display] unpaced_loading is false)", want ? "loading" : "playing",
                     static_cast<unsigned long long>(p), static_cast<unsigned long long>(per));
     }
-    if (on && want != nxrt::frame_limiter_unpaced()) {
+    static bool requested = false;   // what this detector last asked of the limiter (a player's frame limit may keep it paced)
+    if (on && want != requested) {
+        requested = want;
         nxrt::frame_limiter_set_unpaced(want);
-        NXLOG_I(kTag, "pacing %s (present %llu, %llu draws)", want ? "off: loading" : "on", static_cast<unsigned long long>(p),
-                static_cast<unsigned long long>(per));
+        const bool held = want && !nxrt::frame_limiter_unpaced();
+        NXLOG_I(kTag, "pacing %s (present %llu, %llu draws)", !want ? "on" : held ? "kept: loading, the player's frame limit holds" : "off: loading",
+                static_cast<unsigned long long>(p), static_cast<unsigned long long>(per));
     }
     if (!full && per >= 16) {
         full = true;

@@ -1612,13 +1612,13 @@ void draw_settings_page(UiHost& host) {
         ImGui::TextColored(kOrange, "unsaved changes");
     }
     if (ImGui::Button("Apply and save")) apply_now(host, p);
-    tip("Applies the changes to the running game (items marked 'restart' wait for the next start) and writes them to the settings file.");
+    tip("Changes apply and save on their own as you make them; this does it now. Items marked 'restart' take effect at the next start.");
     ImGui::SameLine();
     if (ImGui::Button("Revert")) revert_to_saved(host, p);
     tip("Drops the changes made since the last Apply and save.");
     ImGui::SameLine();
     if (ImGui::Button("Factory defaults")) load_factory(host, p);
-    tip("Loads the factory settings into the page. Nothing changes until Apply and save.");
+    tip("Puts every setting back to the factory default (applied and saved at once).");
     ImGui::SameLine();
     if (ImGui::Button("Quit game")) host.request_quit_prompt();
     tip("Asks before closing the game. Unsaved settings changes are lost; the game's own save is not touched - save in the game first.");
@@ -1655,6 +1655,10 @@ void draw_settings_page(UiHost& host) {
         ImGui::EndTabBar();
     }
     ImGui::PopItemWidth();
+    // Changes apply and save as they are made: once the edit is finished (no slider held, no text field being typed in) and no binding is
+    // being captured. A player changed the frame limit and the upscaler, closed F1 without pressing Apply and save, and the changes were
+    // lost ("settings aren't saving"). Items marked 'restart' are saved now and take effect at the next start.
+    if (p.dirty && !host.capturing() && !ImGui::IsAnyItemActive()) apply_now(host, p);
 }
 
 }  // namespace nxrt::play

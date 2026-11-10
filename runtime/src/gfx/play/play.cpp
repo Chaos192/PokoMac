@@ -343,6 +343,7 @@ void log_frame_cap(double req, double snapped, float hz, int k, const char* reas
 
 void apply_frame_cap(const Settings& s) {
     G& st = g();
+    frame_limiter_set_player_cap(s.display.fps_cap > 0);   // a number the player chose also holds while the game loads
     double cap = s.display.fps_cap;
     if (cap < 0) {
         // fps_limit = auto: the display's refresh rate (no limit while it is unknown, e.g. headless runs)
