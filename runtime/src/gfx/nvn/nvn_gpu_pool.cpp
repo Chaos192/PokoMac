@@ -880,7 +880,11 @@ int64_t g_wr_pages[6] = {}, g_wr_calls[6] = {};
 
 MirrorMode mirror_mode() {
     static const MirrorMode m = [] {
+#ifdef __APPLE__
+        const std::string v = config_get_str("nvn", "pool_mirror", "off");   // unified memory: no device-local copies (play.cpp)
+#else
         const std::string v = config_get_str("nvn", "pool_mirror", "on");
+#endif
         if (v == "on" || v == "1" || v == "true") return MirrorMode::On;
         return MirrorMode::Off;
     }();

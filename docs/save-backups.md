@@ -7,6 +7,7 @@ What the launcher's **Settings > Saves > Backups** does, how it is stored, and h
 - When the game closes (any way: the launcher's Play, or a `--play` shortcut), one more copy is made if backups are on.
 - **Back up now** makes a copy on request, any time.
 - **Restore** puts a chosen copy back. The game must be closed. The current save is copied first (kind `before-restore`), so a restore can be undone by restoring that copy.
+- With **Keep my saves in iCloud Drive** on (macOS, `launcher/src-tauri/src/icloud.rs`), the save is copied first (kind `before-icloud`) whenever a newer save from another Mac replaces it before the game starts. It counts with the automatic, exit and manual copies.
 - Nothing runs unless the player chose a time. Updates never touch the copies (`save-backups` is in the update's keep list).
 
 ## Where
@@ -15,7 +16,7 @@ What the launcher's **Settings > Saves > Backups** does, how it is stored, and h
 Inside a copy:
 - `data/`: a copy of `save/account/<account folder>/` (the committed save).
 - `meta`: a copy of `save/account/<account folder>.meta`.
-- `manifest.json`: `{ version: 1, name, created (UTC, ISO 8601), kind, key (account folder), profile (name at the time, a label only), files, bytes, hash }`. `kind` is `auto`, `exit`, `manual` or `before-restore`. `hash` is a SHA-256 over the file paths and contents, so two copies of the same save have the same hash (an unchanged save is not copied again).
+- `manifest.json`: `{ version: 1, name, created (UTC, ISO 8601), kind, key (account folder), profile (name at the time, a label only), files, bytes, hash }`. `kind` is `auto`, `exit`, `manual`, `before-restore` or `before-icloud`. `hash` is a SHA-256 over the file paths and contents, so two copies of the same save have the same hash (an unchanged save is not copied again).
 
 A folder without a readable `manifest.json` is not a copy. Half-made copies are `.tmp-*` folders and are removed.
 

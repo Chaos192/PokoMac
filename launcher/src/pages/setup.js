@@ -15,11 +15,11 @@ const SETUP_BUSY = 'Setup is running. Pause it first.';
 const STEPS = ['Build game', 'Translate shaders', 'First run'];
 
 // phase -> [step, the step's percent at the phase's start, at its end]. The two phases that take the time get the room.
-// Phases: main.rs check, tools, warmup; pkp_build.py verify, lift, compile, link, finish; shaders.rs extract, recheck, translate.
+// Phases: main.rs check, tools, warmup, pipelines (macOS); pkp_build.py verify, lift, compile, link, finish; shaders.rs extract, recheck, translate.
 const PHASES = {
   check: [0, 0, 0], tools: [0, 0, 5], verify: [0, 5, 10], lift: [0, 10, 25], compile: [0, 25, 95], link: [0, 95, 100], finish: [0, 100, 100],
   extract: [1, 0, 5], recheck: [1, 5, 10], translate: [1, 5, 100],
-  warmup: [2, 0, 0],
+  warmup: [2, 0, 0], pipelines: [2, 0, 100],
 };
 
 /** Where setup is: step index and percent of that step, null when the phase has no count. */
@@ -30,7 +30,7 @@ function stepOf(p) {
 
 // Time left. Only for the phases that fill their step, so "left in this step" is true for them; the rate is that of the last
 // few minutes because shader batches pause to save.
-const ETA_PHASES = new Set(['compile', 'translate']);
+const ETA_PHASES = new Set(['compile', 'translate', 'pipelines']);
 const ETA_WINDOW_MS = 180_000;
 const ETA_MIN_SPAN_MS = 60_000;   // shorter: not meaningful yet
 const ETA_MIN_SAMPLES = 3;

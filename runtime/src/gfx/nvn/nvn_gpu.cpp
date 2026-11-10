@@ -29,6 +29,9 @@
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
 #include "nxrt/lowlat.h"
+#if defined(__APPLE__)
+#include "nxrt/platform.h"
+#endif
 #include "vk_gauges.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_impl.h"
@@ -37,6 +40,7 @@
 #include "nvn_submit_park.h"
 #include "nvn_submit_worker.h"
 #include "extras/output_pass.h"
+#include "extras/temporal.h"
 
 namespace nxrt::nvn::be::gpu {
 namespace {
@@ -81,6 +85,14 @@ struct Slot {
     uint64_t sets_live = 0;               // descriptor sets allocated from this slot's pools since the last reset (vk.descriptor_sets)
     uint32_t gp_n = 0;                    // GPU pass profiler: timestamps written by the submission
     std::vector<std::pair<std::string, uint32_t>> gp_labels;   // label and argument of each interval (stamp i closes interval i)
+    // split_recording (a temporal upscaler on another queue, MetalFX): the submission's earlier parts went to the queue on their own; `tail`
+    // is the command buffer it ends in (cb when it was not split), from `more` (allocated from `pool` on first use, reset with it), and
+    // waits for wait_sem >= wait_value (0: nothing) before it runs.
+    VkCommandBuffer tail = VK_NULL_HANDLE;
+    std::vector<VkCommandBuffer> more;
+    size_t more_used = 0;
+    VkSemaphore wait_sem = VK_NULL_HANDLE;
+    uint64_t wait_value = 0;
 };
 
 struct Deferred {
@@ -117,6 +129,11 @@ struct Gpu {
     std::atomic<bool> flush_by_wait{false};        // the pending flush_wanted came from (or was upgraded by) a blocking wait, not a poll
     uint64_t pf_logged_presents = 0;               // render thread: presents at the last summary line
     uint64_t recording = 0;               // render thread: serial of the submission being recorded (0 outside)
+    // split_recording: the recording in progress (its Frame, whether it signals a serial) and the command buffer split_prepare reserved for
+    // its next part. Render thread.
+    Frame* rec_frame = nullptr;
+    bool rec_signalled = false;
+    VkCommandBuffer split_next = VK_NULL_HANDLE;
     std::atomic<uint64_t> last_submitted{0};
     // Serials are handed out when a submission is queued (the game thread gets its serial at once and goes on while the render thread
     // records), in queue order, so the timeline is signalled in increasing order. Under qmu.
@@ -259,6 +276,10 @@ void render_loop() {
     log_set_thread_name("nvn-render");
     diag_register_thread("nvn-render", nullptr);   // so the freeze watchdog and the stall sampler can see its stack
     nxrt::hitch_set_render_thread();
+#if defined(__APPLE__)
+    // a 60 Hz frame with a few ms of replay and present: real-time on the performance cores (platform/mac/core/thread_mac.cpp)
+    nxrt::platform::mac_realtime_thread("nvn-render", 1000.0 / 60.0, 5.0);
+#endif
     for (;;) {
         std::function<void()> job;
         {
@@ -379,7 +400,9 @@ void note_slow_submit(double ms, size_t cbs, bool worker) {
 // submission on a Legion Go S, so 11 submissions a frame took 20 of its 25 ms. Render thread.
 // The kernel submission of flush_batch: inline on the render thread, or as a job on the submit worker ([nvn] submit_thread; worker = true:
 // no render-thread hitch phases, and the serial is published as submitted afterwards).
-void submit_cbs(const std::vector<VkCommandBufferSubmitInfo>& cbi, uint64_t serial, bool worker) {
+// waits: what the batch waits for before it runs (split_recording: the work between a split submission's parts; empty for the others).
+using Waits = std::vector<VkSemaphoreSubmitInfo>;
+void submit_cbs(const std::vector<VkCommandBufferSubmitInfo>& cbi, uint64_t serial, bool worker, const Waits& waits = {}) {
     if (worker && g->dev->device_lost()) {      // lost after the hand-over: nothing goes to the queue, the waiters are released
         complete_serial(serial);
         g->sw->publish(serial);
@@ -390,6 +413,8 @@ void submit_cbs(const std::vector<VkCommandBufferSubmitInfo>& cbi, uint64_t seri
     sig.value = serial;
     sig.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
     VkSubmitInfo2 si = {VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+    si.waitSemaphoreInfoCount = static_cast<uint32_t>(waits.size());
+    si.pWaitSemaphoreInfos = waits.empty() ? nullptr : waits.data();
     si.commandBufferInfoCount = static_cast<uint32_t>(cbi.size());
     si.pCommandBufferInfos = cbi.data();
     si.signalSemaphoreInfoCount = 1;
@@ -453,6 +478,22 @@ void park_job(uint64_t serial) {
     submit_cbs(*cbi, serial, true);
 }
 
+// split_recording: the last part of a split submission waits for the work between its parts (another queue's semaphore). Only the first
+// submission of a batch can have such a wait (the split handed everything recorded before it to the queue), so the batch waits as a whole;
+// a batch with a wait never rides in a present's submission (take_batch_for_present) nor parks for one ([nvn] one_submit).
+Waits batch_waits() {
+    Waits w;
+    for (const Slot* s : g->batch) {
+        if (!s->wait_value) continue;
+        VkSemaphoreSubmitInfo i = {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
+        i.semaphore = s->wait_sem;
+        i.value = s->wait_value;
+        i.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        w.push_back(i);
+    }
+    return w;
+}
+
 void flush_batch() {
     if (g->batch.empty()) return;
     // [nvn] one_submit: flushes a present took must reach the worker before any later serial, or the timeline would be signalled backwards
@@ -470,20 +511,21 @@ void flush_batch() {
         return;
     }
     std::vector<VkCommandBufferSubmitInfo> cbi(g->batch.size(), VkCommandBufferSubmitInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO});
-    for (size_t i = 0; i < g->batch.size(); i++) cbi[i].commandBuffer = g->batch[i]->cb;
+    for (size_t i = 0; i < g->batch.size(); i++) cbi[i].commandBuffer = g->batch[i]->tail;
     const uint64_t serial = g->batch.back()->serial;
-    if (g->sw && g->one_submit) {   // [nvn] one_submit: its job submits it, unless the next present takes it first (still "handed over")
+    Waits waits = batch_waits();
+    if (g->sw && g->one_submit && waits.empty()) {   // [nvn] one_submit: its job submits it, unless the next present takes it first (still "handed over")
         g->park.park(g->flushed + 1, serial, std::move(cbi));
         g->sw->push([serial] { park_job(serial); });
     } else if (g->sw) {    // [nvn] submit_thread: the worker submits; `flushed` = handed over (it will reach the queue without being asked again)
-        g->sw->push([cbi = std::move(cbi), serial] {
+        g->sw->push([cbi = std::move(cbi), serial, waits = std::move(waits)] {
             // the batch's vkQueueSubmit2 (+ the queue lock wait); arg = command buffers in it. The present job is submit.worker.present.
             static const uint16_t z_batch = ft::zone_id("submit.worker.batch");
             ft::Scope sc(z_batch, 0, static_cast<uint32_t>(cbi.size()));
-            submit_cbs(cbi, serial, true);
+            submit_cbs(cbi, serial, true, waits);
         });
     } else {
-        submit_cbs(cbi, serial, false);
+        submit_cbs(cbi, serial, false, waits);
     }
     g->flushed = serial;
     g->flushed_pub.store(serial);
@@ -600,6 +642,10 @@ Slot* acquire_slot() {
     s.gp_labels.clear();
     retire();
     vkResetCommandPool(g->dev->device(), s.pool, 0);
+    s.tail = s.cb;
+    s.more_used = 0;
+    s.wait_sem = VK_NULL_HANDLE;
+    s.wait_value = 0;
     for (VkDescriptorPool p : s.dpools) vkResetDescriptorPool(g->dev->device(), p, 0);
     vk_gauge_descriptor_sets().sub(static_cast<int64_t>(s.sets_live));   // the reset freed them
     s.sets_live = 0;
@@ -847,6 +893,160 @@ void memory_barrier(VkCommandBuffer cb) {
 // ---- submission --------------------------------------------------------------------------------------------------------
 namespace {
 
+// ---- splitting a recording (extras::RecordingSplitter: a temporal upscaler on another queue, MetalFX) --------------------------------
+// split_recording ends the command buffer being recorded, hands it to the queue on its own (after everything recorded before it) so that it
+// signals the other queue's semaphore, and lets the recording go on in a fresh command buffer of the same slot that waits for the other
+// queue's work. The submission's serial stays with its last part: the slot is reused, and the game's sync waits end, only once all of it ran.
+//
+// The replay (nvn_replay.cpp) sends its state again after the upscaler: temporal_for_draw ends the pass before it, marks all state dirty
+// and forgets what it keeps per command buffer (topology, primitive restart, a bound vertex buffer). A query cannot go on in another
+// command buffer, so a recording with one open (replay_queries_open) is not split.
+
+// The recording in progress (submit_on_render_thread), which split_prepare and split_recording act on. A recording can run inside another
+// (a texture dump inside a render job): the outer one is restored afterwards.
+struct RecordingScope {
+    Frame* frame;
+    bool signalled;
+    VkCommandBuffer next;
+    RecordingScope(Frame& f, bool sig) : frame(g->rec_frame), signalled(g->rec_signalled), next(g->split_next) {
+        g->rec_frame = &f;
+        g->rec_signalled = sig;
+        g->split_next = VK_NULL_HANDLE;
+    }
+    ~RecordingScope() {
+        g->rec_frame = frame;
+        g->rec_signalled = signalled;
+        g->split_next = next;
+    }
+    RecordingScope(const RecordingScope&) = delete;
+    RecordingScope& operator=(const RecordingScope&) = delete;
+};
+
+// extras::RecordingSplitter::prepare
+bool split_prepare(VkCommandBuffer cb) {
+    if (!g || !on_render_thread() || g->dev->device_lost()) return false;
+    const Frame* f = g->rec_frame;
+    int why = -1;
+    if (!f || f->cb != cb) why = 0;
+    else if (!g->rec_signalled) why = 1;
+    else if (replay_queries_open()) why = 2;
+    if (why >= 0) {
+        static const char* const kWhy[] = {"not the command buffer being recorded", "a submission that signals nothing", "a query is open in it"};
+        static bool told[3] = {};
+        if (!told[why]) {
+            told[why] = true;
+            NXLOG_I(kTag, "recording split refused (%s): the upscaler leaves this frame alone (logged once)", kWhy[why]);
+        }
+        return false;
+    }
+    if (g->split_next) return true;
+    Slot& s = *static_cast<Slot*>(f->slot);
+    if (s.more_used == s.more.size()) {
+        VkCommandBufferAllocateInfo ai = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        ai.commandPool = s.pool;
+        ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        ai.commandBufferCount = 1;
+        VkCommandBuffer c = VK_NULL_HANDLE;
+        if (vkAllocateCommandBuffers(g->dev->device(), &ai, &c) != VK_SUCCESS) {
+            NXLOG_E(kTag, "recording split: no command buffer for the second part");
+            return false;
+        }
+        vk_gauge_command_buffers().add(1);
+        s.more.push_back(c);
+    }
+    g->split_next = s.more[s.more_used++];
+    return true;
+}
+
+// The first part of a split submission goes to the queue on its own: after everything handed over before it (the batch was flushed; with
+// [nvn] submit_thread on the same FIFO worker), waiting for what an earlier split of the same submission left, and signalling `signal` =
+// value. A failed submission signals it from the CPU, so the other queue and the rest of the submission do not wait forever.
+void submit_part(VkCommandBuffer cb, Waits waits, VkSemaphore signal, uint64_t value) {
+    auto run = [cb, waits = std::move(waits), signal, value](bool worker) {
+        VkCommandBufferSubmitInfo c = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+        c.commandBuffer = cb;
+        VkSemaphoreSubmitInfo sig = {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
+        sig.semaphore = signal;
+        sig.value = value;
+        sig.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        VkSubmitInfo2 si = {VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+        si.waitSemaphoreInfoCount = static_cast<uint32_t>(waits.size());
+        si.pWaitSemaphoreInfos = waits.empty() ? nullptr : waits.data();
+        si.commandBufferInfoCount = 1;
+        si.pCommandBufferInfos = &c;
+        si.signalSemaphoreInfoCount = 1;
+        si.pSignalSemaphoreInfos = &sig;
+        VkResult r = VK_SUCCESS;
+        if (g->dev->device_lost()) {
+            r = VK_ERROR_DEVICE_LOST;
+        } else if (worker) {
+            std::lock_guard<std::mutex> lk(g->dev->queue_mutex());
+            r = vkQueueSubmit2(g->dev->queue(), 1, &si, VK_NULL_HANDLE);
+        } else {
+            nxrt::HitchTimer ht(nxrt::kHpRenderSubmit);
+            const uint64_t tl = nxrt::hitch_ticks();
+            std::lock_guard<std::mutex> lk(g->dev->queue_mutex());
+            nxrt::hitch_phase_add(nxrt::kHpRenderLockWait, nxrt::hitch_ticks() - tl);
+            r = vkQueueSubmit2(g->dev->queue(), 1, &si, VK_NULL_HANDLE);
+        }
+        if (r == VK_SUCCESS) return;
+        if (!g->dev->device_lost()) {
+            g->dev->note_result(r, "vkQueueSubmit2 (NVN split)");
+            NXLOG_E(kTag, "vkQueueSubmit2 of a split submission's first part failed (%d)", static_cast<int>(r));
+        }
+        VkSemaphoreSignalInfo ssi = {VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO};
+        ssi.semaphore = signal;
+        ssi.value = value;
+        vkSignalSemaphore(g->dev->device(), &ssi);
+    };
+    if (g->sw) {
+        g->sw->push([run] {
+            NXFT("submit.worker.split");
+            run(true);
+        });
+    } else {
+        run(false);
+    }
+}
+
+// extras::RecordingSplitter::split (after split_prepare said yes for cb)
+VkCommandBuffer split_recording(VkCommandBuffer cb, VkSemaphore signal, uint64_t signal_value, VkSemaphore wait, uint64_t wait_value) {
+    if (!g || !g->split_next || !g->rec_frame || g->rec_frame->cb != cb) return VK_NULL_HANDLE;
+    NXFT("submit.split");
+    Frame& f = *g->rec_frame;
+    Slot& s = *static_cast<Slot*>(f.slot);
+    const VkCommandBuffer next = g->split_next;
+    g->split_next = VK_NULL_HANDLE;
+    vkEndCommandBuffer(cb);
+    // queue order: what was recorded before this submission goes first ([nvn] one_submit: none of it may wait for a present now)
+    if (g->one_submit && g->sw) g->park.release(g->submitted);
+    flush_batch();
+    Waits waits;
+    if (s.wait_value) {
+        VkSemaphoreSubmitInfo i = {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
+        i.semaphore = s.wait_sem;
+        i.value = s.wait_value;
+        i.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        waits.push_back(i);
+    }
+    submit_part(cb, std::move(waits), signal, signal_value);
+    g->ctr.submits.fetch_add(1);
+    VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(next, &bi);
+    f.cb = next;
+    s.tail = next;
+    s.wait_sem = wait;
+    s.wait_value = wait_value;
+    static bool told = false;
+    if (!told) {
+        told = true;
+        NXLOG_I(kTag, "recording split: submission %llu split (first part signals %llu, the rest waits for %llu)", static_cast<unsigned long long>(f.serial),
+                static_cast<unsigned long long>(signal_value), static_cast<unsigned long long>(wait_value));
+    }
+    return next;
+}
+
 // `serial`: the one reserved when the job was queued (queue_submit). 0: a submission made inside a render job (texture dumps of the trace):
 // it takes the next serial when nothing queued holds one, else it signals nothing and the queue is drained after it.
 uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint64_t serial = 0) {
@@ -902,11 +1102,14 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
         s.cpu_t0 = ft::now_ns();
     }
     if (t_cb0) ft::event(z_cbsetup, t_cb0, ft::now_ns());   // slot, begin command buffer, query resets
-    record(f);
+    {   // split_recording may replace f.cb while the recording runs: what follows records into the command buffer the submission ends in
+        RecordingScope rs(f, !unsignalled);
+        record(f);
+    }
     const uint64_t t_cb1 = ft::on() ? ft::now_ns() : 0;
     if (g->gpool) gpass_stamp(f, "tail", 0);
-    if (g->qpool) vkCmdWriteTimestamp(s.cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g->qpool, qi + 1);
-    vkEndCommandBuffer(s.cb);
+    if (g->qpool) vkCmdWriteTimestamp(f.cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g->qpool, qi + 1);
+    vkEndCommandBuffer(f.cb);
     if (!unsignalled) {
         s.serial = serial;
         g->submitted = serial;
@@ -921,7 +1124,7 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
     flush_batch();      // debug path: submitted on its own, after everything recorded before it, signalling nothing
     submit_drain();     // [nvn] submit_thread: ... and after the worker has submitted that
     VkCommandBufferSubmitInfo cbi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
-    cbi.commandBuffer = s.cb;
+    cbi.commandBuffer = f.cb;     // (never split: split_prepare refuses a recording that signals nothing)
     VkSubmitInfo2 si = {VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
     si.commandBufferInfoCount = 1;
     si.pCommandBufferInfos = &cbi;
@@ -974,7 +1177,7 @@ void present_give_back() {
 }
 
 bool take_batch_for_present(std::vector<VkCommandBuffer>* cmds, gfx::Renderer::SubmitPrefix* p) {
-    if (!g || !g->frame_batch || (g->batch.empty() && g->taken.empty())) {
+    if (!g || !g->frame_batch || (g->batch.empty() && g->taken.empty()) || !batch_waits().empty()) {   // (a batch that waits goes on its own)
         submit_recorded();
         return false;
     }
@@ -995,7 +1198,7 @@ bool take_batch_for_present(std::vector<VkCommandBuffer>* cmds, gfx::Renderer::S
         }
         g->taken.clear();
     }
-    for (Slot* s : g->batch) cmds->push_back(s->cb);
+    for (Slot* s : g->batch) cmds->push_back(s->tail);
     if (!g->batch.empty()) value = g->batch.back()->serial;
     p->cmds = cmds->data();
     p->count = static_cast<uint32_t>(cmds->size());
@@ -1532,6 +1735,13 @@ bool bring_up(gfx::Device& dev, gfx::Renderer* rend, FrameLimiter* limiter, bool
                        v == 2 ? "split" : "on", o.c_str(), v == 2 ? "own VkSubmitInfo2" : "one VkSubmitInfo2", static_cast<long long>(hold));
         else NXLOG_I(kTag, "one_submit off (%s%s)", o.c_str(), o == "auto" ? (can ? ", not Wine" : ", no frame batch or no submit thread") : "");
     }
+    {   // a temporal upscaler on another queue (MetalFX, extras/temporal.h) splits the recording through these; nothing else calls them
+        extras::RecordingSplitter sp;
+        sp.prepare = &split_prepare;
+        sp.split = &split_recording;
+        sp.flush = &submit_recorded;
+        extras::temporal_set_splitter(sp);
+    }
     gp->th = std::thread(render_loop);
     // wait for the thread id to be published
     for (int i = 0; i < 1000 && gp->tid == std::thread::id(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1586,6 +1796,10 @@ void tear_down() {
         submit_drain();     // [nvn] submit_thread: every submit and present handed over has run before anything is destroyed
         wait_serial_blocking(gp->submitted);   // (flushes the batch and waits for the worker to submit it)
         retire();
+#if defined(__APPLE__)
+        extras::temporal_shutdown();           // MetalFX's images and semaphore: its work ended before the serials above (split_recording)
+#endif
+        extras::temporal_set_splitter({});
         replay_shutdown();
         tex_shutdown();
         pool_shutdown();
@@ -1627,6 +1841,7 @@ void tear_down() {
             vkDestroyCommandPool(d.device(), s.pool, nullptr);
             vk_gauge_command_pools().sub(1);
             if (s.cb) vk_gauge_command_buffers().sub(1);
+            vk_gauge_command_buffers().sub(static_cast<int64_t>(s.more.size()));
         }
     }
     if (gp->qpool) { vkDestroyQueryPool(d.device(), gp->qpool, nullptr); vk_gauge_query_pools().sub(1); }
@@ -1666,6 +1881,12 @@ bool prepare_shaders(const ShaderPrepareOptions& o, ShaderPrepareResult* r) {
     ShaderPrepareResult& out = r ? *r : local;
     if (!be::gpu::active()) { out = ShaderPrepareResult{}; out.error = "the graphics back end is not running"; return false; }
     return be::gpu::gpl_prepare(o, &out);
+}
+bool prepare_pipelines(const PipelinePrepareOptions& o, PipelinePrepareResult* r) {
+    PipelinePrepareResult local;
+    PipelinePrepareResult& out = r ? *r : local;
+    if (!be::gpu::active()) { out = PipelinePrepareResult{}; out.error = "the graphics back end is not running"; return false; }
+    return be::gpu::prewarm_prepare(o, &out);
 }
 bool backend_installed() { return be::gpu::active(); }
 void backend_flush_caches() {

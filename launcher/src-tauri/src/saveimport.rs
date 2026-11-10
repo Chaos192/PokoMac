@@ -66,7 +66,7 @@ pub fn resolve_picked(p: &Path) -> Option<PathBuf> {
     }
 }
 
-fn newest_mtime(d: &Path) -> SystemTime {
+pub(crate) fn newest_mtime(d: &Path) -> SystemTime {
     let mut best = SystemTime::UNIX_EPOCH;
     let mut stack = vec![d.to_path_buf()];
     while let Some(x) = stack.pop() {

@@ -66,6 +66,32 @@ struct ShaderPrepareResult {
 };
 bool prepare_shaders(const ShaderPrepareOptions& o, ShaderPrepareResult* r);
 
+// Pipeline preparation (--prepare-pipelines; the macOS setup runs it): merges the seed key file that ships with the release ([nvn]
+// pipeline_seed) into the player's prewarm key file ([nvn] pipeline_keys) and builds every pipeline of the seed once, whole, before the
+// game runs. On Metal the first build of a pipeline is Apple's compiler working through MSL source (hundreds of ms; a few take minutes),
+// and macOS keeps what it compiled in its own shader cache, so the game's prewarm at start and its draws find the pipelines there instead
+// of drawing without them while they compile. A state file per driver next to the key file (pipelines-<driver>.state) lists what was
+// built for which GPU and driver version; only_if_needed builds only what it does not list. Needs the back end installed and an open
+// shader cache.
+struct PipelinePrepareOptions {
+    bool only_if_needed = false;                                  // skip the seed records the state file lists as built on this GPU and driver
+    int threads = 0;                                              // 0: all hardware threads but two
+    std::function<bool(uint64_t done, uint64_t total)> progress;  // called often; returning false cancels
+};
+struct PipelinePrepareResult {
+    uint64_t pipelines = 0;         // seed records to build this time (graphics and compute)
+    uint64_t built = 0;
+    uint64_t missing_shaders = 0;   // a stage has no translated shader yet (one the game makes while it runs): tried again next time
+    uint64_t failed = 0;
+    uint64_t slow = 0;              // took 3 s or more
+    uint64_t added = 0;             // seed records the key file did not have
+    double seconds = 0;
+    bool cancelled = false;
+    bool already_ready = false;     // only_if_needed and nothing to do
+    std::string error;
+};
+bool prepare_pipelines(const PipelinePrepareOptions& o, PipelinePrepareResult* r);
+
 struct BackendStats {
     uint64_t submits = 0, lists_replayed = 0, draws = 0, draws_skipped = 0, dispatches = 0, clears = 0, copies = 0, presents = 0;
     uint64_t passes = 0, pass_breaks = 0, pipelines_created = 0, pipeline_cache_hits = 0, descriptor_sets = 0;

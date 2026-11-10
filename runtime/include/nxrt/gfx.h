@@ -136,6 +136,9 @@ struct DeviceFeatures {
     // Device-lost diagnostics: enabled whenever offered ([gfx] gpu_checkpoints = off leaves the checkpoints off)
     bool checkpoints = false;             // VK_NV_device_diagnostic_checkpoints (NVIDIA)
     bool device_fault = false;            // VK_EXT_device_fault (feature deviceFault; the vendor binary stays off)
+    // macOS: Metal interop for MetalFX (platform/mac/gfx/temporal_metalfx.mm). Enabled whenever offered; used only in a MetalFX mode.
+    bool external_memory_metal = false;   // VK_EXT_external_memory_metal (a VkDeviceMemory as an MTLHeap / MTLTexture)
+    bool metal_objects = false;           // VK_EXT_metal_objects (MoltenVK: a timeline semaphore's MTLSharedEvent)
 };
 
 struct DeviceLimitsExt {

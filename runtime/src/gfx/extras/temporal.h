@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Temporal upscaling / anti-aliasing on the HDR scene before the game's tone map: AMD FSR 3.1 (FidelityFX API, temporal_ffx.cpp) and NVIDIA DLSS /
-// DLAA (Streamline, temporal_dlss.cpp). Both SDKs are loaded at run time; nothing is linked.
+// DLAA (Streamline, temporal_dlss.cpp). Both SDKs are loaded at run time; nothing is linked. On macOS, Apple's MetalFX temporal scaler
+// (platform/mac/gfx/temporal_metalfx.mm), which runs on its own Metal command queue: the Vulkan recording is split around it (RecordingSplitter).
 //
 // Inputs (docs/S14.md, "Temporal upscaling"):
 //   colour   the HDR scene the tone-map draw samples (the same interception as the spatial scene upscaler, nvn_replay.cpp)
@@ -15,6 +16,8 @@
 
 #include <cstddef>
 #include <cstdint>
+
+namespace nxrt::gfx { struct Image; }
 
 namespace nxrt::extras {
 
@@ -46,8 +49,40 @@ public:
     virtual ~TemporalBackend() = default;
     virtual const char* name() const = 0;
     // Records the upscale into cb (outside any render pass). False: nothing recorded (the caller falls back to the game's own picture).
-    virtual bool evaluate(VkCommandBuffer cb, const TemporalFrame& f) = 0;
+    // A backend whose work runs outside the Vulkan queue (MetalFX) splits the recording (RecordingSplitter) and sets cb to the command buffer
+    // the rest of the submission is recorded into.
+    virtual bool evaluate(VkCommandBuffer& cb, const TemporalFrame& f) = 0;
+    // The temporal pass's images (TemporalFrame: colour, depth, motion, output) are made by the backend when makes_images() says it needs
+    // them made its own way (MetalFX: memory Metal can see); otherwise the pass makes them with gfx::Device::create_image. *out gets image,
+    // view, format and extent (allocation stays null). free_image frees one it made, once the GPU and wait_idle are done with it.
+    virtual bool makes_images() const { return false; }
+    virtual bool make_image(VkFormat format, VkExtent2D extent, VkImageUsageFlags usage, const char* name, gfx::Image* out) {
+        (void)format, (void)extent, (void)usage, (void)name, (void)out;
+        return false;
+    }
+    virtual void free_image(gfx::Image& img) { (void)img; }
+    // Returns once the backend's own GPU work (outside the Vulkan queue) is done with every image it was given. Render thread.
+    virtual void wait_idle() {}
+    // The backend cannot run any more (a lasting failure, logged): the caller hands over to another upscaler.
+    virtual bool broken() const { return false; }
 };
+
+// ---- splitting the recording (nvn_gpu.cpp, split_prepare / split_recording) -----------------------------------------------------------
+// A backend that runs on another queue (MetalFX) needs what the submission recorded so far on the GPU before it starts, and the rest of the
+// submission must wait for it. The NVN back end registers these at start-up (all null without it). Render thread, inside a recording.
+struct RecordingSplitter {
+    // True when the recording that cb belongs to can be split now (it is the command buffer being recorded, no query is open in it, and the
+    // back end can carry its state over); the command buffer the rest goes into is reserved. False: no split, cb is untouched.
+    bool (*prepare)(VkCommandBuffer cb) = nullptr;
+    // After a successful prepare: ends cb and submits it (after every earlier submission) so that it signals `signal` = signal_value when
+    // done, then begins the reserved command buffer, which waits for `wait` >= wait_value before it runs, and returns it. The submission's
+    // serial (the game's sync) is signalled by its last part, so everything the game waits for includes the work between the parts.
+    VkCommandBuffer (*split)(VkCommandBuffer cb, VkSemaphore signal, uint64_t signal_value, VkSemaphore wait, uint64_t wait_value) = nullptr;
+    // Hands the submissions recorded before the current one to the GPU ([nvn] submit_batch may hold them back), so a device wait covers them.
+    void (*flush)() = nullptr;
+};
+void temporal_set_splitter(const RecordingSplitter& s);
+const RecordingSplitter& temporal_splitter();
 
 // ---- what the replay calls (nvn_replay.cpp) --------------------------------------------------------------------------------------
 bool temporal_wanted();   // a temporal mode is selected
@@ -75,6 +110,14 @@ TemporalBackend* temporal_dlss(void* gfx_device, bool dlaa);
 // True when the backend's DLLs can be found (for the F1 page; does not load anything).
 bool temporal_ffx_available();
 bool temporal_dlss_available();
+#if defined(__APPLE__)
+// MetalFX (platform/mac/gfx/temporal_metalfx.mm). Null when the GPU or the Vulkan driver cannot run it (logged once, temporal_metalfx_why).
+TemporalBackend* temporal_metalfx(void* gfx_device);
+bool temporal_metalfx_available();     // the GPU supports MetalFX's temporal scaler (for the F1 page; the driver check runs at the first frame)
+const char* temporal_metalfx_why();    // why MetalFX does not run, or null while nothing failed
+void temporal_shutdown();              // the temporal pass's and MetalFX's objects (NVN back end tear-down: render thread, device idle)
+void temporal_metalfx_shutdown();      // MetalFX's part of it
+#endif
 bool temporal_dlss_started();   // Streamline was initialised before the Vulkan instance (needed for DLSS; set by streamline_preinit)
 
 // Streamline must own vkCreateInstance / vkCreateDevice / the swapchain calls: when the start-up mode is DLSS or DLAA, this loads

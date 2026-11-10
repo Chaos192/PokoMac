@@ -620,9 +620,16 @@ void fps_group(UiHost& host, Page& p) {
 constexpr const char* kHdrModeNames[] = {"Off", "Auto", "On", "Native"};
 constexpr const char* kHdrFormatNames[] = {"Auto", "HDR10", "scRGB"};
 constexpr const char* kLatencyModeNames[] = {"Off", "Auto", "On", "Boost"};
-constexpr const char* kUpscaleNames[] = {"Off", "FSR 1 (spatial)", "FSR 3", "DLSS", "XeSS", "NIS (spatial)", "DLAA", "Nearest (sharp pixels)"};   // indexed by extras::UpscaleMode
+constexpr const char* kUpscaleNames[] = {"Off", "FSR 1 (spatial)", "FSR 3", "DLSS", "XeSS", "NIS (spatial)", "DLAA", "Nearest (sharp pixels)",
+                                         "MetalFX (temporal)", "MetalFX AA (native)"};   // indexed by extras::UpscaleMode
 // The order the list shows them in. ponytail: NIS, FSR 3, DLSS, DLAA and XeSS are off until reworked (extras::upscale_mode_enabled, #232).
+// MetalFX exists on macOS only (platform/mac/gfx/temporal_metalfx.mm), where it is the default.
+#if defined(__APPLE__)
+constexpr extras::UpscaleMode kUpscaleOrder[] = {extras::UpscaleMode::Off, extras::UpscaleMode::MetalFx, extras::UpscaleMode::MetalFxAa, extras::UpscaleMode::Fsr1,
+                                                 extras::UpscaleMode::Nearest};
+#else
 constexpr extras::UpscaleMode kUpscaleOrder[] = {extras::UpscaleMode::Off, extras::UpscaleMode::Fsr1, extras::UpscaleMode::Nearest};
+#endif
 constexpr const char* kUpscaleQualityNames[] = {"Native (AA only)", "Quality", "Balanced", "Performance", "Ultra performance", "Custom (scene resolution)"};
 
 // Off and the spatial upscalers (FSR 1, NIS) always work. The temporal ones (src/gfx/extras/temporal.h) get depth, camera motion vectors made by
@@ -633,10 +640,21 @@ bool upscale_available(extras::UpscaleMode m) {
         case extras::UpscaleMode::Off:
         case extras::UpscaleMode::Fsr1:
         case extras::UpscaleMode::Nearest: return true;
+#if defined(__APPLE__)
+        case extras::UpscaleMode::MetalFx:
+        case extras::UpscaleMode::MetalFxAa: return extras::temporal_metalfx_available();
+#endif
         default: return false;   // switched off for now (#232)
     }
 }
+bool is_metalfx(extras::UpscaleMode m) { return m == extras::UpscaleMode::MetalFx || m == extras::UpscaleMode::MetalFxAa; }
 const char* temporal_why(extras::UpscaleMode m) {
+#if defined(__APPLE__)
+    if (is_metalfx(m)) {
+        const char* why = extras::temporal_metalfx_why();
+        return why ? why : "This Mac's GPU has no MetalFX temporal scaler.";
+    }
+#endif
     if (m == extras::UpscaleMode::Fsr3)
         return "Needs amd_fidelityfx_loader_vk.dll and amd_fidelityfx_upscaler_vk.dll (AMD FidelityFX SDK v2.4.0) in upscalers\\fsr3 next to the "
                "executable, or a path in [upscale] fsr_dll.";
@@ -715,8 +733,14 @@ void upscale_group(Page& p) {
     std::string preview = kUpscaleNames[mode];
     if (!upscale_available(u.mode)) preview += " (not available)";
     const bool open = ImGui::BeginCombo("Upscaler##upscale_mode", preview.c_str());
+#if defined(__APPLE__)
+    tip("How the game's 3D scene is anti-aliased and enlarged. MetalFX (Apple): temporal anti-aliasing and upscaling from the quality preset's scene size, "
+        "the sharpest and steadiest picture. MetalFX AA: the same at the full scene size, anti-aliasing only. FSR 1 (AMD): filtered and sharpened, "
+        "no anti-aliasing. Off: smooth (bilinear). Nearest: every pixel kept as a hard block, no blur.");
+#else
     tip("How the game's picture is enlarged from a lower render or scene resolution. Off: smooth (bilinear). FSR 1 (AMD): filtered and sharpened, any GPU. "
         "Nearest: every pixel kept as a hard block, no blur. FSR 3, DLSS and NIS are switched off until they are reworked.");
+#endif
     if (open) {
         for (extras::UpscaleMode m : kUpscaleOrder) {
             const int i = static_cast<int>(m);
@@ -734,8 +758,10 @@ void upscale_group(Page& p) {
         ImGui::EndCombo();
     }
     if ((u.mode == extras::UpscaleMode::Dlss || u.mode == extras::UpscaleMode::Dlaa) && !extras::temporal_dlss_started()) restart_badge();
+    if (is_metalfx(u.mode) && extras::upscale_fell_back())   // MetalFX could not start: FSR 1 runs instead (temporal.cpp hand_over)
+        ImGui::TextDisabled("MetalFX is not running (%s); FSR 1 upscales instead.", temporal_why(u.mode));
 
-    if (u.mode == extras::UpscaleMode::Fsr3 || u.mode == extras::UpscaleMode::Dlss) {
+    if (u.mode == extras::UpscaleMode::Fsr3 || u.mode == extras::UpscaleMode::Dlss || u.mode == extras::UpscaleMode::MetalFx) {
         const int q = static_cast<int>(u.quality);
         if (ImGui::BeginCombo("Quality##upscale_quality", kUpscaleQualityNames[q])) {
             for (int i = 0; i < 6; ++i) {
@@ -754,7 +780,7 @@ void upscale_group(Page& p) {
     tip("How much FSR 1, NIS or FSR 3 sharpens the upscaled picture; 1 is the sharpest (DLSS has no sharpening).");
     if (ImGui::SliderInt("Scene resolution##upscale_scene", &u.scene_scale, 25, 100, "%d%%")) mark(p);
     tip("Renders the 3D scene at this percent of the output size per side; the game scales it up and keeps the HUD and the post effects at full size. 100 turns it off. "
-        "FSR 3 and DLSS use their quality preset's percent instead, unless it is Custom. Applies live.");
+        "FSR 3, DLSS and MetalFX use their quality preset's percent instead, unless it is Custom. Applies live.");
     {   // what is in force now (#116): the percent the game module applies and who enlarges the scene
         const int pct = extras::upscale_scene_scale();
         float fx = 1.0f, fy = 1.0f;
@@ -767,6 +793,7 @@ void upscale_group(Page& p) {
         } else {
             const char* who = m == extras::UpscaleMode::Fsr1 ? "upscaled with FSR 1" : m == extras::UpscaleMode::Nearest ? "enlarged with nearest neighbour" : m == extras::UpscaleMode::Nis ? "upscaled with NIS"
                             : m == extras::UpscaleMode::Fsr3 ? "upscaled with FSR 3" : m == extras::UpscaleMode::Dlss ? "upscaled with DLSS"
+                            : m == extras::UpscaleMode::MetalFx ? "upscaled with MetalFX"
                             : "stretched by the game (pick an upscaler to make it sharper)";
             ImGui::TextDisabled("Scene: %d%% per side, %s", pct, who);
         }
@@ -1167,9 +1194,11 @@ void gpu_group(Page& p) {
     tip("The game's textures are ASTC, which this GPU cannot sample, so they are converted. Fast: the quick BC7 conversion. High: the same at first, then a background thread "
         "re-encodes each texture slowly into the texture cache, so later runs are sharper (more disk space, no frame cost). Uncompressed: RGBA8, sharpest, 4 times the video memory "
         "of BC7. [gfx] astc_quality in the ini wins over this.");
+#ifndef __APPLE__   // Apple silicon has unified memory: there is nothing faster to copy to (play.cpp keeps pool_mirror off)
     if (ImGui::Checkbox("Faster GPU memory (uses more video memory)", &d.fast_gpu_memory)) mark(p);
     tip("Keeps device-local copies of the memory the draws read: faster, costs up to 2 GiB of video memory. [nvn] pool_mirror in the ini wins over this.");
     restart_badge();
+#endif
     if (ImGui::Checkbox("Fewer GPU pipeline waits", &d.fewer_gpu_waits)) mark(p);
     tip("No full barrier after render passes that only wrote their own targets. [nvn] pass_barriers in the ini wins over this.");
     restart_badge();

@@ -615,6 +615,13 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     features_.external_memory_host = has_dext(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
     if (features_.external_memory_host) dev_exts.push_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
     if (has_dext(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME)) { dev_exts.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME); features_.push_descriptor = true; }
+#if defined(__APPLE__)
+    // MetalFX (platform/mac/gfx/temporal_metalfx.mm) shares the temporal pass's images and a timeline semaphore with its own Metal queue
+    features_.external_memory_metal = has_dext("VK_EXT_external_memory_metal");
+    if (features_.external_memory_metal) dev_exts.push_back("VK_EXT_external_memory_metal");
+    features_.metal_objects = has_dext("VK_EXT_metal_objects");
+    if (features_.metal_objects) dev_exts.push_back("VK_EXT_metal_objects");
+#endif
     // device-lost diagnostics (report_lost): checkpoints before each dispatch (`dispatch`, the default) or each dispatch and draw (`all`);
     // `off` leaves the extension off (NVIDIA's driver may track checkpoints once it is enabled). The fault report is on whenever offered.
     const std::string ck_mode = lower(config_get_str("gfx", "gpu_checkpoints", "dispatch"));
@@ -739,6 +746,9 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     r = vkCreateDevice(physical_, &dci, nullptr, &device_);
     if (r != VK_SUCCESS) return fail("vkCreateDevice failed (" + std::to_string(r) + ")");
     volkLoadDevice(device_);
+#if defined(__APPLE__)
+    platform::mac_metal_tune();   // again: a driver may have set the MTLDevice's compiler concurrency from its own settings when it opened it
+#endif
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
 
     uint32_t nq = 0;

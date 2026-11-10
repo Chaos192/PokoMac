@@ -167,7 +167,14 @@ bool aw_push(AsyncJob&& j, bool front) {
     std::lock_guard<std::mutex> lk(g_aw_mu);
     if (g_aw_stop) return false;
     if (g_aw_threads.empty()) {
-        const int n = static_cast<int>(std::clamp<int64_t>(nxrt::config_get_int("nvn", "async_whole_threads", 1), 1, 4));
+#ifdef __APPLE__
+        // Metal: a pipeline's first build is Apple's compiler working through MSL source, often hundreds of ms and a few take minutes, so one
+        // thread lets a single slow one hold up every draw queued behind it. The threads mostly wait on the compiler service.
+        constexpr int64_t kAwDefault = 8, kAwMax = 16;   // a fresh pipeline takes about a second; the compiler service runs 18 at once (M5 Max)
+#else
+        constexpr int64_t kAwDefault = 1, kAwMax = 4;
+#endif
+        const int n = static_cast<int>(std::clamp<int64_t>(nxrt::config_get_int("nvn", "async_whole_threads", kAwDefault), 1, kAwMax));
         for (int i = 0; i < n; ++i) g_aw_threads.emplace_back(aw_main);
         NXLOG_I(kTag, "async pipelines: %d background thread%s for pipelines that would be built at a draw or a dispatch", n, n == 1 ? "" : "s");
     }
@@ -215,11 +222,34 @@ VkShaderStageFlagBits stage_bit(ShaderStage s) {
 std::mutex g_cache_mu;
 std::atomic<bool> g_cache_ready{false};
 
+// MoltenVK compiles a pipeline's shaders (SPIR-V to MSL, then Apple's compiler) while it holds the lock of the VkPipelineCache the
+// pipeline is made with, so with one shared cache every build waits for every other: eight background threads and the prewarm workers
+// queue on that lock, and a draw that has to build its pipeline (while the game loads) waits behind all of them, long enough for the
+// freeze watchdog. Without a cache it locks per shader module instead, and builds of different shaders run at once; macOS keeps the
+// compiled Metal code in its own cache either way. [nvn] pipeline_cache_moltenvk = true keeps the shared cache.
+bool moltenvk_no_cache() {
+    static const bool r = [] {
+        VkPhysicalDeviceDriverProperties dp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+        VkPhysicalDeviceProperties2 p2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+        p2.pNext = &dp;
+        if (VkPhysicalDevice pd = device().physical(); pd && vkGetPhysicalDeviceProperties2) vkGetPhysicalDeviceProperties2(pd, &p2);
+        const bool mvk = dp.driverID == VK_DRIVER_ID_MOLTENVK;
+        const bool off = mvk && !config_get_bool("nvn", "pipeline_cache_moltenvk", false);
+        if (off) NXLOG_I(kTag, "MoltenVK: pipelines are made without a VkPipelineCache, so their shaders compile in parallel ([nvn] pipeline_cache_moltenvk)");
+        return off;
+    }();
+    return r;
+}
+
 void ensure_cache() {
     if (g_cache_ready.load(std::memory_order_acquire)) return;
     std::lock_guard<std::mutex> lk(g_cache_mu);       // the prewarm workers and the render thread may get here together
     if (g_cache_tried) return;
     g_cache_tried = true;
+    if (moltenvk_no_cache()) {                         // g_cache stays null: no load, no save
+        g_cache_ready.store(true, std::memory_order_release);
+        return;
+    }
     g_cache_path = config_get_str("nvn", "pipeline_cache", "pipeline_cache.bin");
     std::vector<char> data;
     if (!g_cache_path.empty()) {
@@ -862,8 +892,14 @@ VkPipeline build_graphics_pipeline(const GraphicsKey& key, const ProgLayout& lay
         g_cache_dirty.store(true, std::memory_order_relaxed);
     g_new_since_save.fetch_add(1, std::memory_order_relaxed);
         g_pipes_created.add(1);
-        NXLOG_D(kTag, "graphics pipeline created in %.1f ms (vs %s fs %s)", ms_taken, key.stage[0] ? key.stage[0]->hash.c_str() : "-",
-                key.stage[1] ? key.stage[1]->hash.c_str() : "-");
+        // A build of seconds is worth a line of its own: on Metal (KosmicKrisp hands MSL source to Apple's compiler) a few of the game's
+        // pipelines take minutes the first time, which is why the setup builds the known ones ahead (--prepare-pipelines).
+        if (ms_taken >= 3000.0)
+            NXLOG_W(kTag, "slow graphics pipeline: %.1f s (vs %s fs %s gs %s, %u colour targets)", ms_taken / 1000.0, key.stage[0] ? key.stage[0]->hash.c_str() : "-",
+                    key.stage[1] ? key.stage[1]->hash.c_str() : "-", key.stage[2] ? key.stage[2]->hash.c_str() : "-", key.color_count);
+        else
+            NXLOG_D(kTag, "graphics pipeline created in %.1f ms (vs %s fs %s)", ms_taken, key.stage[0] ? key.stage[0]->hash.c_str() : "-",
+                    key.stage[1] ? key.stage[1]->hash.c_str() : "-");
     }
     return pipe;
 }
@@ -976,12 +1012,15 @@ VkPipeline create_compute(const ShaderInfo* cs, const ProgLayout& layout) {
     ci.stage.pName = "main";
     ci.layout = layout.layout;
     const uint64_t tp0 = nxrt::hitch_ticks();
+    const auto tc0 = std::chrono::steady_clock::now();
     const VkResult cr = vkCreateComputePipelines(vkdev(), g_cache, 1, &ci, nullptr, &pipe);
     if (nxrt::hitch_on_render_thread()) nxrt::hitch_phase_add(nxrt::kHpRenderPipeline, nxrt::hitch_ticks() - tp0);
     if (cr != VK_SUCCESS) {
         NXLOG_E(kTag, "compute pipeline failed for %s", cs->hash.c_str());
         return VK_NULL_HANDLE;
     }
+    if (const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - tc0).count(); s >= 3.0)
+        NXLOG_W(kTag, "slow compute pipeline: %.1f s (cs %s)", s, cs->hash.c_str());   // see the slow graphics pipeline line
     counters().pipelines_created.fetch_add(1);
     ++g_pipeline_count;
     g_pipes_created.add(1);

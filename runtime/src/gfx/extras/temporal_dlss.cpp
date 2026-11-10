@@ -112,7 +112,7 @@ public:
     const char* name() const override { return dlaa_ ? "DLAA" : "DLSS"; }
     void set_dlaa(bool on) { dlaa_ = on; }
 
-    bool evaluate(VkCommandBuffer cb, const TemporalFrame& f) override {
+    bool evaluate(VkCommandBuffer& cb, const TemporalFrame& f) override {
         Sl& s = sl_state();
         if (failed_) return false;
         const sl::ViewportHandle vp(0u);

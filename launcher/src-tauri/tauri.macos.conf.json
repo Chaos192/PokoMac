@@ -1,5 +1,23 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "PokoMac",
+        "width": 1040,
+        "height": 600,
+        "minWidth": 900,
+        "minHeight": 440,
+        "center": true,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 22, "y": 26 },
+        "shadow": true
+      }
+    ]
+  },
   "bundle": {
     "active": true,
     "targets": ["app"],

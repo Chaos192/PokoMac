@@ -6,6 +6,6 @@
 <plist version="1.0">
 <dict>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Link Play and the relay host connect to other players' Macs and PCs on your local network.</string>
+	<string>Link Play and the relay host connect to other players' Macs and PCs on your local network, and ask your router to open the Link Play port.</string>
 </dict>
 </plist>

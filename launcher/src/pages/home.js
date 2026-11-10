@@ -6,6 +6,7 @@ import { store } from '../store.js';
 import { canCancelUpdate, canUpdate, gamePhase, primaryAction } from '../action.js';
 import { readIni, viewOf } from '../linkplay-model.js';
 import { formatDate, highlights, parseReleaseName } from '../markdown.js';
+import { reportProblem } from '../report.js';
 
 const REPORT_LABEL = {
   'pkp_crash.txt': 'Crash report',
@@ -43,7 +44,10 @@ function crashCard(game) {
       <button class="btn quiet sm icon-only" data-act="dismiss" aria-label="Dismiss" title="Dismiss">${icon('x')}</button>
     </div>
     <p class="selectable">${esc(game.message)}</p>
-    ${files.length ? `<div class="cluster">${files.map((f) => `<button class="btn sm" data-open="${esc(f.name)}" title="${esc(f.name)}">${icon('file-text')}${esc(REPORT_LABEL[f.name] ?? f.name)}</button>`).join('')}</div>` : ''}
+    <div class="cluster">
+      ${files.map((f) => `<button class="btn sm" data-open="${esc(f.name)}" title="${esc(f.name)}">${icon('file-text')}${esc(REPORT_LABEL[f.name] ?? f.name)}</button>`).join('')}
+      <button class="btn sm" data-act="report" title="Puts the logs in a zip on your Desktop and opens a GitHub issue">${icon('file-archive')}Report a problem</button>
+    </div>
   </div>`;
 }
 
@@ -151,6 +155,7 @@ export function render(el, ctx) {
       case 'cancel': return store.cancelUpdate();
       case 'pause': return store.pauseSetup();
       case 'stop-repack': return store.cancelRepack();
+      case 'report': return reportProblem();
       case 'dismiss':
         crashDismissed = true;
         return draw(store.state);

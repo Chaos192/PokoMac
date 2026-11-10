@@ -6,16 +6,19 @@ mod dump;
 mod events;
 mod gamebuild;
 mod host;
+mod icloud;
 mod ini;
 mod lan;
 mod nsp;
 mod nup;
 mod play;
+mod portmap;
 mod profiles;
 mod preflight;
 mod public_ip;
 mod relay;
 mod repair;
+mod report;
 mod rollback;
 mod saveimport;
 mod savebackup;
@@ -57,6 +60,15 @@ struct Config {
     window: Option<WindowPlace>,
     /// Which releases the launcher offers: "stable" (the default) or "testing" (prereleases built from the testing branch). update.rs Channel.
     channel: String,
+    /// Keep my saves in iCloud Drive (macOS, icloud.rs): the save is copied there when the game closes and a newer one is brought in
+    /// before it starts. Off until the player switches it on.
+    icloud_sync: bool,
+    /// When the save was last in sync with iCloud Drive (UTC, ISO 8601), and the hash (savebackup.rs digest) each account's save had
+    /// then. Written by icloud.rs, which reads and writes them as JSON so `--play` can too.
+    icloud_last_sync: String,
+    icloud_synced: std::collections::BTreeMap<String, String>,
+    /// The player switched off opening the Link Play port on the router (portmap.rs); forwarding is on by default.
+    port_forward_off: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -71,6 +83,31 @@ fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {}", dir.display(), e))?;
     Ok(dir.join("launcher.json"))
+}
+
+/// Tauri's identifier (tauri.conf.json), the name of the launcher's config folder.
+const IDENTIFIER: &str = "io.github.chaos192.pokomac";
+
+/// The config file config_path finds through the window, for `--play`, which has none: Tauri's app_config_dir is
+/// `<config folder>/<identifier>`, the config folder being ~/Library/Application Support on macOS, %APPDATA% on Windows and
+/// $XDG_CONFIG_HOME (~/.config) on Linux. None when the home folder is not known.
+fn cli_config_path() -> Option<PathBuf> {
+    let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    #[cfg(target_os = "macos")]
+    let base = env("HOME").map(|h| h.join("Library").join("Application Support"));
+    #[cfg(windows)]
+    let base = env("APPDATA");
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let base = env("XDG_CONFIG_HOME").or_else(|| env("HOME").map(|h| h.join(".config")));
+    Some(base?.join(IDENTIFIER).join("launcher.json"))
+}
+
+#[cfg(test)]
+mod config_tests {
+    #[test]
+    fn the_identifier_is_tauris() {
+        assert!(include_str!("../tauri.conf.json").contains(&format!("\"identifier\": \"{}\"", super::IDENTIFIER)));
+    }
 }
 
 fn load_config(app: &AppHandle) -> Config {
@@ -195,6 +232,11 @@ fn stop_relay(app: &AppHandle) {
     let srv = app.state::<RelayState>().0.lock().unwrap().take();
     if let Some(mut srv) = srv {
         srv.stop();
+    }
+    // the router port opened for it (portmap.rs) closes with it, on the lease's own thread
+    let lease = app.state::<RelayLease>().0.lock().unwrap().take();
+    if let Some(lease) = lease {
+        lease.finish(std::time::Duration::ZERO);
     }
 }
 
@@ -778,7 +820,32 @@ fn start_setup(app: AppHandle, state: State<Arc<SetupState>>, gentle: Option<boo
                 message: format!("Running the game once in the background to collect the shaders it builds while it runs (about {} s)...", shaders::WARMUP_SECONDS),
                 ..Default::default()
             });
-            Ok(shaders::prepare(&job.game_dir, &tools_dir, &st.cancel)?.is_some())
+            if shaders::prepare(&job.game_dir, &tools_dir, &st.cancel)?.is_none() {
+                return Ok(false);
+            }
+            // macOS: the pipelines of the opening, the character creator and the first area compiled for Metal now, not while
+            // the player waits for them in the game (shaders.rs prepare_pipelines)
+            if cfg!(target_os = "macos") {
+                emit(shaders::Progress {
+                    state: "running".into(),
+                    phase: "pipelines".into(),
+                    message: "Compiling the game's graphics for Metal, so nothing is missing the first time you play...".into(),
+                    ..Default::default()
+                });
+                let built = shaders::prepare_pipelines(&job.game_dir, &tools_dir, &st.cancel, job.log.as_ref(), |done, total| {
+                    emit(shaders::Progress {
+                        state: "running".into(),
+                        phase: "pipelines".into(),
+                        done,
+                        total,
+                        message: format!("Compiling the game's graphics for Metal: {} of {}", done, total),
+                    })
+                })?;
+                if built.is_none() {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
         })();
         let end = match result {
             Ok(true) => shaders::Progress { state: "done".into(), phase: "finish".into(), message: "Setup finished.".into(), ..Default::default() },
@@ -1107,7 +1174,20 @@ async fn backup_restore(app: AppHandle, name: String) -> Result<savebackup::Rest
 
 #[tauri::command]
 fn open_backup_dir(app: AppHandle) -> Result<(), String> {
-    let dir = game_dir_of(&load_config(&app)).join(savebackup::DIR);
+    let dir = savebackup::backup_root(&game_dir_of(&load_config(&app)));
+    fs::create_dir_all(&dir).map_err(|e| format!("Cannot create {}: {}", dir.display(), e))?;
+    play::open_with_shell(&dir)
+}
+
+/// The folder the game's photos go to (pkp.ini `[album] dir`, relative to the game folder; `album` by default, runtime album.cpp).
+#[tauri::command]
+fn open_album_dir(app: AppHandle) -> Result<(), String> {
+    let game = game_dir_of(&load_config(&app));
+    let ini = fs::read(game.join(settings::PKP_INI)).ok().map(|b| crate::ini::Ini::parse(&String::from_utf8_lossy(&b)));
+    let set = ini.as_ref().and_then(|i| i.get("album", "dir")).unwrap_or_default();
+    let set = if set.trim().is_empty() { "album".to_string() } else { set.trim().to_string() };
+    let p = PathBuf::from(&set);
+    let dir = if p.is_absolute() { p } else { game.join(p) };
     fs::create_dir_all(&dir).map_err(|e| format!("Cannot create {}: {}", dir.display(), e))?;
     play::open_with_shell(&dir)
 }
@@ -1200,6 +1280,37 @@ fn open_game_dir(app: AppHandle) -> Result<(), String> {
     play::open_with_shell(&game_dir_of(&load_config(&app)))
 }
 
+/// Report a problem (report.rs): the logs and settings in a zip on the Desktop, shown in Finder, and a new GitHub issue with the
+/// system facts filled in. Runs off the UI thread: it reads the logs and asks the system about the Mac.
+#[tauri::command]
+async fn report_problem(app: AppHandle) -> Result<report::Made, String> {
+    let dir = game_dir_of(&load_config(&app));
+    let cfg = config_path(&app)?;
+    let version = app.package_info().version.to_string();
+    let last = {
+        let s = app.state::<play::PlayState>().0.lock().unwrap().clone();
+        (s.state == "exited").then_some(s.message)
+    };
+    tauri::async_runtime::spawn_blocking(move || report::make(&dir, &cfg, &version, last.as_deref())).await.map_err(|e| e.to_string())?
+}
+
+/// iCloud Drive save sync (icloud.rs) for Settings: whether this Mac has iCloud Drive, and when the save last synced. Reads sync.json,
+/// which iCloud may first have to download, so it runs off the UI thread.
+#[tauri::command]
+async fn icloud_status(app: AppHandle) -> Result<icloud::Status, String> {
+    let dir = game_dir_of(&load_config(&app));
+    let cfg = config_path(&app)?;
+    tauri::async_runtime::spawn_blocking(move || icloud::status(&dir, &cfg)).await.map_err(|e| e.to_string())
+}
+
+/// Opens PokoMac's folder in iCloud Drive (the saves, and copies kept after a conflict) in Finder.
+#[tauri::command]
+fn open_icloud_dir() -> Result<(), String> {
+    let dir = icloud::folder().ok_or("iCloud Drive is not available on this Mac.")?;
+    fs::create_dir_all(&dir).map_err(|e| format!("Cannot create {}: {}", dir.display(), e))?;
+    play::open_with_shell(&dir)
+}
+
 
 /// Test runs only (PKP_LAUNCHER_EVAL_FILE set): the page writes a result next to the eval file, <file>.out.
 #[tauri::command]
@@ -1212,9 +1323,32 @@ fn test_report(text: String) -> Result<(), String> {
 #[derive(Default)]
 struct RelayState(Mutex<Option<relay::RelayServer>>);
 
+/// The router port opened for the relay while it runs (portmap.rs). None: not asked for (forwarding off, or no relay).
+#[derive(Default)]
+struct RelayLease(Mutex<Option<portmap::Lease>>);
+
+/// Opens the relay's port on the router, unless the player switched that off or it is open already. Never waits: the lease asks on its
+/// own thread.
+fn lease_relay_port(app: &AppHandle, port: u16) {
+    if !config_path(app).map_or(true, |c| portmap::enabled(&c)) {
+        return;
+    }
+    let leases = app.state::<RelayLease>();
+    let mut slot = leases.0.lock().unwrap();
+    match slot.as_ref().map(portmap::Lease::port) {
+        Some(p) if p == port => {}
+        _ => {
+            if let Some(old) = slot.take() {
+                old.finish(std::time::Duration::ZERO);
+            }
+            *slot = Some(portmap::Lease::start("relay", port));
+        }
+    }
+}
+
 /// Starts the relay (pokopia-native's coop-relay protocol) on 0.0.0.0:port (0 or none: 47610). A running one is stopped first.
 #[tauri::command]
-fn relay_start(state: State<RelayState>, port: Option<u16>) -> Result<relay::Status, String> {
+fn relay_start(app: AppHandle, state: State<RelayState>, port: Option<u16>) -> Result<relay::Status, String> {
     let mut slot = state.0.lock().unwrap();
     if let Some(mut old) = slot.take() {
         old.stop();
@@ -1222,7 +1356,10 @@ fn relay_start(state: State<RelayState>, port: Option<u16>) -> Result<relay::Sta
     let port = port.filter(|p| *p != 0).unwrap_or(relay::DEFAULT_PORT);
     let srv = relay::RelayServer::start(("0.0.0.0", port), relay::Config::default(), 0).map_err(|e| format!("Cannot open port {}: {}", port, e))?;
     let status = srv.status();
+    let bound = srv.local_addr().port();
     *slot = Some(srv);
+    // visitors over the internet reach this relay through the router: its port is opened there while it runs (portmap.rs)
+    lease_relay_port(&app, bound);
     Ok(status)
 }
 
@@ -1246,6 +1383,34 @@ fn lan_report() -> lan::LanReport {
 #[tauri::command]
 async fn public_ip() -> Option<String> {
     tauri::async_runtime::spawn_blocking(public_ip::lookup).await.ok().flatten()
+}
+
+/// Automatic port forwarding (portmap.rs): whether it is on, and how the router answered for the game and the relay.
+#[tauri::command]
+fn port_forward_status(app: AppHandle) -> portmap::Report {
+    portmap::report(config_path(&app).ok().as_deref())
+}
+
+/// The Link Play page's switch. Off: every port the launcher opened is closed now. On: the relay's, if it runs, is asked for now; the
+/// game's when the game next starts.
+#[tauri::command]
+fn port_forward_set(app: AppHandle, relay: State<RelayState>, enabled: bool) -> Result<portmap::Report, String> {
+    let mut cfg = load_config(&app);
+    cfg.port_forward_off = !enabled;
+    save_config(app.clone(), cfg)?;
+    if enabled {
+        let running = relay.0.lock().unwrap().as_ref().map(|s| s.local_addr().port());
+        if let Some(port) = running {
+            lease_relay_port(&app, port);
+        }
+    } else {
+        portmap::cancel_all();
+        let lease = app.state::<RelayLease>().0.lock().unwrap().take();
+        if let Some(lease) = lease {
+            lease.finish(std::time::Duration::ZERO);
+        }
+    }
+    Ok(portmap::report(config_path(&app).ok().as_deref()))
 }
 
 /// A new room code for a host, XXXX-XXXX-XXXX-XXXX (80 bits from the OS random source). The launcher writes it to pkp.ini
@@ -1455,6 +1620,7 @@ fn main() {
         .manage(Arc::new(SetupState::default()))
         .manage(Arc::new(StorageState::default()))
         .manage(RelayState::default())
+        .manage(RelayLease::default())
         .manage(Arc::new(update::UpdateState::default()))
         .manage(update::ReleaseStore::default())
         // a swap cut off by closing the window would have to wait for the next start to be undone
@@ -1561,11 +1727,15 @@ fn main() {
             backup_now,
             backup_restore,
             open_backup_dir,
+            open_album_dir,
             steam_status,
             steam_add,
             steam_remove,
             open_game_file,
             open_game_dir,
+            report_problem,
+            icloud_status,
+            open_icloud_dir,
             relay_start,
             relay_stop,
             relay_status,
@@ -1574,6 +1744,8 @@ fn main() {
             room_code_new,
             room_code_check,
             room_code_host,
+            port_forward_status,
+            port_forward_set,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the launcher");

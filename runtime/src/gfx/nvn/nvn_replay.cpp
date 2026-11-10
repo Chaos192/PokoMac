@@ -183,6 +183,32 @@ bool g_mirror_stale = false;    // a GPU write made pages of a pool copy stale w
 
 uint32_t g_pass_draws = 0;      // draws recorded in the open pass (GPU pass profiler)
 uint64_t g_pass_verts = 0;      // vertices (indices for indexed draws) times instances of those draws
+
+// Why open passes were ended, for the "pass ends" line in the log every 20 s. On a tile-based GPU (Apple silicon) every end of a pass
+// stores its tiles to memory and the pass that follows on the same targets loads them again, so the ends that do not change the targets
+// (uniform updates, texture uploads, copies) are the ones worth removing.
+enum PassEnd : uint8_t { kPeOther, kPeTargets, kPeMode, kPeUniform, kPeTextures, kPeFeedback, kPeCopy, kPeCompute, kPeQuery, kPeBarrier, kPeCount };
+uint64_t g_pe[kPeCount] = {};
+uint64_t g_pe_passes = 0, g_pe_inline = 0;   // passes begun; uniform updates written inside a pass without ending it ([nvn] inline_uniform)
+uint64_t g_pe_lazy = 0;                      // barriers that left the pass open ([nvn] lazy_barriers)
+uint64_t g_pe_tex_upload = 0, g_pe_tex_layout = 0;   // the texture pass ends split: CPU texels to upload, or only a layout change
+bool g_barrier_owed = false;                 // a barrier was recorded in the open pass: its end gets a full barrier
+void pass_end_log_maybe() {
+    static auto next = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    const auto now = std::chrono::steady_clock::now();
+    if (now < next) return;
+    next = now + std::chrono::seconds(20);
+    NXLOG_I("nvn.replay", "pass ends, last 20 s: %llu passes begun; ended for new targets %llu, a depth read-only / feedback mode change %llu, "
+                          "uniform updates %llu, texture uploads/layouts %llu (uploads %llu, layouts only %llu), feedback copies %llu, buffer copies/fills %llu, compute %llu, queries %llu, barriers %llu, other %llu; "
+                          "uniform updates kept inside the pass %llu, barriers that left the pass open %llu",
+            static_cast<unsigned long long>(g_pe_passes), static_cast<unsigned long long>(g_pe[kPeTargets]), static_cast<unsigned long long>(g_pe[kPeMode]),
+            static_cast<unsigned long long>(g_pe[kPeUniform]),
+            static_cast<unsigned long long>(g_pe[kPeTextures]), static_cast<unsigned long long>(g_pe_tex_upload), static_cast<unsigned long long>(g_pe_tex_layout), static_cast<unsigned long long>(g_pe[kPeFeedback]), static_cast<unsigned long long>(g_pe[kPeCopy]), static_cast<unsigned long long>(g_pe[kPeCompute]),
+            static_cast<unsigned long long>(g_pe[kPeQuery]), static_cast<unsigned long long>(g_pe[kPeBarrier]), static_cast<unsigned long long>(g_pe[kPeOther]),
+            static_cast<unsigned long long>(g_pe_inline), static_cast<unsigned long long>(g_pe_lazy));
+    for (uint64_t& v : g_pe) v = 0;
+    g_pe_passes = g_pe_inline = g_pe_lazy = g_pe_tex_upload = g_pe_tex_layout = 0;
+}
 Frame* F = nullptr;
 std::unordered_map<uint64_t, VkDescriptorSet> g_set_cache;
 VkPipeline g_bound_pipeline = VK_NULL_HANDLE;
@@ -557,7 +583,7 @@ bool same_image(Texture* a, Texture* b) { return a == b || (a && b && a->gpu && 
 // to_pass: the caller only starts another pass or changes image layouts next (ensure_pass, prepare_textures); with tracked barriers the pass
 // then ends without a barrier when it only wrote its attachments. Any other caller gets a full barrier, also for passes ended earlier
 // without one.
-void end_pass(bool to_pass = false) {
+void end_pass(bool to_pass = false, PassEnd why = kPeOther) {
     // [nvn] epoch_exact: with no pass open nothing a memoized set depends on changes here (P stays closed, so fbl_sampled stays false; the
     // render targets, handles, pools and images are untouched; the barrier below changes no descriptor). Every other change has its own
     // bump (ensure_pass, feedback / 3D copies, gpu_wrote, bind_gen).
@@ -570,6 +596,12 @@ void end_pass(bool to_pass = false) {
             g_pending.clear();
         }
         return;
+    }
+    ++g_pe[why];
+    pass_end_log_maybe();
+    if (g_barrier_owed) {   // a barrier the game recorded in this pass (Op::Barrier): what follows the pass waits for all of it
+        g_barrier_owed = false;
+        to_pass = false;
     }
     xfb_end_in_pass();
     vkCmdEndRendering(F->cb);
@@ -638,6 +670,10 @@ bool targets_match() {
     return P.depth == make_target(S.depth_tex.get(), S.depth_view, S.depth_has_view);
 }
 
+// The reason an end of the open pass is counted under (the pass-end line): one asked for by a draw whose render targets differ from the
+// open pass's would have happened anyway, at its ensure_pass, so it is counted as a change of targets.
+PassEnd why_or_targets(PassEnd w) { return P.open && !targets_match() ? kPeTargets : w; }
+
 // The current render targets get their images (scaled when they qualify, tex_gpu_attachment). With `fix` (no pass open), as Ryujinx does
 // when it binds render targets: a target whose image was made unscaled (first used another way) is scaled now, and the targets of one
 // pass are brought to one scale (the lowest when one of them cannot be scaled). Returns the scale of the targets.
@@ -668,8 +704,9 @@ float attach_targets(bool fix) {
 // Starts a pass on the current render targets if none is open for them. False when there is nothing to render to. fbl: the colour slots
 // that are in the feedback loop layout (a pass in another layout mode is ended: the layouts and the pipelines' feedback flag go together).
 bool ensure_pass(bool depth_ro = false, uint8_t fbl = 0) {
-    if (P.open && targets_match() && P.depth_ro == depth_ro && P.fbl == fbl) return true;
-    end_pass(true);
+    const bool same_targets = P.open && targets_match();
+    if (same_targets && P.depth_ro == depth_ro && P.fbl == fbl) return true;
+    end_pass(true, same_targets ? kPeMode : kPeTargets);
     if (!g_pending.empty()) {
         bool conflict = false;
         for (uint32_t i = 0; i < S.ncolor && !conflict; ++i) conflict = pending_conflict(S.color_tex[i].get(), color_layout(fbl, i));
@@ -768,6 +805,7 @@ bool ensure_pass(bool depth_ro = false, uint8_t fbl = 0) {
     gstamp("pass setup");
     vkCmdBeginRendering(F->cb, &ri);
     P.open = true;
+    ++g_pe_passes;
     rp_bump(ft::kCntEpBeginPass);
     counters().passes.fetch_add(1, std::memory_order_relaxed);
     g_bound_pipeline = VK_NULL_HANDLE;
@@ -1144,12 +1182,12 @@ void feedback_prepare(const ProgLayout& pl) {
             for (uint32_t i = 0; i < S.ncolor && i < 8; ++i) if (shares_image(r.tex, S.color_tex[i].get())) slots |= static_cast<uint8_t>(1u << i);
             if (slots && (g_fbl_want & slots) == slots) continue;          // another binding of the same image
             if (!tex_has_feedback_loop(r.tex)) {                          // the first feedback draw of this image: remade with the usage (once)
-                end_pass();
+                end_pass(false, why_or_targets(kPeFeedback));
                 tex_enable_feedback_loop(r.tex, *F);
             }
             if (slots && tex_has_feedback_loop(r.tex)) {
                 if (!tex_current_on_gpu(r.tex)) {
-                    end_pass();
+                    end_pass(false, why_or_targets(kPeFeedback));
                     tex_ensure_current(r.tex, *F);
                 }
                 g_fbl_want |= slots;
@@ -1160,7 +1198,7 @@ void feedback_prepare(const ProgLayout& pl) {
         Texture* c = feedback_clone(r.tex);
         if (!c) continue;
         if (!tex_current_on_gpu(r.tex)) {
-            end_pass();
+            end_pass(false, why_or_targets(kPeFeedback));
             tex_ensure_current(r.tex, *F);                                // storage the game wrote since the image was made reaches the copy too
         }
         FbClone& fe = g_fb_clone[r.tex];
@@ -1189,7 +1227,7 @@ void feedback_prepare(const ProgLayout& pl) {
         g_fb_use[r.tex] = c;
         rp_bump(ft::kCntEpFeedback);   // [nvn] set_reuse: what this texture resolves to changed
         if (regions.empty()) continue;                                    // the copy is current for every level the draw samples (no pass break)
-        end_pass();
+        end_pass(false, why_or_targets(kPeFeedback));
         tex_transition(r.tex, *F, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);   // the next pass moves it back to the attachment layout and loads it
         tex_transition(c, *F, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         vkCmdCopyImage(F->cb, tex_image(r.tex), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, tex_image(c), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<uint32_t>(regions.size()), regions.data());
@@ -1209,7 +1247,7 @@ void feedback_prepare(const ProgLayout& pl) {
     // The draws before this one wrote the attachment it reads through the feedback loop layout: the pass ends (with a barrier) and the draw's
     // pass begins in that layout (ensure_pass). Each such draw gets its own pass, as each copy did.
     if (g_fbl_want) {
-        end_pass();
+        end_pass(false, kPeMode);
         if (loop_label.tex) feedback_label(loop_label, "loop");
     }
     g_fb_seen = any;
@@ -1280,7 +1318,7 @@ void vol3d_prepare(const ProgLayout& pl) {
         const uint64_t serial = F ? F->serial : 0;
         if (e.copied != serial || r.tex->cpu_dirty.load()) {
             out_texture_read(r.tex);
-            end_pass();
+            end_pass(false, why_or_targets(kPeFeedback));
             tex_ensure_current(r.tex, *F);
             tex_transition(r.tex, *F, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
             tex_transition(c.get(), *F, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -1376,7 +1414,13 @@ void prepare_textures(const ProgLayout& pl) {
     for (Texture* t : need) out_texture_read(t);           // an upload reads game memory: compute results held there go back first
     for (Texture* t : need_storage) out_texture_read(t);
     for (Texture* t : need_general) out_texture_read(t);
-    end_pass(true);     // layout changes and uploads follow: each carries the dependency for its own image
+    if (P.open && targets_match()) {   // for the pass-end line: was it new texels from the CPU, or only a layout for a texture the GPU made?
+        bool upload = false;
+        for (Texture* t : need) upload = upload || t->cpu_dirty.load();
+        for (Texture* t : need_storage) upload = upload || t->cpu_dirty.load();
+        ++(upload ? g_pe_tex_upload : g_pe_tex_layout);
+    }
+    end_pass(true, why_or_targets(kPeTextures));     // layout changes and uploads follow: each carries the dependency for its own image
     counters().pass_breaks.fetch_add(1, std::memory_order_relaxed);
     for (Texture* t : need) {
         tex_ensure_current(t, *F);
@@ -1503,7 +1547,7 @@ void flush_compute_out(int why) {
         static bool noted = false;
         if (!noted) { noted = true; NXLOG_W("nvn.replay", "pool_copy: a compute result is held in a pool copy; its copy-back is not recorded as a GPU write"); }
     }
-    end_pass();
+    end_pass(false, kPeCompute);
     if (out_flush(F->cb, 0, UINT64_MAX, why)) {
         ++g_sh_flushes;
         gstamp("compute out");
@@ -1514,7 +1558,7 @@ void flush_compute_out(int why) {
 // page with it go back first (a page granular test: the pool copy is filled and tracked by whole pages).
 void compute_out_guard(uint64_t addr, uint64_t size, int why) {
     if (!size || !out_overlaps(addr, size)) return;
-    end_pass();
+    end_pass(false, kPeCompute);
     if (out_flush(F->cb, addr, size, why)) {
         ++g_sh_flushes;
         gstamp("compute out");
@@ -2611,7 +2655,7 @@ void temporal_for_draw(const ProgLayout& pl) {
     const VkExtent3D ce = tex_image_extent(best_r.tex, 0), de = tex_image_extent(depth, 0), te = tex_image_extent(target, 0);
     VkExtent2D render{std::min(ce.width, de.width), std::min(ce.height, de.height)}, out_tex{};
     if (VkExtent2D part{}; scene_part(render, VkExtent2D{te.width, te.height}, &part, &out_tex)) render = part;
-    end_pass();                                                           // compute work cannot run inside a render pass
+    end_pass(false, kPeCompute);                                          // compute work cannot run inside a render pass
     tex_ensure_current(best_r.tex, *F);
     tex_transition(best_r.tex, *F, tex_sampled_layout(best_r.tex));
     tex_transition(depth, *F, tex_sampled_layout(depth));
@@ -2624,6 +2668,11 @@ void temporal_for_draw(const ProgLayout& pl) {
                                                 S.depth_mode == NVN_DEPTH_MODE_NEAR_IS_MINUS_W, out_tex);
     g_dirty = kAllDirty;                                                  // the SDKs bind their own compute state
     shadow_invalidate();
+    // A back end on another queue (MetalFX) may have split the recording: F->cb is then a new command buffer, which has none of the state
+    // kept per command buffer. Send it again.
+    g_topo = VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
+    g_restart_valid = false;
+    g_vb_bound_in_cb = false;
     if (out) {
         g_su_tex = best_r.tex;
         g_su_view = out;
@@ -2703,7 +2752,7 @@ void scene_upscale_for_draw(const ProgLayout& pl) {
         if (in_view.width >= te.width && in_view.height >= te.height) return;
         extras::SpatialUpscaler* su = extras::scene_upscaler(&device(), in_view, VkExtent2D{te.width, te.height});
         if (!su) return;
-        end_pass();                                                           // compute work cannot run inside a render pass
+        end_pass(false, kPeCompute);                                          // compute work cannot run inside a render pass
         tex_ensure_current(r.tex, *F);
         tex_transition(r.tex, *F, tex_sampled_layout(r.tex));
         VkImageView src = tex_sampled_view(r.tex, make_request(b, r));
@@ -2852,7 +2901,13 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     }
     if (g_fb_seen || (g_dirty & (kDesc | kPipe))) feedback_prepare(*pl);
     bool pass_ok;
-    { RpScope rp_(kRpPass); pass_ok = ensure_pass(g_want_depth_ro, g_fbl_want); }
+    // A draw that writes neither depth nor stencil stays in an open pass whose depth is read-only (one that sampled the depth target)
+    // instead of ending it to open the same targets writable again: that pass forces both writes off (apply_dynamic), which changes
+    // nothing for this draw, and on a tile-based GPU each switch stores the tiles and loads them back. [nvn] sticky_depth_ro = false: off.
+    static const bool sticky_ro = config_get_bool("nvn", "sticky_depth_ro", true);
+    const bool writes_ds = (S.ds.depth_test && S.ds.depth_write) || (S.ds.stencil_test && (S.stencil_wmask[0] || S.stencil_wmask[1]));
+    const bool want_ro = g_want_depth_ro || (sticky_ro && P.open && P.depth_ro && P.fbl == g_fbl_want && !writes_ds);
+    { RpScope rp_(kRpPass); pass_ok = ensure_pass(want_ro, g_fbl_want); }
     if (!pass_ok) { log_once("draw-no-target", "draw without a usable render target skipped"); return false; }
     if (g_prog_writes || g_xfb_active) g_pass_unsafe = true;
     const VkPrimitiveTopology topo = vk_topology(mode);
@@ -3649,7 +3704,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     ResolveScope rs_;
     rs_.arm(pl);
     prepare_textures(*pl);
-    end_pass();
+    end_pass(false, kPeCompute);
     if (g_trace) {   // the compute bindings: buffers (source, slot, address), texel buffers and textures, and the first words of each uniform block
         for (const BindingDesc& d : pl->bindings) {
             const DescriptorBinding& b = d.shader->refl.bindings[d.index];
@@ -3853,7 +3908,7 @@ SubRes sub_of(const TextureViewInfo& v, bool has_view) {
 void do_clear_texture(const P_ClearTexture& p) {
     Texture* t = p.tex;
     if (!t || !tex_gpu(t)) return;
-    end_pass();
+    end_pass(false, kPeCopy);
     SubRes s = sub_of(p.view, p.has_view);
     tex_ensure_current(t, *F);
     tex_transition(t, *F, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -3892,7 +3947,7 @@ void do_copy_buffer_texture(const P_CopyBufTex& p, bool to_texture) {
         }
     }
     if (!t || !tex_gpu(t)) return;
-    end_pass();
+    end_pass(false, kPeCopy);
     SubRes s = sub_of(p.view, p.has_view);
     const VkExtent3D ext = tex_extent(t, s.level);
     P_CopyRegion r = p.has_region ? p.region : P_CopyRegion{0, 0, 0, static_cast<int32_t>(ext.width), static_cast<int32_t>(ext.height), static_cast<int32_t>(ext.depth)};
@@ -3992,7 +4047,7 @@ void do_copy_buffer_texture(const P_CopyBufTex& p, bool to_texture) {
 void do_copy_texture_texture(const P_CopyTexTex& p) {
     Texture *s = p.src, *d = p.dst;
     if (!s || !d || !tex_gpu(s) || !tex_gpu(d)) return;
-    end_pass();
+    end_pass(false, kPeCopy);
     const SubRes ss = sub_of(p.src_view, p.has_src_view), ds = sub_of(p.dst_view, p.has_dst_view);
     const VkExtent3D se = tex_extent(s, ss.level), de = tex_extent(d, ds.level);
     P_CopyRegion sr = p.has_src_region ? p.src_region : P_CopyRegion{0, 0, 0, static_cast<int32_t>(se.width), static_cast<int32_t>(se.height), static_cast<int32_t>(se.depth)};
@@ -4053,7 +4108,7 @@ void do_copy_texture_texture(const P_CopyTexTex& p) {
 void do_downsample(const P_Downsample& p) {
     Texture *s = p.src, *d = p.dst;
     if (!s || !d || !tex_gpu(s) || !tex_gpu(d)) return;
-    end_pass();
+    end_pass(false, kPeCopy);
     if (tex_is_depth(s)) { note_unsupported("Downsample of a depth texture"); return; }
     tex_transition(s, *F, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     tex_transition(d, *F, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -4083,7 +4138,7 @@ void do_downsample(const P_Downsample& p) {
 void do_write_memory(uint64_t gpu_addr, const void* data, uint32_t size) {
     PoolReasonScope pr_(kReasonUpdate);
     // a GPU-ordered write of up to 64 KiB into pool memory (UpdateUniformBuffer, counters, events)
-    end_pass();
+    end_pass(false, kPeUniform);
     memory_barrier(F->cb);
     BufRef b = resolve_buffer(gpu_addr, size);
     if (!b.ok) return;
@@ -4371,7 +4426,7 @@ void run_list(const CmdList& list, int depth) {
             case Op::ClearBuffer: {
                 const auto& p = r.payload<P_ClearBuffer>();
                 PoolReasonScope pr_(kReasonCopy);
-                end_pass();
+                end_pass(false, kPeCopy);
                 BufRef b = resolve_buffer(p.address, p.size);
                 if (b.ok) vkCmdFillBuffer(F->cb, b.buffer, b.offset, p.size & ~3ull, p.value);
                 if (b.ok) gpu_wrote(p.address, p.size, kWriteFill);
@@ -4384,7 +4439,7 @@ void run_list(const CmdList& list, int depth) {
                 const auto& p = r.payload<P_CopyBufferToBuffer>();
                 note_copy_for_cpu(p.src, p.dst, p.size);   // [nvn] async_compute: what is copied into a CPU-visible pool, the CPU reads
                 PoolReasonScope pr_(kReasonCopy);
-                end_pass();
+                end_pass(false, kPeCopy);
                 BufRef s = held_or_pool(p.src, p.size, kOutBufferRead, true), d = resolve_buffer(p.dst, p.size);
                 if (s.ok && d.ok) {
                     VkBufferCopy c = {s.offset, d.offset, p.size};
@@ -4413,7 +4468,7 @@ void run_list(const CmdList& list, int depth) {
                 const auto& p = r.payload<P_Counter>();
                 struct { uint64_t counter, timestamp; } rep = {1, timestamp_ns()};   // counters other than the ones handled below are reported as non-zero
                 if (p.type == NVN_COUNTER_TYPE_SAMPLES_PASSED && occ_ready()) {
-                    end_pass();
+                    end_pass(false, kPeQuery);
                     if (g_occ_active >= 0) {
                         vkCmdEndQuery(F->cb, g_occ_pool, static_cast<uint32_t>(g_occ_active));
                         g_occ_last = g_occ_active;
@@ -4478,7 +4533,7 @@ void run_list(const CmdList& list, int depth) {
             case Op::ResetCounter: {
                 const auto& p = r.payload<P_Counter>();
                 if (p.type == NVN_COUNTER_TYPE_SAMPLES_PASSED && occ_ready()) {
-                    end_pass();
+                    end_pass(false, kPeQuery);
                     if (g_occ_active >= 0) vkCmdEndQuery(F->cb, g_occ_pool, static_cast<uint32_t>(g_occ_active));
                     const uint32_t slot = g_occ_next++ % kOccSlots;
                     vkCmdResetQueryPool(F->cb, g_occ_pool, slot, 1);
@@ -4503,7 +4558,24 @@ void run_list(const CmdList& list, int depth) {
                 }
                 break;
             }
-            case Op::Barrier: end_pass(); memory_barrier(F->cb); break;
+            case Op::Barrier: {
+                // NVN orders the draws on either side of a barrier and makes their writes visible to what follows. Inside one pass on the
+                // same targets Vulkan's rasterization order already orders the attachment writes, and a later draw that samples one of the
+                // attachments goes through feedback_prepare / ensure_pass (a copy or a layout change, each ending the pass with its own
+                // dependency). So while no draw of the open pass wrote other memory (storage buffers or images, transform feedback:
+                // g_pass_unsafe) the pass stays open and the barrier is owed: the end of the pass pays it with a full barrier. Pokopia
+                // issues about 150 of these a frame; on a tile-based GPU (Apple) each pass end stores the tiles and the next pass loads
+                // them again. [nvn] lazy_barriers = false: every barrier ends the pass, as before.
+                static const bool lazy = config_get_bool("nvn", "lazy_barriers", true);
+                if (lazy && P.open && !g_pass_unsafe) {
+                    g_barrier_owed = true;
+                    ++g_pe_lazy;
+                    break;
+                }
+                end_pass(false, kPeBarrier);
+                memory_barrier(F->cb);
+                break;
+            }
             case Op::FenceSync: {
                 const auto& p = r.payload<P_Sync>();
                 if (p.sync) { p.sync->serial.store(F->serial); p.sync->armed.store(true); }
@@ -4697,6 +4769,7 @@ void replay_begin_submit(Frame& f) {
         set_narrow_barriers(g_tracked);
         g_pending.clear();
         g_pass_unsafe = false;
+        g_barrier_owed = false;
         RpScope rp_(kRpMirror);
         ft::SplitScope sp_(ft::kSplSetup);
         mirror_begin_submit(f, on);
@@ -4850,5 +4923,7 @@ struct ReplayGauges {
 };
 ReplayGauges g_replay_gauges;
 }  // namespace
+
+bool replay_queries_open() { return g_occ_active >= 0 || g_cw[0].active >= 0 || g_cw[1].active >= 0; }
 
 }  // namespace nxrt::nvn::be::gpu

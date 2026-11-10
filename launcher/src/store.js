@@ -95,6 +95,8 @@ export const store = {
       on('dlss-progress', (p) => store.state.dlss && set({ dlss: p }, 'task')),
       on('nup-progress', (p) => store.state.nup && set({ nup: p }, 'task')),
       on('shader-storage-progress', (p) => store.state.repack && set({ repack: p }, 'task')),
+      // iCloud Drive save sync (icloud.rs): a conflict, or a sync that could not be done, said once as it happens
+      on('save-sync', (text) => toast(text, '', 10000)),
       on('tauri://drag-enter', () => set({ dragging: true, dropped: null }, 'drop')),
       on('tauri://drag-leave', () => set({ dragging: false, dropped: null }, 'drop')),
       on('tauri://drag-drop', (p) => set({ dragging: false, dropped: p.paths ?? [] }, 'drop')),

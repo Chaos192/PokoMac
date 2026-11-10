@@ -24,6 +24,7 @@ std::mutex g_mu;
 Settings g_settings;
 bool g_settings_set = false;
 std::atomic<int> g_upscale_mode{-1};          // -1: not read yet
+std::atomic<bool> g_upscale_fell_back{false};  // upscale_fallback: g_upscale_mode is the fallback, not the player's choice
 std::atomic<float> g_upscale_sharp{0.8f};
 std::atomic<int> g_scene_scale{100};
 std::atomic<float> g_scene_fx{1.0f}, g_scene_fy{1.0f};   // scene_fraction
@@ -59,8 +60,9 @@ Settings settings_from_config() {
     if (s.hdr.paper_white_nits != 0 && s.hdr.paper_white_nits < 80) s.hdr.paper_white_nits = 80;
     s.hdr.highlight_boost = std::clamp(config_get_double("hdr", "highlight_boost", 1.0), 0.0, 2.0);
 
-    const std::string um = lower(config_get_str("upscale", "mode", "off"));
-    s.upscale.mode = um == "fsr1" || um == "spatial" ? UpscaleMode::Fsr1 : um == "fsr3" ? UpscaleMode::Fsr3 : um == "dlss" ? UpscaleMode::Dlss : um == "xess" ? UpscaleMode::Xess : um == "nis" ? UpscaleMode::Nis : um == "dlaa" ? UpscaleMode::Dlaa : um == "nearest" ? UpscaleMode::Nearest : UpscaleMode::Off;
+    const std::string um = lower(config_get_str("upscale", "mode", kUpscaleModeDefaultWord));
+    s.upscale.mode = um == "fsr1" || um == "spatial" ? UpscaleMode::Fsr1 : um == "fsr3" ? UpscaleMode::Fsr3 : um == "dlss" ? UpscaleMode::Dlss : um == "xess" ? UpscaleMode::Xess : um == "nis" ? UpscaleMode::Nis : um == "dlaa" ? UpscaleMode::Dlaa : um == "nearest" ? UpscaleMode::Nearest
+                   : um == "metalfx" ? UpscaleMode::MetalFx : um == "metalfx_aa" || um == "metalfxaa" ? UpscaleMode::MetalFxAa : UpscaleMode::Off;
     s.upscale.mode = upscale_mode_enabled(s.upscale.mode);
     const std::string uq = lower(config_get_str("upscale", "quality", "quality"));
     s.upscale.quality = uq == "native" || uq == "nativeaa" || uq == "aa" ? UpscaleQuality::Native : uq == "balanced" ? UpscaleQuality::Balanced
@@ -109,6 +111,7 @@ void set_settings(const Settings& in) {
     std::lock_guard<std::mutex> lk(g_mu);
     g_settings = s;
     g_settings_set = true;
+    g_upscale_fell_back.store(false);
     g_upscale_mode.store(static_cast<int>(s.upscale.mode));
     g_upscale_sharp.store(static_cast<float>(s.upscale.sharpness));
     g_scene_scale.store(s.upscale.scene_scale);
@@ -158,12 +161,13 @@ float upscale_sharpness() { return g_upscale_sharp.load(std::memory_order_relaxe
 
 int upscale_scene_scale() {
     upscale_mode();      // reads the settings once
-    if (upscale_mode() == UpscaleMode::Dlaa) return 100;
-    if (upscale_temporal()) {
-        const int pct = quality_percent(upscale_quality());
-        if (pct > 0) return pct;
-    }
-    return g_scene_scale.load(std::memory_order_relaxed);
+    if (upscale_mode() == UpscaleMode::Dlaa || upscale_mode() == UpscaleMode::MetalFxAa) return 100;
+    int pct = upscale_temporal() ? quality_percent(upscale_quality()) : -1;
+    if (pct <= 0) pct = g_scene_scale.load(std::memory_order_relaxed);
+    // MetalFX enlarges at most 3x per side (MTLFXTemporalScalerDescriptor supportedInputContentMaxScaleForDevice): ultra performance's 33%
+    // (634 of 1920 pixels) is just beyond it, so MetalFX renders at least 34%
+    if (upscale_mode() == UpscaleMode::MetalFx) pct = std::max(pct, 34);
+    return pct;
 }
 
 void scene_fraction_set(float fx, float fy) {
@@ -183,8 +187,16 @@ UpscaleQuality upscale_quality() {
 
 bool upscale_temporal() {
     const UpscaleMode m = upscale_mode();
-    return m == UpscaleMode::Fsr3 || m == UpscaleMode::Dlss || m == UpscaleMode::Dlaa;
+    return m == UpscaleMode::Fsr3 || m == UpscaleMode::Dlss || m == UpscaleMode::Dlaa || m == UpscaleMode::MetalFx || m == UpscaleMode::MetalFxAa;
 }
+
+void upscale_fallback(UpscaleMode to) {
+    upscale_mode();      // reads the settings once (a later first read would overwrite the fallback)
+    g_upscale_fell_back.store(true);
+    g_upscale_mode.store(static_cast<int>(to));
+}
+
+bool upscale_fell_back() { return g_upscale_fell_back.load(); }
 
 int quality_percent(UpscaleQuality q) {
     switch (q) {

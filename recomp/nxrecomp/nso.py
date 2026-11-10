@@ -14,13 +14,22 @@ def nso_info(d):
     if d[:4] != b'NSO0':
         raise ValueError('not an NSO executable')
     flags = struct.unpack_from('<I', d, 12)[0]
+    # Flag bit 7: the compressed segments are ZBIC (a zstd variant with its own frame magic "ZBIC", first seen with system
+    # version 22.0.0; Switch 2 titles such as The Legend of Zelda: Ocarina of Time use it), not LZ4. Decoded with the zbic package
+    # (pip install zbic: kinnay/zbic, the zstd sources from Atmosphere with ZSTD_ZBIC_SUPPORT); the segment hashes below check it.
+    zbic_mod = None
+    if flags & 0x80:
+        try:
+            import zbic as zbic_mod
+        except ImportError as e:
+            raise ValueError('this NSO is ZBIC-compressed: install the zbic package (python -m pip install zbic)') from e
     segs = []
     for i, (ho, cso) in enumerate(((0x10, 0x60), (0x20, 0x64), (0x30, 0x68))):
         foff, moff, size = struct.unpack_from('<III', d, ho)
         csz = struct.unpack_from('<I', d, cso)[0]
         raw = d[foff:foff + csz]
         if flags & (1 << i):
-            raw = lz4.block.decompress(raw, uncompressed_size=size)
+            raw = zbic_mod.decompress(raw) if zbic_mod else lz4.block.decompress(raw, uncompressed_size=size)
         assert len(raw) == size
         ok = hashlib.sha256(raw).digest() == d[0xA0 + i * 0x20:0xC0 + i * 0x20]
         segs.append({'vaddr': moff, 'size': size, 'data': raw, 'sha_ok': ok})

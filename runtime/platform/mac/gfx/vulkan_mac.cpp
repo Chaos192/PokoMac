@@ -49,6 +49,9 @@ bool exists(const std::string& p) {
 
 bool mac_load_vulkan() {
     const std::string dir = exe_dir();
+    // MoltenVK sets the MTLDevice's concurrent compilation from its own configuration when it opens the device, which would undo
+    // mac_metal_tune (metal_mac.mm); a value the player set in the environment wins.
+    if (config_get_bool("gfx", "metal_max_compile", true)) setenv("MVK_CONFIG_SHOULD_MAXIMIZE_CONCURRENT_COMPILATION", "1", 0);
     if (!getenv("VK_DRIVER_FILES") && !getenv("VK_ICD_FILENAMES")) {
         const std::string want = config_get_str("gfx", "vulkan_driver", "kosmickrisp");
         const std::string kk = dir + "/vulkan/icd.d/libkosmickrisp_icd.json", mvk = dir + "/vulkan/icd.d/MoltenVK_icd.json";
@@ -75,6 +78,7 @@ bool mac_load_vulkan() {
         volkInitializeCustom(gipa);
         SDL_SetHint(SDL_HINT_VULKAN_LIBRARY, l.c_str());
         NXLOG_I(kTag, "Vulkan loader: %s", l.c_str());
+        mac_metal_tune();   // before the driver compiles anything
         return true;
     }
     NXLOG_E(kTag, "no Vulkan loader: put libvulkan.1.dylib next to pkp (the release does) or install the Vulkan SDK");

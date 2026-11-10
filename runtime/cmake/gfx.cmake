@@ -56,7 +56,9 @@ endif()
 target_include_directories(nxrt_gfx PUBLIC include src/gfx/nvn/third_party PRIVATE src/gfx src/gfx/nvn)
 target_link_libraries(nxrt_gfx PUBLIC nxrt nxrt_volk nxrt_vma nxrt_imgui nxrt_tiling nxrt_astc2bc7 nxrt_zstd SDL3::SDL3-static)
 if(APPLE)
-    target_link_libraries(nxrt_gfx PUBLIC "-framework AppKit" "-framework Metal" "-framework QuartzCore")
+    target_link_libraries(nxrt_gfx PUBLIC "-framework AppKit" "-framework Metal" "-framework MetalFX" "-framework QuartzCore")
+    # the MetalFX backend keeps Metal objects in C++ members: built with ARC
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/platform/mac/gfx/temporal_metalfx.mm" PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 endif()
 # The core calls into the graphics shell (src/core/switch2.cpp: the HDR layer luminance; src/testtools: the screenshot wait), so whatever
 # links nxrt links nxrt_gfx too, as the game exe does. Static libraries may depend on each other.

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // macOS side of src/gfx/extras: DLSS (Streamline) and FidelityFX are Windows / PC-Vulkan SDKs and are not available here, so those
-// backends report "not available" and the upscaler settings fall back to the built-in ones (FSR 1, NIS). The HDR query is in display_mac.mm.
+// backends report "not available"; the temporal upscaler on macOS is MetalFX (temporal_metalfx.mm), with FSR 1 as its fallback. The HDR
+// query is in display_mac.mm.
 #include "extras/temporal.h"
 
 namespace nxrt::extras {

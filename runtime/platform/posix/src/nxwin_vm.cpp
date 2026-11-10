@@ -32,14 +32,17 @@ constexpr uint64_t kGran = 0x10000;   // Windows allocation granularity
 uint64_t page_down(uint64_t v) { return v & ~(static_cast<uint64_t>(vm_page_size) - 1); }
 uint64_t page_up(uint64_t v) { return (v + vm_page_size - 1) & ~(static_cast<uint64_t>(vm_page_size) - 1); }
 
+// Execute access is never given: the only memory that asks for it is the guest's code (mem::Prot::RX / RWX), which the host never runs
+// (it is recompiled) and only reads. Asking for PROT_EXEC on pages whose maximum protection lacks it fails with EACCES, which left the
+// module images writable ("protect …: VirtualProtect failed, error 5" at every boot).
 int prot_of(DWORD p) {
     switch (p & 0xFF) {
         case PAGE_NOACCESS: return PROT_NONE;
         case PAGE_READONLY: return PROT_READ;
         case PAGE_READWRITE: case PAGE_WRITECOPY: return PROT_READ | PROT_WRITE;
-        case PAGE_EXECUTE: return PROT_EXEC;
-        case PAGE_EXECUTE_READ: return PROT_READ | PROT_EXEC;
-        case PAGE_EXECUTE_READWRITE: case PAGE_EXECUTE_WRITECOPY: return PROT_READ | PROT_WRITE | PROT_EXEC;
+        case PAGE_EXECUTE: return PROT_READ;
+        case PAGE_EXECUTE_READ: return PROT_READ;
+        case PAGE_EXECUTE_READWRITE: case PAGE_EXECUTE_WRITECOPY: return PROT_READ | PROT_WRITE;
         default: return PROT_READ | PROT_WRITE;
     }
 }

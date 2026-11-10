@@ -106,7 +106,7 @@ public:
         return true;
     }
 
-    bool evaluate(VkCommandBuffer cb, const TemporalFrame& f) override {
+    bool evaluate(VkCommandBuffer& cb, const TemporalFrame& f) override {
         if (failed_) return false;
         if (!ctx_ || f.render.width > max_render_.width || f.render.height > max_render_.height || f.out.width != max_out_.width || f.out.height != max_out_.height ||
             f.depth_inverted != depth_inverted_) {

@@ -20,6 +20,15 @@
 // A choice is a list of presets plus Custom with a number field (custom: { min, max, suffix, start, label }), a size likewise with two.
 // Rows that are not fields: info (label, value, actions), keycap (label, key), note (a line of text), and { expand } for rows made from env.
 
+// MetalFX (Apple's temporal upscaler) exists in the macOS runtime only, where it is the default (runtime/include/nxrt/extras.h).
+const IS_MAC = typeof navigator !== 'undefined' && /Macintosh/.test(navigator.userAgent || '');
+const UPSCALERS = [
+  { value: 'off', label: 'Off' },
+  ...(IS_MAC ? [{ value: 'metalfx', label: 'MetalFX (sharper, smoother edges)' }, { value: 'metalfx_aa', label: 'MetalFX anti-aliasing only' }] : []),
+  { value: 'fsr1', label: 'FSR 1' },
+  { value: 'nearest', label: 'Nearest (sharp pixels)' },
+];
+
 const controls = (section, key) => ({ file: 'controls', section, key });
 const pkp = (section, key) => ({ file: 'pkp', section, key });
 const config = (key) => ({ file: 'config', section: '', key });
@@ -237,6 +246,21 @@ export const DLSS_DOWNLOAD = {
 
 export const IMPORT_FACTS = 'Your current save moves to a backup folder first, and the source is only read. A copied save cannot join its original in Link Play.';
 
+// ---- iCloud Drive -----------------------------------------------------------------------------------------------------------------------
+// env.icloud: icloud_status (icloud.rs Status): whether this Mac has iCloud Drive, when the save last synced, who wrote the copy there.
+
+const shortTime = (iso) => {
+  const d = new Date(iso ?? '');
+  return Number.isNaN(+d) ? '' : d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+};
+
+export function icloudText(st) {
+  if (!st) return 'Checking';
+  if (!st.last_sync) return 'Not synced yet. It starts the next time you play.';
+  const other = st.cloud_machine && st.cloud_machine !== st.this_machine ? `, copy from ${st.cloud_machine}` : '';
+  return `Last synced ${shortTime(st.last_sync)}${other}`;
+}
+
 export const SECTIONS = [
   {
     id: 'display',
@@ -306,13 +330,14 @@ export const SECTIONS = [
           {
             // spatial is the runtime's other word for fsr1. ponytail: fsr3 / nis / dlss / dlaa / xess are switched off in the runtime until
             // they are reworked (#232) and run as off; add their options back here (and the dlss guard) when they return.
-            id: 'upscale_mode', label: 'Upscaler', type: 'select', at: controls('upscale', 'mode'), def: 'off',
-            aliases: { spatial: 'fsr1', xess: 'off', fsr3: 'off', nis: 'off', dlss: 'off', dlaa: 'off' }, lock: (env) => env.dlssBusy,
-            options: [{ value: 'off', label: 'Off' }, { value: 'fsr1', label: 'FSR 1' }, { value: 'nearest', label: 'Nearest (sharp pixels)' }],
+            id: 'upscale_mode', label: 'Upscaler', type: 'select', at: controls('upscale', 'mode'), def: IS_MAC ? 'metalfx' : 'off',
+            aliases: { spatial: 'fsr1', xess: 'off', fsr3: 'off', nis: 'off', dlss: 'off', dlaa: 'off', metalfxaa: IS_MAC ? 'metalfx_aa' : 'off',
+              ...(IS_MAC ? {} : { metalfx: 'off', metalfx_aa: 'off' }) }, lock: (env) => env.dlssBusy,
+            options: UPSCALERS,
           },
           {
             id: 'upscale_quality', label: 'Upscaling quality', type: 'select', at: controls('upscale', 'quality'), def: 'quality',
-            when: (v) => ['fsr3', 'dlss'].includes(v.upscale_mode),
+            when: (v) => ['fsr3', 'dlss', 'metalfx'].includes(v.upscale_mode),
             options: [
               { value: 'native', label: 'Native' }, { value: 'quality', label: 'Quality' }, { value: 'balanced', label: 'Balanced' },
               { value: 'performance', label: 'Performance' }, { value: 'ultra_performance', label: 'Ultra performance' },
@@ -429,7 +454,31 @@ export const SECTIONS = [
               { act: 'backup-open', label: 'Open folder', icon: 'folder-open' },
             ],
           },
+          {
+            // savebackup.rs backup_root: new backups go here; ones made before stay where they are
+            id: 'backup_dir', label: 'Backup folder', type: 'path', at: pkp('backup', 'dir'), pick: 'Choose the backup folder', open: 'backups',
+            placeholder: (env) => `${env.gameDir}/save-backups`,
+          },
           { id: 'backup_detail', type: 'note', when: (v, env) => !!env.backupDetail, note: (env) => ({ text: env.backupDetail }) },
+        ],
+      },
+      {
+        title: 'iCloud Drive',
+        rows: [
+          {
+            id: 'icloud_note', type: 'note', when: (v, env) => !!env.icloud?.available,
+            note: () => ({ text: 'Copies your save to iCloud Drive when the game closes, and brings in a newer one from your other Mac before it starts. The game always plays from this Mac, and your save here is backed up before anything replaces it.' }),
+          },
+          { id: 'icloud_sync', label: 'Keep my saves in iCloud Drive', type: 'toggle', at: config('icloud_sync'), def: false, when: (v, env) => !!env.icloud?.available, lock: (env) => env.gameBusy },
+          {
+            id: 'icloud_state', label: 'iCloud Drive', type: 'info', when: (v, env) => !!env.icloud?.available && v.icloud_sync,
+            value: (env) => icloudText(env.icloud),
+            actions: [{ act: 'icloud-open', label: 'Open folder', icon: 'folder-open' }],
+          },
+          {
+            id: 'icloud_conflicts', type: 'note', when: (v, env) => !!env.icloud?.available && v.icloud_sync && env.icloud.conflicts > 0,
+            note: (env) => ({ text: `${env.icloud.conflicts} older ${env.icloud.conflicts === 1 ? 'copy is' : 'copies are'} kept in the conflicts folder there, from times your save changed on two Macs between syncs. The game does not use them: delete them when you no longer need them.` }),
+          },
         ],
       },
       {
@@ -523,6 +572,11 @@ export const SECTIONS = [
             placeholder: () => '',
           },
           {
+            // the game's photos (runtime album.cpp, [album] dir; relative paths are inside the install folder)
+            id: 'album_dir', label: 'Photos', type: 'path', at: pkp('album', 'dir'), pick: 'Choose the folder for the game’s photos', open: 'photos',
+            placeholder: (env) => `${env.gameDir}/album`,
+          },
+          {
             id: 'romfs_mod_note', type: 'note',
             note: () => ({ text: "Choose the folder that holds the same files and folders as the game's romfs (for example LD_C0_R.BIN at its top level), not the folder around it. Its files replace the game's files with the same path." }),
           },
@@ -570,7 +624,7 @@ export const SECTIONS = [
             id: 'testing_help', label: 'Testing help', type: 'info', when: (v) => v.channel === 'testing',
             value: 'What to test is listed with each Testing build in What\'s New.',
             actions: () => [
-              { act: 'open-url', arg: `${REPO_URL}/issues/new`, label: 'Report a problem', icon: 'external-link' },
+              { act: 'report', label: 'Report a problem', icon: 'file-archive' },
               { act: 'open-log', label: 'Show pkp.log', icon: 'file-text' },
             ],
           },
@@ -590,7 +644,10 @@ export const SECTIONS = [
           { id: 'repo', label: 'Source code', type: 'info', actions: [open(REPO_URL, 'GitHub')] },
           { id: 'based_on', label: 'Credits', type: 'info', value: 'Based on Recompia by Dittobyte — github.com/Dittobyte/Recompia', actions: [open(UPSTREAM_URL, 'GitHub')] },
           { id: 'koi-credit', label: "Koi's Camp", type: 'info', value: 'Artwork by Koi, hand drawn' },
-          { id: 'bug', label: 'Report a bug', type: 'info', actions: [open(`${REPO_URL}/issues/new`)] },
+          {
+            id: 'bug', label: 'Report a problem', type: 'info', value: 'Puts the logs in a zip on your Desktop and opens a GitHub issue',
+            actions: [{ act: 'report', label: 'Report a problem', icon: 'file-archive' }],
+          },
         ],
       },
       {

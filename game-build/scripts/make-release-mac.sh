@@ -35,6 +35,7 @@
 #                                               through the working directory (services/pl.cpp)
 #         assets/prompts/                       button prompt icons (prompt_icons.pak, Kenney CC0)
 #         assets/kbm_icons/                     keyboard and mouse prompt icons (runtime/assets/kbm_icons, Kenney CC0; pkp_kbm.cpp)
+#         pipeline_seed.nxpk                    the pipelines of the opening (hashes and state), compiled ahead by pkp --prepare-pipelines
 #       Resources/licenses/, LICENSE.txt        every licence (game-build/release_b/macos/BUNDLED_TOOLS.txt lists them)
 #     README.txt, LICENSE.txt, licenses/
 #   PokoMac-<v>-macos-arm64.zip (+ .sha256, the line for SHA256SUMS.txt)
@@ -155,6 +156,9 @@ put "$root/runtime/assets/fonts/LICENSE-DejaVu.txt" "$R/runtime/fonts/LICENSE-De
 mirror "$root/runtime/assets/fonts" "$R/runtime/assets/fonts"
 mirror "$root/runtime/assets/prompts" "$R/runtime/assets/prompts"
 mirror "$kbm" "$R/runtime/assets/kbm_icons"
+# the pipeline seed: the prewarm keys (shader hashes and pipeline state, no shader code) of the title, a new game, the character creator
+# and the first area, recorded on this port; the setup compiles them for Metal ahead of play (pkp --prepare-pipelines)
+put "$root/game-build/release_b/macos/pipeline_seed.nxpk" "$R/runtime/pipeline_seed.nxpk"
 
 # licences: inside the app (an update brings its own) and beside it. game-build/release_b/macos/licenses holds the texts of the Windows
 # package's licenses/ that apply here (taken from its base package, as make-release.ps1 ships them; the Windows-only FidelityFX,

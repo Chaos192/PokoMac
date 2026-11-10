@@ -178,6 +178,8 @@ const lanReport = {
 };
 // Link Play states for review: &ini=net.mode=join:192.0.2.7 (repeatable) sets a pkp.ini key, &lan=public|none the network, &gamecode=<code> room-code.txt
 for (const kv of params.getAll('ini')) settings.pkp[kv.slice(0, kv.indexOf('='))] = kv.slice(kv.indexOf('=') + 1);
+// &ctl=upscale.mode=metalfx (repeatable) sets a controls.ini key the same way
+if (settings.controls) for (const kv of params.getAll('ctl')) settings.controls[kv.slice(0, kv.indexOf('='))] = kv.slice(kv.indexOf('=') + 1);
 if (params.get('lan') === 'public') Object.assign(lanReport, { warning: 'Windows treats this network as Public, so other PCs may not reach you. Set it to Private in Settings > Network.', firewall_hint: 'If Windows Firewall asks about this program, allow it on Private networks. If it was answered wrongly once, remove the Block rules for the program in Windows Defender Firewall > Allow an app.' });
 if (params.get('lan') === 'none') Object.assign(lanReport, { lan: [], overlay: [], firewall_hint: 'If Windows Firewall asks about this program, allow it on Private networks.' });
 
@@ -304,6 +306,17 @@ async function runTicks(event, make, count = 40) {
   }
 }
 
+// iCloud Drive save sync (icloud.rs) and automatic port forwarding (portmap.rs): ?ports=refused shows a router that said no
+let mockIcloud = false;
+let mockPortsOn = true;
+const mockMaps = () => {
+  if (!mockPortsOn || !(relay || game?.state === 'running')) return [];
+  const port = relay ? 47610 : 47600;
+  return params.get('ports') === 'refused'
+    ? [{ purpose: relay ? 'relay' : 'game', port, state: 'failed', method: '', external: '', local: '192.168.1.20', unreachable: false, message: `Your router did not answer a request to open port ${port}: UPnP is probably off on it. Turn on UPnP in the router's settings, or forward port ${port} (TCP and UDP) to this PC (192.168.1.20) by hand, or use a relay.` }]
+    : [{ purpose: relay ? 'relay' : 'game', port, state: 'open', method: 'UPnP', external: `198.51.100.23:${port}`, local: '192.168.1.20', unreachable: false, message: `Router port opened automatically (UPnP). Visitors reach this PC at 198.51.100.23:${port}.` }];
+};
+
 function handle(cmd, args) {
   if (cmd.startsWith('plugin:window|') || cmd.startsWith('plugin:')) return null;
   if (sc.down && cmd !== 'get_releases') throw 'The launcher backend did not answer.';
@@ -322,8 +335,8 @@ function handle(cmd, args) {
     case 'open_setup_log': case 'open_game_file': case 'open_game_dir': case 'open_save_dir': case 'open_release_url':
       console.info('[mock] open', cmd, args);
       return null;
-    case 'get_config': return { dump_dir: dumpDir, game_dir: '', minimize_on_play: false, gentle_build: false, loose_shaders: looseShaders, channel: mockChannel };
-    case 'save_config': looseShaders = !!args.config.loose_shaders; mockChannel = args.config.channel || 'stable'; return null;
+    case 'get_config': return { dump_dir: dumpDir, game_dir: '', minimize_on_play: false, gentle_build: false, loose_shaders: looseShaders, channel: mockChannel, icloud_sync: mockIcloud, icloud_last_sync: '', icloud_synced: {}, port_forward_off: !mockPortsOn };
+    case 'save_config': looseShaders = !!args.config.loose_shaders; mockChannel = args.config.channel || 'stable'; mockIcloud = !!args.config.icloud_sync; mockPortsOn = !args.config.port_forward_off; return null;
     case 'get_overview': return { game_dir: GAME_DIR, default_game_dir: GAME_DIR, exe_exists: sc.exe_exists, builds_exe: true };
     case 'pick_folder': return 'D:/Dumps/Pokopia';
     case 'pick_nup': return 'D:/Downloads/pokopia-2.0.1a.nup';
@@ -400,6 +413,11 @@ function handle(cmd, args) {
       return c.match(/.{4}/g).join('-');
     }
     case 'room_code_host': return params.get('gamecode');
+    case 'port_forward_status': return { enabled: mockPortsOn, maps: mockMaps() };
+    case 'port_forward_set': mockPortsOn = !!args.enabled; return { enabled: mockPortsOn, maps: mockMaps() };
+    case 'icloud_status': return { available: true, on: mockIcloud, last_sync: mockIcloud ? '2026-11-08T19:42:00Z' : '', cloud_machine: 'Studio', cloud_time: '2026-11-08T19:42:00Z', this_machine: 'MacBook Pro', conflicts: 0 };
+    case 'open_icloud_dir': console.info('[mock] open iCloud Drive folder'); return null;
+    case 'report_problem': return sleep(600).then(() => ({ path: 'C:/Users/player/Desktop/PokoMac-report-20261109-120000.zip', name: 'PokoMac-report-20261109-120000.zip', place: 'on your Desktop', files: ['system.txt', 'pkp.log', 'pkp.ini'], issue: true }));
     default:
       console.warn('[mock] unknown command', cmd, args);
       throw `The mock has no command ${cmd}`;

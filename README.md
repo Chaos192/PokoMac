@@ -26,8 +26,8 @@
     <td width="50%"><img src="docs/screenshots/title.png" alt="Title screen on a Mac"><br><sub>Title screen</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/screenshots/island.png" alt="Playing on the island"><br><sub>On the island</sub></td>
-    <td width="50%"><img src="docs/screenshots/building.png" alt="Building"><br><sub>Building</sub></td>
+    <td width="50%"><img src="docs/screenshots/playing.png" alt="Playing with MetalFX upscaling"><br><sub>Playing, with MetalFX</sub></td>
+    <td width="50%"><img src="docs/screenshots/settings.png" alt="The upscaler setting in the launcher"><br><sub>MetalFX in Settings</sub></td>
   </tr>
 </table>
 
@@ -76,9 +76,18 @@ A single `.nup` file works too.
 - **Any resolution**, Retina included, with **HDR** on XDR and HDR displays (EDR).
 - **Controllers:** PlayStation (DualSense, DualShock 4), Xbox, Switch Pro and more, with rumble and motion; on-screen button icons match
   the pad you hold. **Keyboard and mouse** too, with the mouse working in menus. Change any button on the F1 **Controls** page.
-- **Link Play:** visit friends' islands on the same network or over the internet, with Mac, Windows, Linux and pokopia-native players.
-- **Add-on content** from your own dump, **save import** from Ryujinx or Eden, automatic save backups.
-- **Settings in the game** (F1): graphics, controls and sound, most changes at once. Upscaling with FSR 1 or NVIDIA Image Scaling.
+- **MetalFX upscaling**, on by default: Apple's temporal upscaler renders the 3D scene smaller and rebuilds it sharper, with smooth edges
+  and a higher frame rate. Off, MetalFX anti-aliasing only, FSR 1 and Nearest are in Settings, Graphics.
+- **No pop-in:** Set up translates the shaders and prepares the game's pipelines before you play, and new shaders are translated while you
+  play.
+- **Link Play:** visit friends' islands on the same network or over the internet, with Mac, Windows, Linux and pokopia-native players. The
+  launcher opens the router port for you (UPnP or NAT-PMP).
+- **Add-on content** from your own dump, **save import** from Ryujinx or Eden, automatic save backups, and **iCloud Drive** save sync
+  between your Macs (Settings, Saves).
+- **Settings in the game** (F1): graphics, controls and sound, most changes at once.
+- **Your folders:** the install folder, mods and the game's photos (Settings, Game), and saves and backups (Settings, Saves) can each go
+  where you choose.
+- **Report a problem** in one click: the logs go into a zip on your Desktop and a GitHub issue opens.
 - **Updates** from this repository's releases, from the launcher.
 
 ## Where your saves, logs and settings are
@@ -102,12 +111,13 @@ Never attach game files, the `build` or `shader_cache` folders, or saves to an i
   again with the update installed; the base game alone is not enough.
 - **The controller does nothing.** Connect it before you press Play, then check the F1 **Controls** page (the Gamepad line). Bluetooth
   pads must be paired in System Settings first.
-- **Some things are missing or the first minutes stutter.** The game builds some shaders while it runs: the launcher translates them
-  before every start and after you quit, so the first runs are rough and later ones are smooth.
+- **Something appears a moment late the first time.** Set up prepares what the opening needs, and the rest is translated while you
+  play. A shader the game has never shown before can still take a moment the first time; after that it is ready.
 - **Link Play: nobody finds you.** Allow PokoMac on the local network when macOS asks (System Settings, Privacy & Security, Local
   Network), and check the macOS firewall.
 
-If it is none of these, [open an issue](https://github.com/Chaos192/PokoMac/issues) with `pkp.log`, your Mac model and your macOS version.
+If it is none of these, use **Settings, About, Report a problem** (or [open an issue](https://github.com/Chaos192/PokoMac/issues) with
+`pkp.log`, your Mac model and your macOS version).
 
 ## Building from source
 

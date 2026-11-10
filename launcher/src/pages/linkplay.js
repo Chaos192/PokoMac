@@ -34,6 +34,7 @@ export async function render(el, ctx) {
   let asking = false;
   let gameCode = null;     // room-code.txt: the game's own
   let dropped = null;      // the game's code the player replaced with New code
+  let ports = null;        // port_forward_status (portmap.rs): automatic port forwarding on or off, and how the router answered
   let problems = {};       // field id -> what is wrong with it
 
   // commits run one at a time, in the order the player made them: a blur, then the click that caused it
@@ -61,6 +62,11 @@ export async function render(el, ctx) {
     asking = true;
     publicIp = await api('public_ip').catch(() => null) ?? null;
     asking = false;
+    patch(part('lp-share'), shareHtml());
+  }
+
+  async function loadPorts() {
+    ports = await api('port_forward_status').catch(() => null);
     patch(part('lp-share'), shareHtml());
   }
 
@@ -109,6 +115,21 @@ export async function render(el, ctx) {
     return note + group('This PC', rows.length ? rows : [row('No address found', '')]);
   }
 
+  const banner = (kind, ic, text) => `<div class="banner ${kind}">${icon(ic)}<div class="grow">${esc(text)}</div></div>`;
+
+  // the router port for this PC's game or relay: opened by the launcher (portmap.rs) unless the player switched that off
+  function routerHtml(share, map) {
+    if (!ports?.enabled) return banner('info', 'info', `Your router must forward port ${share.port} (TCP and UDP) to this PC.`);
+    if (!map) {
+      return banner('info', 'info', share.through
+        ? `While the relay runs, the launcher asks your router to open port ${share.port} (TCP and UDP) for you.`
+        : `When the game starts, the launcher asks your router to open port ${share.port} (TCP and UDP) for you.`);
+    }
+    if (map.state === 'trying') return banner('info', 'loader-circle', map.message);
+    if (map.state === 'open' && !map.unreachable) return banner('ok', 'circle-check', map.message);
+    return banner('warn', 'triangle-alert', map.message);
+  }
+
   // what visitors type: the public address over the internet (#245), this PC's LAN addresses on the same network
   function shareHtml() {
     if (!isHost()) return '';
@@ -116,8 +137,11 @@ export async function render(el, ctx) {
     if (!share) {
       return `<div class="banner warn">${icon('triangle-alert')}<div class="grow">The relay on this PC is off, so visitors cannot join. Turn on Run a relay on this PC.</div></div>`;
     }
-    const internet = share.addr
-      ? addressRow({ addr: share.addr, label: 'Over the internet' })
+    // the router's own answer is the address visitors reach, when it gave one that is not private
+    const map = share.own ? ports?.maps.find((m) => m.port === share.port) : null;
+    const mapped = map?.state === 'open' && !map.unreachable ? map.external : '';
+    const internet = mapped || share.addr
+      ? addressRow({ addr: mapped || share.addr, label: 'Over the internet' })
       : row('Over the internet', `<span class="faint">${publicIp === null ? 'Could not find this PC\'s public address. Search "what is my IP" in a browser.' : 'Looking it up\u2026'}</span>`);
     // a VPN (Tailscale and the like) keeps its own name: it is not the same network
     const local = share.own && relay && lan
@@ -125,10 +149,11 @@ export async function render(el, ctx) {
         ...addressRows({ lan: [], overlay: lan.overlay }, share.port).map(addressRow)]
       : [];
     const links = relay ? [row('Links', `<span class="num" id="lp-links">${esc(relay.clients)}</span>`)] : [];
+    const auto = share.own ? [row('Open the router port automatically', toggle('lp-portmap', ports ? ports.enabled : true, { disabled: !ports }))] : [];
     const how = `Visitors pick Visit and type this address and the room code, with Through a relay ${share.through ? 'on' : 'off'}.`;
-    const router = share.own ? ` Your router must forward port ${share.port} (TCP and UDP) to this PC.` : '';
-    return group('Share with visitors', [internet, ...local, ...links])
-      + `<div class="banner info">${icon('info')}<div class="grow">${how}${router} Never give out 127.0.0.1: on a visitor's PC it means their own PC.</div></div>`;
+    return group('Share with visitors', [internet, ...local, ...links, ...auto])
+      + (share.own ? routerHtml(share, map) : '')
+      + `<div class="banner info">${icon('info')}<div class="grow">${how} Never give out 127.0.0.1: on a visitor's PC it means their own PC.</div></div>`;
   }
 
   function bodyHtml() {
@@ -271,6 +296,7 @@ export async function render(el, ctx) {
     if (isHost()) {
       loadGameCode();
       loadPublicIp();
+      loadPorts();
       if (relay && !lan) loadLan();
     }
   }
@@ -304,12 +330,14 @@ export async function render(el, ctx) {
       if (on) {
         relay = await api('relay_start', { port: RELAY_PORT });
         await loadLan();
+        loadPorts();
         if (!ui.relay.trim()) ui.relay = `127.0.0.1:${relayPort(relay)}`;
         await commit();   // also when the field was filled: the file may still say join:<ip>, and the game could not host (#239)
       } else {
         const own = `127.0.0.1:${relayPort(relay)}`;   // left pointing at the relay just stopped, the game could not host
         await api('relay_stop');
         relay = null;
+        loadPorts();
         if (ui.relay.trim() === own) {
           ui.relay = '';
           await commit();
@@ -330,6 +358,16 @@ export async function render(el, ctx) {
     if (hostsOverInternet(readIni(pkp))) await save(codeEdits(code));
     drawChrome();
     drawCode();
+  });
+
+  const setPorts = (on, input) => inOrder(async () => {
+    try {
+      ports = await api('port_forward_set', { enabled: on });
+    } catch (e) {
+      input.checked = !on;
+      throw e;
+    }
+    patch(part('lp-share'), shareHtml());
   });
 
   const setShared = (edits, input) => inOrder(async () => {
@@ -383,6 +421,7 @@ export async function render(el, ctx) {
     if (t.name === 'view') changeView(t.value);
     else if (t.name === 'role') changeRole(t.value);
     else if (t.id === 'lp-run-relay') setRelay(t.checked);
+    else if (t.id === 'lp-portmap') setPorts(t.checked, t);
     else if (t.id === 'lp-interact') setShared(interactEdits(t.checked), t);
     else if (t.id === 'lp-story') setShared(storyEdits(t.checked), t);
     else if (t.id === 'lp-through') {
@@ -418,6 +457,7 @@ export async function render(el, ctx) {
       if (links) links.textContent = relay.clients;
     }
     loadGameCode();
+    loadPorts();
   }, POLL_MS);
 
   checkFormat();

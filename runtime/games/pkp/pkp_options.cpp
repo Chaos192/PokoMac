@@ -144,7 +144,17 @@ static_assert(std::size(kPromptNames) == play::kPromptStyleCount, "one name per 
 constexpr const char* kAheadNames[] = {"No Limit", "0", "1", "2", "3"};
 constexpr const char* kAstcKeys[] = {"fast", "high", "uncompressed"};
 constexpr const char* kWindowKeys[] = {"windowed", "borderless", "exclusive"};
+// MetalFX exists in the macOS runtime only (nxrt/extras.h upscale_mode_enabled), where it is the default.
+#if defined(__APPLE__)
+constexpr extras::UpscaleMode kUpscalers[] = {extras::UpscaleMode::Off, extras::UpscaleMode::MetalFx, extras::UpscaleMode::MetalFxAa,
+                                              extras::UpscaleMode::Fsr1, extras::UpscaleMode::Nearest};
+constexpr const char* kUpscalerNames[] = {"Off", "MetalFX", "MetalFX (Anti-Aliasing Only)", "FSR 1", "Nearest"};
+#else
 constexpr extras::UpscaleMode kUpscalers[] = {extras::UpscaleMode::Off, extras::UpscaleMode::Fsr1, extras::UpscaleMode::Nearest};
+constexpr const char* kUpscalerNames[] = {"Off", "FSR 1", "Nearest"};
+#endif
+static_assert(std::size(kUpscalers) == std::size(kUpscalerNames), "one name per upscaler");
+constexpr uint8_t kUpscalerCount = static_cast<uint8_t>(std::size(kUpscalers));
 
 std::vector<std::string> g_devices;   // audio output names, refreshed when the screen opens
 
@@ -201,9 +211,9 @@ const Row kDisplay[] = {
 };
 
 const Row kPerformance[] = {
-    choice("Upscaler", "How the picture is enlarged from a lower resolution.", {"Off", "FSR 1", "Nearest"}, 3,
-           [](const S& s) { for (int i = 0; i < 3; ++i) if (s.extras.upscale.mode == kUpscalers[i]) return i; return 0; },
-           [](S& s, int v) { s.extras.upscale.mode = kUpscalers[v]; }),
+    names("Upscaler", "How the picture is enlarged from a lower resolution.", kUpscalerNames, kUpscalerCount,
+          [](const S& s) { for (int i = 0; i < kUpscalerCount; ++i) if (s.extras.upscale.mode == kUpscalers[i]) return i; return 0; },
+          [](S& s, int v) { s.extras.upscale.mode = kUpscalers[v]; }),
     number("Sharpness", "How much FSR 1 sharpens the picture.", 0, 20, "%.2f", 0, 0.05, ROW_STEP(extras.upscale.sharpness, 0.0, 0.05)),
     number("Scene Resolution", "Renders the 3D scene smaller and keeps the menus sharp. 100% turns it off.", 25, 100, "%.0f%%", 0, 1, ROW_INT(extras.upscale.scene_scale)),
     choice("Low Latency", "Reduces input delay on GPUs that support it.", {"Off", "Auto", "On", "Boost"}, 4, ROW_ENUM(extras.latency.mode, extras::LatencyMode), true),

@@ -8,7 +8,8 @@ the Windows build of the project it is based on, with graphics on Vulkan over Me
 
 - **Graphics** run on Vulkan over Metal. The default driver is **KosmicKrisp** (LunarG's conformant Vulkan 1.4 driver for Apple silicon);
   **MoltenVK** is included as well: set `[gfx] vulkan_driver = moltenvk` in `pkp.ini` to use it.
-- **DLSS and FSR 3** are Windows/PC-GPU components and are not available. FSR 1 and NVIDIA Image Scaling work.
+- **Upscaling:** **MetalFX**, Apple's temporal upscaler, is the default (below). DLSS and FSR 3 are PC components and are not
+  available; FSR 1 and Nearest work as on Windows.
 - **HDR**: on an XDR or HDR display the game outputs HDR10 through macOS's EDR; the peak brightness comes from the display.
 - **Controllers** work through SDL (DualSense, DualShock 4, Xbox, Switch Pro and more), keyboard and mouse as on Windows.
 - **Link Play** works with Windows, Linux and pokopia-native players. macOS asks once whether the app may use the local network: allow it.
@@ -58,3 +59,46 @@ The original Windows runtime is kept as it is; the macOS build adds:
   `libpkp_rt.dylib`, then signed ad hoc.
 - **Memory ordering.** The lifter already emits C11 atomics for the guest's barriers and acquire/release instructions, so the generated code
   is correct on an ARM host, which is weakly ordered like the guest.
+
+## Graphics on Metal
+
+Both drivers turn every Vulkan pipeline into MSL source and hand it to Apple's shader compiler, which takes about a second for a pipeline
+it has not seen and, for a few of Pokopia's, much longer. The game skips a draw whose pipeline is still being built, so the port makes sure
+the pipelines are built before they are needed:
+
+- **Set up compiles the opening ahead.** The release carries `pipeline_seed.nxpk`: the pipeline keys (shader hashes and render state, no
+  shader code) of the title, a new game, the character creator and the first area, recorded on this port. Set up runs
+  `pkp --prepare-pipelines`, which adds them to the player's own key file and builds each once on a headless device (about 50 s with
+  KosmicKrisp and 20 s with MoltenVK on an M5 Max). macOS keeps the compiled code in its own Metal cache, so at Play the game's prewarm
+  finds them in well under a second. A state file per driver (`pipelines-<driver>.state`) records what was built; every Play runs the
+  same command with `--if-needed`, which only builds what is new (an update with a larger seed, a driver update, or keys that waited for a
+  shader the game makes while it runs).
+- **Shaders the game makes while it runs** are translated during play, every few seconds (`launcher/src-tauri/src/shaders.rs`
+  `translate_live`), and the running game picks them up; the Windows build only does this between sessions.
+- **More builds at once.** Metal's compiler service runs as many compilations at once as the GPU allows (`shouldMaximizeConcurrentCompilation`,
+  `runtime/platform/mac/gfx/metal_mac.mm`; MoltenVK's own setting too), the pipeline prewarm uses up to 8 threads and the in-play builds
+  (`[nvn] async_whole_threads`) 8, so one slow pipeline never holds up the others. MoltenVK compiles under the lock of the
+  `VkPipelineCache` a pipeline is made with, so with MoltenVK pipelines are made without one (`[nvn] pipeline_cache_moltenvk`).
+- A build of 3 s or more is logged (`slow graphics pipeline` / `slow compute pipeline`).
+
+Apple's GPUs render in tiles: ending a render pass stores the tiles to memory and the next pass on the same targets loads them again.
+
+- **Barriers** the game records between draws on the same targets no longer end the pass when no draw of it wrote memory other than its
+  attachments (`[nvn] lazy_barriers`); the end of the pass carries the barrier. Pokopia records about 150 per frame. A draw that writes
+  neither depth nor stencil stays in a pass whose depth is read-only (`[nvn] sticky_depth_ro`). The log line `pass ends, last 20 s` says
+  why passes ended.
+- **Unified memory**: the device-local copies of memory pools the Windows build makes (`[nvn] pool_mirror`) are off, and the F1 option for
+  them is hidden.
+- **The render thread** runs as a real-time thread on the performance cores (`[gfx] render_thread_policy = realtime`, `interactive` for
+  QoS only, `default` to leave it alone).
+
+**MetalFX.** `[upscale] mode = metalfx` (the default on macOS) renders the 3D scene at the `[upscale] quality` preset's size (67% for
+`quality`, never below 34%: MetalFX enlarges at most 3x per side) and has Apple's temporal scaler rebuild it at full size before the game's
+tone map; `metalfx_aa` runs it at full size for anti-aliasing only. The runtime jitters the game's camera and takes its depth and motion
+from the G-buffer, as for the PC's temporal upscalers (`runtime/src/gfx/extras/temporal.cpp`). MetalFX runs on its own Metal queue
+(`runtime/platform/mac/gfx/temporal_metalfx.mm`), so the frame's Vulkan recording is split around it (`nvn_gpu.cpp`
+`split_recording`): the first part signals a timeline semaphore, MetalFX waits for it and signals the next value, and the rest of the
+frame waits for that. With MoltenVK the semaphore's `MTLSharedEvent` does both on the GPU; KosmicKrisp has no event export, so a helper
+thread waits for the first part and releases MetalFX's already committed command buffer, whose completion lets the rest go. The images
+MetalFX reads and writes are the Vulkan images themselves (MoltenVK's exported textures; on KosmicKrisp a texture over the image's
+exported heap). If MetalFX cannot start (an old GPU, a driver without Metal interop), the log says why once and FSR 1 takes over.

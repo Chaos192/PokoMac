@@ -301,6 +301,49 @@ int prepare_shaders_main(bool if_needed, int threads, const std::string& program
     return rc;
 }
 
+// --prepare-pipelines: no game, no window. The seed key file that ships with the release is merged into the player's key file and each of
+// its pipelines is built once on a headless device (nxrt/nvn_backend.h prepare_pipelines), so the driver and macOS have them compiled
+// before the first start. The same "prepare: <done> <total>" progress lines as --prepare-shaders; the end is "prepare: done ..." or
+// "prepare: ready" (nothing left to build). Exit code: 0 done or ready, 1 could not run, 3 cancelled.
+int prepare_pipelines_main(bool if_needed, int threads) {
+    std::string err;
+    nxrt::gfx::DeviceDesc dd;
+    dd.headless = 1;
+    auto dev = nxrt::gfx::Device::create(dd, &err);
+    if (!dev) { std::printf("prepare: error graphics device: %s\n", err.c_str()); return 1; }
+    nxrt::nvn::BackendDesc bd;
+    bd.device = dev.get();
+    bd.register_entry_points = false;
+    if (!nxrt::nvn::install_backend(bd)) { std::printf("prepare: error the graphics back end did not start\n"); return 1; }
+    nxrt::nvn::PipelinePrepareOptions po;
+    po.only_if_needed = if_needed;
+    po.threads = threads;
+    auto last = std::chrono::steady_clock::now();
+    po.progress = [&](uint64_t done, uint64_t total) {
+        const auto now = std::chrono::steady_clock::now();
+        if (done < total && now - last < std::chrono::milliseconds(250)) return true;
+        last = now;
+        std::printf("prepare: %llu %llu\n", static_cast<unsigned long long>(done), static_cast<unsigned long long>(total));
+        std::fflush(stdout);
+        return true;
+    };
+    nxrt::nvn::PipelinePrepareResult pr;
+    const bool ok = nxrt::nvn::prepare_pipelines(po, &pr);
+    int rc = 0;
+    if (!ok) { std::printf("prepare: error %s\n", pr.error.c_str()); rc = 1; }
+    else if (pr.already_ready) std::printf("prepare: ready\n");
+    else std::printf("prepare: done pipelines=%llu built=%llu missing=%llu failed=%llu slow=%llu added=%llu seconds=%.1f%s\n",
+                     static_cast<unsigned long long>(pr.pipelines), static_cast<unsigned long long>(pr.built), static_cast<unsigned long long>(pr.missing_shaders),
+                     static_cast<unsigned long long>(pr.failed), static_cast<unsigned long long>(pr.slow), static_cast<unsigned long long>(pr.added), pr.seconds,
+                     pr.cancelled ? " cancelled" : "");
+    std::fflush(stdout);
+    if (ok && pr.cancelled) rc = 3;
+    nxrt::nvn::shutdown_backend();
+    dev.reset();
+    nxrt::shutdown();
+    return rc;
+}
+
 }  // namespace
 
 #ifdef PKP_RT_DLL
@@ -331,6 +374,7 @@ int main(int argc, char** argv) {
     const char* ini = nullptr;
     const char* logp = nullptr;
     bool prepare = false, prepare_if_needed = false;      // --prepare-shaders [--if-needed] [--threads N]: compile the game's shaders ahead and exit (no game start)
+    bool prepare_pipes = false;                           // --prepare-pipelines [--if-needed] [--threads N]: build the seed's pipelines ahead and exit
     int prepare_threads = 0;
     std::string prepare_programs;                         // --programs FILE: another program list (tests)
     std::vector<std::pair<std::string, std::string>> boot_opts;   // [boot] keys from the command line: nxrt::init() reloads the configuration, so they are applied after it
@@ -344,6 +388,7 @@ int main(int argc, char** argv) {
         else if (arg("--link")) boot_opts.emplace_back("link", argv[++i]);
         else if (!std::strcmp(argv[i], "--version")) { std::printf("pkp %s\n", PKP_VERSION); return 0; }
         else if (!std::strcmp(argv[i], "--prepare-shaders")) { prepare = true; _putenv("NXRT_DIAG_WATCHDOG_SECONDS=0"); }
+        else if (!std::strcmp(argv[i], "--prepare-pipelines")) { prepare_pipes = true; _putenv("NXRT_DIAG_WATCHDOG_SECONDS=0"); }
         else if (!std::strcmp(argv[i], "--if-needed")) prepare_if_needed = true;
         else if (arg("--threads")) prepare_threads = std::atoi(argv[++i]);
         else if (arg("--programs")) prepare_programs = argv[++i];
@@ -397,6 +442,7 @@ int main(int argc, char** argv) {
     NXLOG_I("boot", "Pokémon Pokopia %s: exefs '%s'", nxrt::game::info().version, exefs.c_str());
 
     if (prepare) return prepare_shaders_main(prepare_if_needed, prepare_threads, prepare_programs);
+    if (prepare_pipes) return prepare_pipelines_main(prepare_if_needed, prepare_threads);
 
     check_romfs();
 

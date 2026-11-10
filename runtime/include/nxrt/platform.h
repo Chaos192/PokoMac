@@ -87,6 +87,11 @@ const char* const* vulkan_instance_extensions(uint32_t* count);
 #if defined(__APPLE__)
 // macOS: loads the Vulkan loader next to the executable (or the SDK's) and picks the driver manifest (platform/mac/gfx/vulkan_mac.cpp).
 bool mac_load_vulkan();
+// macOS: lets Metal's compiler service run as many shader compilations at once as the GPU allows (platform/mac/gfx/metal_mac.mm).
+void mac_metal_tune();
+// macOS: the calling thread gets user-interactive QoS (the performance cores) and a real-time time-constraint policy with this period
+// and per-period budget ([gfx] render_thread_policy; platform/mac/core/thread_mac.cpp).
+void mac_realtime_thread(const char* what, double period_ms, double budget_ms);
 #endif
 bool create_vulkan_surface(void* vk_instance, uint64_t* surface_out);
 void destroy_vulkan_surface(void* vk_instance, uint64_t surface);

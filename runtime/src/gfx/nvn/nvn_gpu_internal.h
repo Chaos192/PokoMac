@@ -129,6 +129,9 @@ struct BufRef {
 // false and the buffer is the dummy buffer (a zeroed 64 KiB buffer) so the draw can go on; this is logged once per address.
 BufRef resolve_buffer(uint64_t gpu_address, uint64_t size);
 VkBuffer dummy_buffer();
+// True while the replay has a query open in its command buffer (occlusion or a windowed counter). A recording split (MetalFX) must not cut
+// through one: a query cannot go on in another command buffer.
+bool replay_queries_open();
 // The last 32 bytes of the dummy buffer hold the default of an unset vertex attribute: float (0,0,0,1) and integer (0,0,0,1).
 constexpr VkDeviceSize kDummyAttrFloatOffset = 65504, kDummyAttrIntOffset = 65520;
 uint64_t pool_imports();          // statistics

@@ -169,6 +169,11 @@ function drawWindowButtons() {
   const win = getCurrentWindow();
   const button = (id, name, label, cls = '') => `<button class="win-btn ${cls}" id="${id}" aria-label="${label}" title="${label}">${icon(name)}</button>`;
   const quiet = (p) => p.catch((e) => console.warn(e));
+  // macOS: the window keeps its native title bar buttons (an overlay title bar, tauri.macos.conf.json); the page only stays draggable there.
+  if (/Macintosh/.test(navigator.userAgent)) {
+    document.documentElement.dataset.os = 'mac';
+    return;
+  }
   host.innerHTML = button('win-min', 'minus', 'Minimise') + button('win-max', 'square', 'Maximise') + button('win-close', 'x', 'Close', 'close');
   document.getElementById('win-min').addEventListener('click', () => quiet(win.minimize()));
   document.getElementById('win-max').addEventListener('click', () => quiet(win.toggleMaximize()));

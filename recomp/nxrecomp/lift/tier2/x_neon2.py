@@ -177,3 +177,27 @@ class XNeon2:
         return (f"{{ uint8_t t_[64]; {cp} V128 I_ = c->v[{idx.n}]; V128 O = c->v[{d.n}]; V128 r = nx::vzero(); "
                 f"for (int k = 0; k < {n}; k++) r.u8[k] = I_.u8[k] < {16 * len(tables)} ? t_[I_.u8[k]] : O.u8[k]; "
                 f"c->v[{d.n}] = r; }}")
+
+    # ---- dot product (ARMv8.2 FEAT_DotProd: the Switch 2's Cortex-A78C has it; Star Fox and Ocarina of Time use UDOT) --------
+
+    def _dot(self, i, ops, signed):
+        """UDOT / SDOT Vd.2S|4S, Vn.8B|16B, Vm.8B|16B (or Vm.4B[index]): each 32-bit lane of Vd gains the sum of the four products of
+        the bytes in the same lane of Vn and Vm (the by-element form uses Vm's 32-bit element `index`, four bytes, for every lane).
+        Bytes widen to 32 bits; the sum and the accumulation wrap modulo 2^32. The 2S form clears the upper half of Vd."""
+        bits, n = self.vinfo(ops[0])
+        if bits != 32 or n not in (2, 4):
+            raise Unhandled("dot product into lanes other than 2S / 4S")
+        d, a, b = (self.regop(i, o) for o in ops[:3])
+        t = "s" if signed else "u"
+        idx = ops[2].vector_index
+        m = f"M_.{t}8[{idx} * 4 + q]" if idx != -1 else f"M_.{t}8[k * 4 + q]"
+        clear = " r.u64[1] = 0;" if n == 2 else ""
+        return (f"{{ V128 N_ = c->v[{a.n}], M_ = c->v[{b.n}], r = c->v[{d.n}]; for (int k = 0; k < {n}; k++) {{ uint32_t s_ = 0; "
+                f"for (int q = 0; q < 4; q++) s_ += uint32_t(int32_t(N_.{t}8[k * 4 + q]) * int32_t({m})); r.u32[k] += s_; }}{clear} "
+                f"c->v[{d.n}] = r; }}")
+
+    def i_udot(self, f, i, ops):
+        return self._dot(i, ops, False)
+
+    def i_sdot(self, f, i, ops):
+        return self._dot(i, ops, True)

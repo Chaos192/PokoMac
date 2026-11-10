@@ -17,6 +17,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 zstd = "0.13"
 sha2 = "0.10"
 ureq = { version = "2", default-features = false, features = ["tls"] }
+# Report a problem (report.rs): the zip of logs; deflate only
+zip = { version = "9", default-features = false, features = ["deflate"] }
+# Link Play port forwarding (portmap.rs): UPnP IGD, blocking API
+igd-next = { version = "0.18", default-features = false, features = ["io_sync"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

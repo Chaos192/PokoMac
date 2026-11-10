@@ -34,18 +34,31 @@ struct HdrSettings {
 
 // Nis: NVIDIA Image Scaling v1.0.3 (spatial, any GPU). Fsr3, Dlss, Dlaa: temporal (Dlaa = DLSS at the input size).
 // Nearest: no filter, the low-res picture is enlarged with nearest-neighbour sampling (#232).
-enum class UpscaleMode : uint8_t { Off = 0, Fsr1, Fsr3, Dlss, Xess, Nis, Dlaa, Nearest };
+// MetalFx, MetalFxAa: Apple's MetalFX temporal scaler (macOS only, platform/mac/gfx/temporal_metalfx.mm); MetalFxAa runs it at the input size.
+enum class UpscaleMode : uint8_t { Off = 0, Fsr1, Fsr3, Dlss, Xess, Nis, Dlaa, Nearest, MetalFx, MetalFxAa };
 // ponytail: FSR 3, DLSS, DLAA, NIS and XeSS are switched off until they are reworked (#232): a file that names one runs as Off.
-// Re-enable one by returning it here (and listing it in the F1 page and the launcher again).
+// Re-enable one by returning it here (and listing it in the F1 page and the launcher again). MetalFX exists on macOS only.
 inline UpscaleMode upscale_mode_enabled(UpscaleMode m) {
+#if defined(__APPLE__)
+    if (m == UpscaleMode::MetalFx || m == UpscaleMode::MetalFxAa) return m;
+#endif
     return m == UpscaleMode::Fsr1 || m == UpscaleMode::Nearest ? m : UpscaleMode::Off;
 }
+// The upscaler a settings file without an [upscale] mode gets: MetalFX on macOS (temporal anti-aliasing and upscaling on every Apple GPU
+// MetalFX supports), off elsewhere.
+#if defined(__APPLE__)
+constexpr UpscaleMode kUpscaleModeDefault = UpscaleMode::MetalFx;
+constexpr const char* kUpscaleModeDefaultWord = "metalfx";
+#else
+constexpr UpscaleMode kUpscaleModeDefault = UpscaleMode::Off;
+constexpr const char* kUpscaleModeDefaultWord = "off";
+#endif
 // Temporal quality preset: the input scale per side (native 1, quality 1/1.5, balanced 1/1.7, performance 1/2, ultra performance 1/3); Custom
 // keeps scene_scale. The scale only takes effect where the game renders the scene below its output (scene_scale); otherwise the temporal
 // upscalers run at the input size (native anti-aliasing).
 enum class UpscaleQuality : uint8_t { Native = 0, Quality, Balanced, Performance, UltraPerformance, Custom };
 struct UpscaleSettings {
-    UpscaleMode mode = UpscaleMode::Off;
+    UpscaleMode mode = kUpscaleModeDefault;
     UpscaleQuality quality = UpscaleQuality::Quality;
     double sharpness = 0.8;          // 0 .. 1 (FSR 1 RCAS or the NIS sharpening; 1 = sharpest)
     int scene_scale = 100;           // 25 .. 100: percent of the output size the 3D scene is rendered at (the game's own dynamic-resolution path; HUD and post stay native)
@@ -105,7 +118,12 @@ UpscaleMode upscale_mode();
 float upscale_sharpness();
 int upscale_scene_scale();          // percent, 100 = off (a temporal mode with a quality preset other than Custom: the preset's percent)
 UpscaleQuality upscale_quality();
-bool upscale_temporal();            // the mode is FSR 3, DLSS or DLAA
+bool upscale_temporal();            // the mode is FSR 3, DLSS, DLAA, MetalFX or MetalFX AA
+// A temporal upscaler that cannot run on this machine (MetalFX: no support on the GPU, no Metal interop in the Vulkan driver) hands over to
+// `to` (FSR 1): upscale_mode() answers `to` from now on, while settings() keeps the player's choice. The next set_settings() tries the
+// choice again. Any thread.
+void upscale_fallback(UpscaleMode to);
+bool upscale_fell_back();           // upscale_fallback is in force
 int quality_percent(UpscaleQuality q);   // the preset's input scale per side in percent (Custom: -1)
 // The part of the game's scene targets that its 3D scene covers, from texel 0, 0, per side (1 = all). A game whose dynamic-resolution path
 // renders the scene into the top-left of full-size targets (Pokopia, for upscale_scene_scale) sets it; its tone-map draw samples the scene

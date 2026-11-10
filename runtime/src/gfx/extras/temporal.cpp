@@ -120,6 +120,7 @@ bool parse_camera(const uint32_t* w, size_t n, Camera& cam) {
 struct Target {
     gfx::Image img;
     bool ready = false;   // left the UNDEFINED layout
+    TemporalBackend* maker = nullptr;   // the backend that made img (TemporalBackend::make_image), null: gfx::Device::create_image
 };
 
 struct State {
@@ -137,6 +138,7 @@ struct State {
     std::chrono::steady_clock::time_point last_eval{};
     UpscaleMode last_mode = UpscaleMode::Off;
     VkExtent2D max_render = {}, last_out = {};
+    bool logged_handover = false;
     // GPU objects
     gfx::Device* dev = nullptr;
     bool init_tried = false, init_ok = false;
@@ -240,18 +242,40 @@ bool init_gpu(State& s, gfx::Device& dev) {
     return true;
 }
 
-// (Re)makes a target of the given size and format. The GPU must be idle with the old image (sizes change rarely: wait_idle).
-bool ensure(State& s, Target& t, VkExtent2D e, VkFormat fmt, const char* name) {
-    if (t.img && t.img.extent.width == e.width && t.img.extent.height == e.height && t.img.format == fmt) return true;
-    if (t.img) {
-        s.dev->wait_idle();
-        s.dev->destroy_image(t.img);
+constexpr VkImageUsageFlags kTargetUsage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+
+// Frees a target's image. The GPU must be done with it: the backend's own queue first (MetalFX), then the device (sizes change rarely).
+void release(State& s, Target& t) {
+    if (!t.img) return;
+    if (t.maker) t.maker->wait_idle();
+    s.dev->wait_idle();
+    if (t.maker) t.maker->free_image(t.img);
+    else s.dev->destroy_image(t.img);
+    t.img = {};
+    t.maker = nullptr;
+    t.ready = false;
+}
+
+// (Re)makes a target of the given size and format; by the backend when it makes its own images (TemporalBackend::make_image).
+bool ensure(State& s, Target& t, VkExtent2D e, VkFormat fmt, const char* name, TemporalBackend* be) {
+    TemporalBackend* maker = be && be->makes_images() ? be : nullptr;
+    if (t.img && t.img.extent.width == e.width && t.img.extent.height == e.height && t.img.format == fmt && t.maker == maker) return true;
+    release(s, t);
+    if (maker) {
+        if (!maker->make_image(fmt, e, kTargetUsage, name, &t.img)) {
+            NXLOG_E(kTag, "%s %ux%u: image not made by %s", name, e.width, e.height, maker->name());
+            t.img = {};
+            return false;
+        }
+        t.maker = maker;
+        t.ready = false;
+        return true;
     }
     gfx::ImageDesc d;
     d.format = fmt;
     d.width = e.width;
     d.height = e.height;
-    d.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    d.usage = kTargetUsage;
     d.name = name;
     std::string why;
     if (s.dev->create_image(d, &t.img, &why) != VK_SUCCESS) {
@@ -270,7 +294,7 @@ TemporalImage as_input(const Target& t) {
     o.format = t.img.format;
     o.width = t.img.extent.width;
     o.height = t.img.extent.height;
-    o.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    o.usage = kTargetUsage;
     return o;
 }
 
@@ -279,11 +303,43 @@ const char* mode_name(UpscaleMode m) {
         case UpscaleMode::Fsr3: return "FSR 3";
         case UpscaleMode::Dlss: return "DLSS";
         case UpscaleMode::Dlaa: return "DLAA";
+        case UpscaleMode::MetalFx: return "MetalFX";
+        case UpscaleMode::MetalFxAa: return "MetalFX AA";
         default: return "?";
     }
 }
 
+// The backend of a temporal mode (null: not available here, or it failed to start; each logs why once).
+TemporalBackend* backend_for(UpscaleMode mode, void* gfx_device) {
+    switch (mode) {
+        case UpscaleMode::Fsr3: return temporal_ffx(gfx_device);
+        case UpscaleMode::Dlss:
+        case UpscaleMode::Dlaa: return temporal_dlss(gfx_device, mode == UpscaleMode::Dlaa);
+#if defined(__APPLE__)
+        case UpscaleMode::MetalFx:
+        case UpscaleMode::MetalFxAa: return temporal_metalfx(gfx_device);
+#endif
+        default: return nullptr;
+    }
+}
+
+// MetalFX that cannot run on this machine hands over to FSR 1 (extras::upscale_fallback): the scene upscaler and the present step then use
+// FSR 1 as if the player had picked it, and the F1 page says why. The other temporal modes keep the game's own picture, as before.
+void hand_over(State& s, UpscaleMode mode, const char* why) {
+    if (mode != UpscaleMode::MetalFx && mode != UpscaleMode::MetalFxAa) return;
+    if (!s.logged_handover) {
+        s.logged_handover = true;
+        NXLOG_W(kTag, "%s cannot run (%s): FSR 1 upscales instead", mode_name(mode), why);
+    }
+    upscale_fallback(UpscaleMode::Fsr1);
+}
+
+RecordingSplitter g_splitter;
+
 }  // namespace
+
+void temporal_set_splitter(const RecordingSplitter& sp) { g_splitter = sp; }
+const RecordingSplitter& temporal_splitter() { return g_splitter; }
 
 void temporal_note_game_jitter(float x_ndc, float y_ndc) {
     g_game_jit_x.store(x_ndc, std::memory_order_relaxed);
@@ -382,14 +438,20 @@ VkImageView temporal_evaluate(void* gfx_device, VkCommandBuffer cb, VkImageView 
             s.logged_backend_fail = true;
             NXLOG_E(kTag, "input pass could not be created: temporal upscaling off");
         }
+        hand_over(s, mode, "the input pass could not be created");
         return VK_NULL_HANDLE;
     }
-    TemporalBackend* be = mode == UpscaleMode::Fsr3 ? temporal_ffx(gfx_device) : temporal_dlss(gfx_device, mode == UpscaleMode::Dlaa);
-    if (!be) return VK_NULL_HANDLE;
-    if (!ensure(s, s.color, render, VK_FORMAT_R16G16B16A16_SFLOAT, "temporal colour") || !ensure(s, s.depth, render, VK_FORMAT_R32_SFLOAT, "temporal depth") ||
-        !ensure(s, s.motion, render, VK_FORMAT_R16G16_SFLOAT, "temporal motion") || !ensure(s, s.output, VkExtent2D{std::max(out.width, out_tex.width), std::max(out.height, out_tex.height)}, VK_FORMAT_R16G16B16A16_SFLOAT,
-                "temporal output"))
+    TemporalBackend* be = backend_for(mode, gfx_device);
+    if (!be || be->broken()) {
+        hand_over(s, mode, "see the lines above");
         return VK_NULL_HANDLE;
+    }
+    if (!ensure(s, s.color, render, VK_FORMAT_R16G16B16A16_SFLOAT, "temporal colour", be) || !ensure(s, s.depth, render, VK_FORMAT_R32_SFLOAT, "temporal depth", be) ||
+        !ensure(s, s.motion, render, VK_FORMAT_R16G16_SFLOAT, "temporal motion", be) ||
+        !ensure(s, s.output, VkExtent2D{std::max(out.width, out_tex.width), std::max(out.height, out_tex.height)}, VK_FORMAT_R16G16B16A16_SFLOAT, "temporal output", be)) {
+        hand_over(s, mode, "its images could not be made");
+        return VK_NULL_HANDLE;
+    }
 
     // jitter: the projection's offset in NDC -> pixels (FSR convention, picture +y down; NDC +y is the top row)
     double jx = cur.jit[0], jy = cur.jit[1];
@@ -536,7 +598,10 @@ VkImageView temporal_evaluate(void* gfx_device, VkCommandBuffer cb, VkImageView 
         NXLOG_I(kTag, "%s: render %ux%u -> %ux%u, depth %s, near %.3f far %.1f, vertical fov %.1f deg, motion vectors from depth + camera (camera motion only)",
                 be->name(), render.width, render.height, out.width, out.height, inverted ? "reversed" : "forward", static_cast<double>(f.near_z),
                 static_cast<double>(f.far_z), static_cast<double>(f.fov_y) * 57.29578);
-    if (!be->evaluate(cb, f)) return VK_NULL_HANDLE;
+    if (!be->evaluate(cb, f)) {
+        if (be->broken()) hand_over(s, mode, "see the lines above");
+        return VK_NULL_HANDLE;
+    }
     barrier(cb, s.output.img.image, VK_IMAGE_LAYOUT_GENERAL, any, VK_ACCESS_2_MEMORY_WRITE_BIT,
             VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
 
@@ -554,8 +619,32 @@ VkImageView temporal_evaluate(void* gfx_device, VkCommandBuffer cb, VkImageView 
     s.last_out = out;
     s.prev = cur;
     s.have_prev = true;
-    (void)mode_name;
     return s.output.img.view;
 }
+
+#if defined(__APPLE__)
+void temporal_shutdown() {
+    State& s = st();
+    {
+        std::lock_guard<std::mutex> lk(s.mu);
+        if (s.dev) {
+            for (Target* t : {&s.color, &s.depth, &s.motion, &s.output}) release(s, *t);
+            VkDevice d = s.dev->device();
+            if (s.pool) vkDestroyDescriptorPool(d, s.pool, nullptr);
+            if (s.pipe) vkDestroyPipeline(d, s.pipe, nullptr);
+            if (s.layout) vkDestroyPipelineLayout(d, s.layout, nullptr);
+            if (s.set_layout) vkDestroyDescriptorSetLayout(d, s.set_layout, nullptr);
+            if (s.nearest) vkDestroySampler(d, s.nearest, nullptr);
+            s.pool = VK_NULL_HANDLE;
+            s.pipe = VK_NULL_HANDLE;
+            s.layout = VK_NULL_HANDLE;
+            s.set_layout = VK_NULL_HANDLE;
+            s.nearest = VK_NULL_HANDLE;
+            s.init_tried = s.init_ok = false;
+        }
+    }
+    temporal_metalfx_shutdown();
+}
+#endif
 
 }  // namespace nxrt::extras

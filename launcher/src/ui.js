@@ -39,8 +39,8 @@ export function icon(name, cls = '') {
 
 const MAX_TOASTS = 3;
 
-/** Short status message. kind: '' | 'ok' | 'error' (errors stay longer and are announced at once). */
-export function toast(message, kind = '') {
+/** Short status message. kind: '' | 'ok' | 'error' (errors stay longer and are announced at once). ms: how long it stays, for a longer text. */
+export function toast(message, kind = '', ms = 0) {
   const host = document.getElementById('toast');
   const el = document.createElement('div');
   el.className = `toast glass strong ${kind}`;
@@ -48,7 +48,7 @@ export function toast(message, kind = '') {
   el.textContent = message;
   host.appendChild(el);
   while (host.children.length > MAX_TOASTS) host.firstElementChild.remove();
-  setTimeout(() => el.remove(), kind === 'error' ? 7000 : 3500);
+  setTimeout(() => el.remove(), ms || (kind === 'error' ? 7000 : 3500));
 }
 
 /**

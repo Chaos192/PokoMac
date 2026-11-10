@@ -232,6 +232,7 @@ void set_compile_thread_priority(bool background = true);                       
 using PrepareOptions = nxrt::nvn::ShaderPrepareOptions;
 using PrepareResult = nxrt::nvn::ShaderPrepareResult;
 bool gpl_prepare(const PrepareOptions& o, PrepareResult* r);       // false: nothing could be done (see r->error)
+bool prewarm_prepare(const nxrt::nvn::PipelinePrepareOptions& o, nxrt::nvn::PipelinePrepareResult* r);   // nvn_prewarm.cpp, --prepare-pipelines
 void module_cache_clear();                                          // destroys every cached shader module and variant (nothing may be creating pipelines)
 
 void pipeline_shutdown();

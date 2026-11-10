@@ -153,36 +153,53 @@ void erase_job_locked(const std::shared_ptr<Job>& j) {
     if (vec.empty()) g_jobs.erase(it);
 }
 
-void load_file() {
-    std::ifstream f(g_path, std::ios::binary);
-    if (!f) return;
+// The records of a key file, in file order. False when it is missing or of another record layout; own: it is the player's file, so one
+// of another layout is removed (the next record writes a fresh header). The seed is never removed.
+bool read_key_file(const std::string& path, std::vector<Rec>* out, bool own) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
     char magic[8];
     uint32_t size = 0, pad = 0;
     f.read(magic, 8);
     f.read(reinterpret_cast<char*>(&size), 4);
     f.read(reinterpret_cast<char*>(&pad), 4);
     if (!f || std::memcmp(magic, kMagic, 8) != 0 || size != kRestBytes) {
-        NXLOG_W(kTag, "%s is not a key file of this build (the record layout changed): ignored, a new one is started", g_path.c_str());
+        NXLOG_W(kTag, "%s is not a key file of this build (the record layout changed): ignored%s", path.c_str(), own ? ", a new one is started" : "");
         f.close();
-        std::error_code ec;
-        std::filesystem::remove(g_path, ec);                 // so the next record writes a fresh header
-        return;
+        if (own) {
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+        }
+        return false;
     }
     Rec r;
-    while (g_recs.size() + g_cs_recs.size() < kMaxRecords && f.read(reinterpret_cast<char*>(&r), sizeof r)) {
-        if (!g_digests.insert(digest_of(r.h, r.rest)).second) continue;
-        if (r.h[0] == kComputeTag) {
-            g_cs_recs.push_back(r);
-            continue;
-        }
-        for (uint64_t h : r.h)
-            if (h) g_by_any.emplace(h, g_recs.size());
-        g_recs.push_back(r);
+    while (out->size() < kMaxRecords && f.read(reinterpret_cast<char*>(&r), sizeof r)) out->push_back(r);
+    return true;
+}
+
+// A record whose digest was just inserted into g_digests. g_mu held.
+void add_rec_locked(const Rec& r) {
+    if (r.h[0] == kComputeTag) {
+        g_cs_recs.push_back(r);
+        return;
+    }
+    for (uint64_t h : r.h)
+        if (h) g_by_any.emplace(h, g_recs.size());
+    g_recs.push_back(r);
+}
+
+void load_file() {
+    std::vector<Rec> rs;
+    read_key_file(g_path, &rs, true);
+    for (const Rec& r : rs) {
+        if (g_recs.size() + g_cs_recs.size() >= kMaxRecords) break;
+        if (g_digests.insert(digest_of(r.h, r.rest)).second) add_rec_locked(r);
     }
     g_stats.loaded = g_recs.size() + g_cs_recs.size();
 }
 
-void append_record(const Rec& r) {
+void append_records(const Rec* rs, size_t n) {
+    if (!n) return;
     bool fresh = false;
     {
         std::ifstream t(g_path, std::ios::binary | std::ios::ate);
@@ -196,7 +213,30 @@ void append_record(const Rec& r) {
         f.write(reinterpret_cast<const char*>(&size), 4);
         f.write(reinterpret_cast<const char*>(&pad), 4);
     }
-    f.write(reinterpret_cast<const char*>(&r), sizeof r);
+    f.write(reinterpret_cast<const char*>(rs), static_cast<std::streamsize>(n * sizeof(Rec)));
+}
+
+void append_record(const Rec& r) { append_records(&r, 1); }
+
+// [nvn] pipeline_seed (default pipeline_seed.nxpk, next to the game; the macOS release ships one): a key file of the pipelines the
+// title, a new game and the first area use, recorded on a full play of them. Its records the player's own key file does not have yet are
+// added to it (in memory and on disk), so a first start builds them ahead like keys it recorded itself. Hashes and plain state only: no
+// shader code. g_mu held. Returns how many were added; *seed_out gets the seed's records (for --prepare-pipelines).
+size_t merge_seed_locked(std::vector<Rec>* seed_out = nullptr) {
+    const std::string seed = config_get_str("nvn", "pipeline_seed", "pipeline_seed.nxpk");
+    if (seed.empty()) return 0;
+    std::vector<Rec> rs;
+    if (!read_key_file(seed, &rs, false)) return 0;
+    std::vector<Rec> fresh;
+    for (const Rec& r : rs) {
+        if (g_recs.size() + g_cs_recs.size() >= kMaxRecords) break;
+        if (!g_digests.insert(digest_of(r.h, r.rest)).second) continue;
+        add_rec_locked(r);
+        fresh.push_back(r);
+    }
+    append_records(fresh.data(), fresh.size());
+    if (seed_out) *seed_out = std::move(rs);
+    return fresh.size();
 }
 
 void worker_main() {
@@ -342,6 +382,7 @@ void prewarm_init() {
             return;
         }
         load_file();
+        const size_t seeded = merge_seed_locked();
         // [nvn] prewarm_boot = false: a key waits until the game sets one of its shaders (the old behaviour)
         const bool boot = config_get_bool("nvn", "prewarm_boot", true);
         g_rec_jobs.resize(g_recs.size());
@@ -371,11 +412,18 @@ void prewarm_init() {
             g_stats.queued += g_cs_recs.size();
         }
         const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
-        const int64_t want = config_get_int("nvn", "prewarm_threads", std::clamp<int64_t>(hw / 6, 1, 4));
+#ifdef __APPLE__
+        // Metal: a worker spends its time waiting on Apple's compiler service (another process, which runs as many compilations at once as
+        // the GPU allows: platform/mac/gfx/metal_mac.mm), not on a core of its own, so more of them finish the boot's keys sooner.
+        const int64_t def_threads = std::clamp<int64_t>(hw / 2, 2, 8);
+#else
+        const int64_t def_threads = std::clamp<int64_t>(hw / 6, 1, 4);
+#endif
+        const int64_t want = config_get_int("nvn", "prewarm_threads", def_threads);
         for (int64_t i = 0; i < want; ++i) g_workers.emplace_back(worker_main);
         g_saver = std::thread(saver_main);
-        NXLOG_I(kTag, "prewarm: %zu recorded pipelines (+%zu compute%s) from %s, %zu worker threads; %s", g_recs.size(), g_cs_recs.size(),
-                compute_prewarm_on() ? ", first in line" : ", not built: [nvn] compute_prewarm is false", g_path.c_str(), g_workers.size(),
+        NXLOG_I(kTag, "prewarm: %zu recorded pipelines (+%zu compute%s) from %s (%zu of them from the seed), %zu worker threads; %s", g_recs.size(), g_cs_recs.size(),
+                compute_prewarm_on() ? ", first in line" : ", not built: [nvn] compute_prewarm is false", g_path.c_str(), seeded, g_workers.size(),
                 boot ? "all queued from boot, in the order they were first used" : "each queued when the game sets one of its shaders ([nvn] prewarm_boot is false)");
     }
     for (const Rec& r : parts) queue_parts(r, false);           // outside g_mu: the pipeline-library side takes its own lock
@@ -546,6 +594,168 @@ void prewarm_shutdown() {
 PrewarmStats prewarm_stats() {
     std::lock_guard<std::mutex> lk(g_mu);
     return g_stats;
+}
+
+// ---- --prepare-pipelines (nxrt/nvn_backend.h prepare_pipelines) -----------------------------------------------------------------
+namespace {
+constexpr int kPipelinesScheme = 1;
+
+// What the state file is valid for: the GPU, the driver (its version and pipeline cache UUID change with an update, and macOS drops
+// compiled Metal code with a new compiler) and the settings that change every shader module.
+std::string pipelines_state_key() {
+    const VkPhysicalDeviceProperties& p = device().properties();
+    char uuid[40];
+    for (int i = 0; i < 16; ++i) std::snprintf(uuid + 2 * i, 3, "%02x", p.pipelineCacheUUID[i]);
+    char b[512];
+    std::snprintf(b, sizeof b, "scheme=%d gpu=%s driver=%u api=%u cache=%s salt=%s reduced=%d", kPipelinesScheme, p.deviceName, p.driverVersion,
+                  p.apiVersion, uuid, config_get_str("nvn", "spirv_salt", "").c_str(), config_get_bool("nvn", "reduced_precision", false) ? 1 : 0);
+    return b;
+}
+
+// The digests of the records the state file lists as built (or failed for good), when it was written for this key.
+std::unordered_set<uint64_t> read_pipelines_state(const std::string& path, const std::string& key) {
+    std::unordered_set<uint64_t> done;
+    std::ifstream f(path);
+    std::string l;
+    auto trim = [](std::string& s) { while (!s.empty() && (s.back() == '\r' || s.back() == ' ')) s.pop_back(); };
+    if (!std::getline(f, l)) return done;
+    trim(l);
+    if (l != "key: " + key) return done;
+    while (std::getline(f, l)) {
+        trim(l);
+        if (const uint64_t d = l.size() == 16 ? parse_hash(l) : 0) done.insert(d);
+    }
+    return done;
+}
+
+void write_pipelines_state(const std::string& path, const std::string& key, const std::unordered_set<uint64_t>& done) {
+    const std::string tmp = path + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::trunc);
+        if (!f) return;
+        f << "key: " << key << '\n';
+        for (uint64_t d : done) f << hex16(d) << '\n';
+        if (!f) return;
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp, path, ec);
+}
+}  // namespace
+
+bool prewarm_prepare(const nxrt::nvn::PipelinePrepareOptions& o, nxrt::nvn::PipelinePrepareResult* res) {
+    nxrt::nvn::PipelinePrepareResult local;
+    nxrt::nvn::PipelinePrepareResult& r = res ? *res : local;
+    r = nxrt::nvn::PipelinePrepareResult{};
+    if (!shader_cache().is_open()) { r.error = "no shader cache is open"; return false; }
+    std::vector<Rec> seed;
+    {
+        std::lock_guard<std::mutex> lk(g_mu);
+        g_path = config_get_str("nvn", "pipeline_keys", "pipeline_keys.bin");
+        if (g_path.empty()) { r.error = "[nvn] pipeline_keys is empty: there is no key file to prepare"; return false; }
+        load_file();
+        r.added = merge_seed_locked(&seed);
+    }
+    // one state file per Vulkan driver (pipelines-KosmicKrisp.state, pipelines-MoltenVK.state): each compiles its own MSL, and a player
+    // who switches drivers and back keeps what the first one built
+    std::string driver = "vulkan";
+    {
+        VkPhysicalDeviceDriverProperties dp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+        VkPhysicalDeviceProperties2 p2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+        p2.pNext = &dp;
+        if (vkGetPhysicalDeviceProperties2 && device().physical()) vkGetPhysicalDeviceProperties2(device().physical(), &p2);
+        std::string n;
+        for (const char* c = dp.driverName; *c && n.size() < 32; ++c)
+            if ((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9')) n += *c;
+        if (!n.empty()) driver = n;
+    }
+    const std::filesystem::path kp(g_path);
+    const std::string state_name = "pipelines-" + driver + ".state";
+    const std::string state_path = (kp.has_parent_path() ? kp.parent_path() / state_name : std::filesystem::path(state_name)).string();
+    const std::string key = pipelines_state_key();
+    std::unordered_set<uint64_t> done = o.only_if_needed ? read_pipelines_state(state_path, key) : std::unordered_set<uint64_t>{};
+    std::vector<Rec> todo;
+    std::unordered_set<uint64_t> seen;
+    for (const Rec& rec : seed) {
+        const uint64_t d = digest_of(rec.h, rec.rest);
+        if (!done.count(d) && seen.insert(d).second) todo.push_back(rec);
+    }
+    r.pipelines = todo.size();
+    if (todo.empty()) {
+        r.already_ready = true;
+        if (o.only_if_needed && !std::filesystem::exists(state_path)) write_pipelines_state(state_path, key, done);
+        return true;
+    }
+    // compute records first (each far cheaper), then the graphics ones in file order: the title's first
+    std::stable_partition(todo.begin(), todo.end(), [](const Rec& x) { return x.h[0] == kComputeTag; });
+    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+    const int threads = o.threads > 0 ? o.threads : static_cast<int>(hw > 3 ? hw - 2 : 1);
+    const auto t0 = std::chrono::steady_clock::now();
+    std::atomic<size_t> next{0};
+    std::atomic<uint64_t> n_done{0}, built{0}, missing{0}, failed{0}, slow{0};
+    std::atomic<bool> cancel{false};
+    std::mutex done_mu, progress_mu;
+    auto report = [&] {
+        if (!o.progress) return;
+        std::unique_lock<std::mutex> lk(progress_mu, std::try_to_lock);
+        if (!lk.owns_lock()) return;
+        if (!o.progress(n_done.load(), todo.size())) cancel.store(true);
+    };
+    auto work = [&] {
+        set_compile_thread_priority(false);
+        for (;;) {
+            if (cancel.load()) break;
+            const size_t i = next.fetch_add(1);
+            if (i >= todo.size()) break;
+            const Rec& rec = todo[i];
+            bool have = false, ok = false;
+            const auto tb = std::chrono::steady_clock::now();
+            if (rec.h[0] == kComputeTag) {
+                const ShaderInfo* cs = shader_cache().load_stub(hex16(rec.h[1]));
+                have = cs != nullptr;
+                ok = have && compute_build_ahead(cs, rec.h[2]);
+            } else {
+                GraphicsKey k;
+                const ProgLayout* pl = nullptr;
+                have = stub_key(rec, k, pl);
+                if (have) {
+                    const VkPipeline p = build_graphics_pipeline(k, *pl);
+                    ok = p != VK_NULL_HANDLE;
+                    if (p) vkDestroyPipeline(vkdev(), p, nullptr);   // only its compilation is wanted: macOS and the pipeline cache keep it
+                }
+            }
+            if (std::chrono::steady_clock::now() - tb >= std::chrono::seconds(3)) slow.fetch_add(1);
+            if (!have) {
+                missing.fetch_add(1);                 // not in the state: tried again once the game made that shader and it was translated
+            } else {
+                (ok ? built : failed).fetch_add(1);
+                std::lock_guard<std::mutex> lk(done_mu);
+                done.insert(digest_of(rec.h, rec.rest));
+            }
+            n_done.fetch_add(1);
+            report();
+        }
+    };
+    {
+        std::vector<std::thread> pool;
+        for (int t = 1; t < threads; ++t) pool.emplace_back(work);
+        work();
+        for (auto& t : pool) t.join();
+    }
+    if (built.load()) pipeline_cache_save();
+    write_pipelines_state(state_path, key, done);
+    if (o.progress) o.progress(n_done.load(), todo.size());
+    r.built = built.load();
+    r.missing_shaders = missing.load();
+    r.failed = failed.load();
+    r.slow = slow.load();
+    r.cancelled = cancel.load();
+    r.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    NXLOG_I(kTag, "prepare pipelines: %llu of the seed to build, %llu built, %llu waiting for a run-time shader, %llu failed, %llu slow (3 s or more), "
+                  "%llu added to %s, %.1f s on %d threads%s",
+            static_cast<unsigned long long>(r.pipelines), static_cast<unsigned long long>(r.built), static_cast<unsigned long long>(r.missing_shaders),
+            static_cast<unsigned long long>(r.failed), static_cast<unsigned long long>(r.slow), static_cast<unsigned long long>(r.added), g_path.c_str(),
+            r.seconds, threads, r.cancelled ? ", cancelled" : "");
+    return true;
 }
 
 // The game set a program's shaders: its recorded pipelines go first in line. Programs with both a vertex and a fragment shader also get

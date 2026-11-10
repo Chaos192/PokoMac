@@ -37,6 +37,8 @@ pub const KIND_AUTO: &str = "auto";
 pub const KIND_EXIT: &str = "exit";
 pub const KIND_MANUAL: &str = "manual";
 pub const KIND_SAFETY: &str = "before-restore";
+/// The copy made before iCloud Drive's newer save replaces this one (icloud.rs).
+pub const KIND_ICLOUD: &str = "before-icloud";
 
 /// pkp.ini `[backup]`: `interval_minutes` (0 = off, the default; the launcher offers 5, 10 and 15), `keep` (how many automatic, exit and
 /// manual copies stay, default 10), `on_exit` (one more copy when the game ends, default on, only while backups are on).
@@ -106,7 +108,20 @@ pub fn locate(game_dir: &Path) -> (PathBuf, String) {
 }
 
 fn root_of(game_dir: &Path, key: &str) -> PathBuf {
-    game_dir.join(DIR).join(key)
+    backup_root(game_dir).join(key)
+}
+
+/// Where the backups go: pkp.ini `[backup] dir` (Settings > Saves > Backup folder; relative to the game folder), else `save-backups` in
+/// the game folder. Backups made before the player chose another folder stay where they were; Open folder shows the chosen one.
+pub fn backup_root(game_dir: &Path) -> PathBuf {
+    let ini = fs::read(game_dir.join(PKP_INI)).ok().map(|b| Ini::parse(&String::from_utf8_lossy(&b)));
+    let set = ini.as_ref().and_then(|i| i.get("backup", "dir")).unwrap_or_default();
+    let set = set.trim();
+    if set.is_empty() {
+        return game_dir.join(DIR);
+    }
+    let p = PathBuf::from(set);
+    if p.is_absolute() { p } else { game_dir.join(p) }
 }
 
 fn profile_name(game_dir: &Path) -> String {
@@ -119,7 +134,7 @@ pub fn safe_name(name: &str) -> bool {
 }
 
 /// True while the runtime has a decided but unfinished commit of this account's save (copying then could see a half-applied commit).
-fn commit_pending(sd: &Path, key: &str) -> bool {
+pub(crate) fn commit_pending(sd: &Path, key: &str) -> bool {
     let acc = sd.join("account");
     let (a, b) = (format!("{}.commit", key), format!("{}.journal.", key));
     fs::read_dir(&acc).map(|rd| rd.flatten().any(|e| e.file_name().to_str().map_or(false, |n| n == a || n.starts_with(&b)))).unwrap_or(false)
@@ -150,7 +165,7 @@ fn listing(root: &Path) -> io::Result<Listing> {
     Ok(out)
 }
 
-fn copy_tree(src: &Path, dst: &Path) -> io::Result<()> {
+pub(crate) fn copy_tree(src: &Path, dst: &Path) -> io::Result<()> {
     fs::create_dir_all(dst)?;
     for e in fs::read_dir(src)? {
         let e = e?;
@@ -165,7 +180,7 @@ fn copy_tree(src: &Path, dst: &Path) -> io::Result<()> {
 }
 
 /// SHA-256 over every file (sorted by path) as path, length and bytes; the meta text is part of it. Also the totals.
-fn digest(data: &Path, meta: Option<&Path>) -> io::Result<(String, u64, u64)> {
+pub(crate) fn digest(data: &Path, meta: Option<&Path>) -> io::Result<(String, u64, u64)> {
     let mut h = Sha256::new();
     let (mut files, mut bytes) = (0u64, 0u64);
     for (rel, len, _) in listing(data)? {

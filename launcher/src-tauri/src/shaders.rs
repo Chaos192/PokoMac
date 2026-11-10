@@ -308,7 +308,7 @@ pub fn find_tools(tools_dir: &Path) -> Result<Tools, String> {
 
 /// A progress line of a tool ("scan: 12 of 99", "  500/1000  3.2 s"): counted by the progress bar, not worth a log line.
 fn is_progress_line(l: &str) -> bool {
-    l.starts_with("scan: ") || l.trim().split('/').next().map_or(false, |x| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit()) && l.contains('/'))
+    l.starts_with("scan: ") || l.strip_prefix("prepare: ").is_some_and(|r| r.starts_with(|c: char| c.is_ascii_digit())) ||l.trim().split('/').next().map_or(false, |x| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit()) && l.contains('/'))
 }
 
 /// Runs a tool, handing each stdout line to `line`; kills it when `cancel` is set. Ok(true) = exit 0, Ok(false) = cancelled.
@@ -444,33 +444,79 @@ pub fn needs_warm_up(game_dir: &Path) -> bool {
     !game_dir.join(RUNTIME_REL).join("manifest.tsv").is_file()
 }
 
+/// Where a translation during play (translate_live) puts the game's dump folder while it works on it.
+const LIVE_REL: &str = "shader_cache/missing.live";
+
 /// Before every start: moves what the game dumped to MISSING_REL (by any run, also one started without the launcher)
 /// into RUNTIME_REL, then translates every block listed there that has no .spv in the cache. Ok(n) = blocks translated.
 pub fn translate_missing(game_dir: &Path, tools_dir: &Path) -> Result<usize, String> {
+    // a batch a translation during play took aside and did not finish (the launcher ended meanwhile) comes first
+    let live = game_dir.join(LIVE_REL);
+    if live.is_dir() {
+        merge_dumped(game_dir, &live)?;
+    }
+    merge_dumped(game_dir, &game_dir.join(MISSING_REL))?;
+    translate_listed(game_dir, tools_dir, true)
+}
+
+/// While the game runs: the blocks it dumped since the last look are translated now instead of after it ends, so what they draw shows
+/// up within seconds of the first time the game makes them (pokopia-native's Windows build does the same; its Mac build cannot). The
+/// dump folder is renamed aside first, so the game starts a fresh one with its next block (runtime nvn_shaders.cpp dump_missing_block
+/// creates it), and the translations go into the cache as loose files: the running game reads new results.tsv rows live
+/// (ShaderCache::rescan), which it could not do for a new archive segment. The translator runs on two threads at a low priority so
+/// the game keeps its cores. Ok(n) = blocks translated.
+pub fn translate_live(game_dir: &Path, tools_dir: &Path) -> Result<usize, String> {
     let missing = game_dir.join(MISSING_REL);
+    let live = game_dir.join(LIVE_REL);
+    if !live.is_dir() {
+        // the game writes a block's files and then its manifest row: a manifest changed within the last second may be mid-block
+        let settled = fs::metadata(missing.join("manifest.tsv"))
+            .and_then(|m| m.modified())
+            .map(|t| t.elapsed().map_or(false, |e| e >= Duration::from_secs(1)))
+            .unwrap_or(false);
+        if !settled {
+            return Ok(0);
+        }
+        fs::rename(&missing, &live).map_err(|e| format!("cannot move {} aside: {}", missing.display(), e))?;
+    }
+    merge_dumped(game_dir, &live)?;
+    translate_listed(game_dir, tools_dir, false)
+}
+
+/// Moves the blocks of one dump folder (MISSING_REL or LIVE_REL) into RUNTIME_REL and lists them in its manifest, then removes the folder.
+/// A row whose files are not there (a block the game was still writing when the folder was taken) is left out.
+fn merge_dumped(game_dir: &Path, from: &Path) -> Result<(), String> {
     let runtime = game_dir.join(RUNTIME_REL);
     let list = runtime.join("manifest.tsv");
     // manifest columns (runtime nvn_shaders.cpp dump_missing_block): 10 = hash, 11 = code file, 12 = control file
-    if let Ok((header, rows)) = read_tsv(&missing.join("manifest.tsv")) {
+    if let Ok((header, rows)) = read_tsv(&from.join("manifest.tsv")) {
         fs::create_dir_all(&runtime).map_err(|e| format!("cannot create {}: {}", runtime.display(), e))?;
         let mut known: HashSet<String> = read_tsv(&list).map(|(_, r)| r.iter().map(|x| col(x, 10).to_string()).collect()).unwrap_or_default();
         let mut text = if fs::metadata(&list).map(|m| m.len() == 0).unwrap_or(true) { format!("{}\n", header) } else { String::new() };
         for r in &rows {
             // the same block twice (several runs appended to one manifest before it was merged): the first one counts
-            if !known.insert(col(r, 10).to_string()) {
+            if known.contains(col(r, 10)) || !from.join(col(r, 11)).is_file() || !from.join(col(r, 12)).is_file() {
                 continue;
             }
             for f in [col(r, 11), col(r, 12)] {
-                fs::rename(missing.join(f), runtime.join(f)).map_err(|e| format!("cannot move {}: {}", f, e))?;
+                fs::rename(from.join(f), runtime.join(f)).map_err(|e| format!("cannot move {}: {}", f, e))?;
             }
+            known.insert(col(r, 10).to_string());
             text.push_str(r);
             text.push('\n');
         }
         let mut out = fs::OpenOptions::new().create(true).append(true).open(&list).map_err(|e| format!("cannot write {}: {}", list.display(), e))?;
         out.write_all(text.as_bytes()).map_err(|e| format!("cannot write {}: {}", list.display(), e))?;
-        let _ = fs::remove_dir_all(&missing);
     }
+    let _ = fs::remove_dir_all(from);
+    Ok(())
+}
 
+/// Translates every block RUNTIME_REL lists that has no translation in the cache yet. compact: a compact cache takes the new
+/// translations into its archive (not while the game runs: it would not see them there). Ok(n) = blocks translated.
+fn translate_listed(game_dir: &Path, tools_dir: &Path, compact: bool) -> Result<usize, String> {
+    let runtime = game_dir.join(RUNTIME_REL);
+    let list = runtime.join("manifest.tsv");
     let spirv = game_dir.join(SPIRV_REL);
     let Ok((header, rows)) = read_tsv(&list) else { return Ok(0) };
     let archive = crate::shader_archive::Archive::open(game_dir);
@@ -503,19 +549,23 @@ pub fn translate_missing(game_dir: &Path, tools_dir: &Path) -> Result<usize, Str
         text.push('\n');
     }
     fs::write(input.join("manifest.tsv"), text).map_err(|e| format!("cannot write {}: {}", input.display(), e))?;
-    let jobs = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2).to_string();
+    // while the game runs (not compact): two threads at a low priority, the game keeps its cores
+    let jobs = if compact { std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2) } else { 2 }.to_string();
     let mut cmd = crate::host::windows_program(&tools_dir.join("spirv_harness").join(crate::host::HARNESS_EXE))?;
     cmd.arg("--batch").arg(crate::host::win_path(&input)).arg("--out").arg(crate::host::win_path(&stage)).args(["--jobs", &jobs, "--no-val"]);
-    cmd.env("DOTNET_gcServer", "1");
-    if !run_tool(cmd, &AtomicBool::new(false), false, None, None, |_| {})? {
+    if compact {
+        cmd.env("DOTNET_gcServer", "1");
+    }
+    if !run_tool(cmd, &AtomicBool::new(false), !compact, None, None, |_| {})? {
         return Err("the shader translator stopped".into());
     }
     let n = commit_stage(&stage, &spirv)?;
     let _ = fs::remove_dir_all(&stage);
     let _ = fs::remove_dir_all(&input);
     let _ = fs::remove_file(game_dir.join(RETRANSLATE_REL));
-    // a compact cache stays compact: the new translations join the archive (a small segment)
-    if crate::shader_archive::exists(game_dir) {
+    // a compact cache stays compact: the new translations join the archive (a small segment). Not while the game runs: those stay
+    // loose files, which count as translated (has_translation) and are read like the archive's.
+    if compact && crate::shader_archive::exists(game_dir) {
         let hashes: Vec<String> = todo.iter().map(|r| col(r, 10).to_string()).collect();
         crate::shader_archive::compact(game_dir, Some(&hashes), &AtomicBool::new(false), |_, _| {})?;
     }
@@ -572,6 +622,41 @@ pub fn prepare(game_dir: &Path, tools_dir: &Path, cancel: &AtomicBool) -> Result
     } else {
         translate_missing(game_dir, tools_dir).map(Some)
     }
+}
+
+/// macOS: the pipelines of the seed that ships with the app (Resources/runtime/pipeline_seed.nxpk: the title, a new game, the
+/// character creator and the first area) built once before play: `pkp --prepare-pipelines --if-needed` (runtime nvn_prewarm.cpp
+/// prewarm_prepare). On Metal a pipeline's first build is Apple's compiler working through MSL source, hundreds of milliseconds each
+/// and a few take minutes, and the game skips a draw whose pipeline is still being built, so without this a first start showed the
+/// opening and the character creator with things missing for minutes. macOS keeps what was compiled in its own cache, and a state
+/// file per Vulkan driver next to the key file (pipelines-<driver>.state) makes the next call quick. `progress(done, total)`. Ok(None) = cancelled.
+#[cfg(target_os = "macos")]
+pub fn prepare_pipelines(game_dir: &Path, tools_dir: &Path, cancel: &AtomicBool, log: Option<&LogFn>, mut progress: impl FnMut(u64, u64)) -> Result<Option<u64>, String> {
+    if let Some(src) = crate::host::runtime_source(tools_dir) {
+        crate::host::sync_runtime_files(&src, game_dir)?;
+    }
+    let mut cmd = crate::host::windows_program(&game_dir.join(crate::host::GAME_EXE))?;
+    cmd.current_dir(game_dir).args(["--prepare-pipelines", "--if-needed", "--log"]).arg(cache_dir(game_dir).join("prepare_pipelines.log"));
+    let mut built = 0u64;
+    let ok = run_tool(cmd, cancel, false, log, None, |l| {
+        let Some(rest) = l.strip_prefix("prepare: ") else { return };
+        let mut it = rest.split_whitespace();
+        match (it.next().and_then(|a| a.parse::<u64>().ok()), it.next().and_then(|b| b.parse::<u64>().ok())) {
+            (Some(done), Some(total)) => progress(done, total),
+            _ => {
+                if let Some(b) = rest.split_whitespace().find_map(|w| w.strip_prefix("built=")) {
+                    built = b.parse().unwrap_or(0);
+                }
+            }
+        }
+    })?;
+    Ok(if ok { Some(built) } else { None })
+}
+
+/// Windows and Linux: the driver builds a pipeline in milliseconds, the game's own prewarm is enough.
+#[cfg(not(target_os = "macos"))]
+pub fn prepare_pipelines(_game_dir: &Path, _tools_dir: &Path, _cancel: &AtomicBool, _log: Option<&LogFn>, _progress: impl FnMut(u64, u64)) -> Result<Option<u64>, String> {
+    Ok(Some(0))
 }
 
 /// The whole setup. `report` gets every progress change. Ok(true) = finished (or the limit reached), Ok(false) = cancelled.

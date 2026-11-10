@@ -10,6 +10,7 @@ import { backupDetail, backupNow, backupText, runRestore } from './backups.js';
 import { canUpdate, gamePhase } from '../action.js';
 import { runRepair, runUndo } from './repair.js';
 import { askTesting } from './testing-notice.js';
+import { reportProblem } from '../report.js';
 import { confirmBuild, loadBuilds, pickBuild } from './builds.js';
 import {
   DLSS_DOWNLOAD, IMPORT_FACTS, SECTIONS, applyEdits, customStart, fitNumber, isAvailable, isEnabled, makeSource, optionsFor, readAll, readField,
@@ -44,6 +45,7 @@ export async function render(el, ctx) {
   let backups = null;   // savebackup.rs Status: the settings, how many copies and the newest
   let steamBusy = false;
   let steam = null;     // steam.rs Status: Steam found and running, and whether the game and the launcher shortcuts are in it
+  let icloud = null;    // icloud.rs Status: whether this Mac has iCloud Drive, and when the save last synced
   let section = store.state.dlss ? 'graphics' : ctx.section || lastSection;
 
   const customOpen = new Set();   // choice rows showing their number field although the value is a preset
@@ -83,6 +85,7 @@ export async function render(el, ctx) {
       backupLine: backupText(backups),
       steam,
       steamBusy,
+      icloud,
       backupDetail: backupDetail(backups),
       importing,
       importResult,
@@ -272,6 +275,7 @@ export async function render(el, ctx) {
     if (ini.length) await api('write_settings', { edits: ini });
     if (config) await api('save_config', { config: { ...(await api('get_config')), ...config } });
     if (config && 'channel' in config) await store.refreshNews(true);   // another channel, another list of releases
+    if (config && 'icloud_sync' in config) refreshIcloud();
     if (reloads) await store.refresh();
     saved();
   }
@@ -392,7 +396,7 @@ export async function render(el, ctx) {
 
   // ---- buttons ------------------------------------------------------------------------------------------------------------------
 
-  const OPEN = { save: () => api('open_save_dir'), game: () => api('open_game_dir') };
+  const OPEN = { save: () => api('open_save_dir'), game: () => api('open_game_dir'), backups: () => api('open_backup_dir'), photos: () => api('open_album_dir') };
 
   async function runImport(what, source, html) {
     if (!(await confirm({ title: `Import ${what}?`, html, body: html ? '' : IMPORT_FACTS, ok: 'Import' }))) return;
@@ -447,6 +451,15 @@ export async function render(el, ctx) {
     }
     steamBusy = false;
     await refreshSteam();
+  }
+
+  async function refreshIcloud() {
+    try {
+      icloud = await api('icloud_status');
+    } catch (e) {
+      console.warn('icloud_status', e);
+    }
+    draw();
   }
 
   async function refreshBackups() {
@@ -583,6 +596,8 @@ export async function render(el, ctx) {
       await refreshBackups();
     },
     'backup-open': () => api('open_backup_dir'),
+    report: () => reportProblem(),
+    'icloud-open': () => api('open_icloud_dir'),
   };
 
   // ---- the page -----------------------------------------------------------------------------------------------------------------
@@ -645,6 +660,10 @@ export async function render(el, ctx) {
     hadDlss = !!s.dlss;
     if ((wasActive && !active) || dlssEnded) reload().catch((e) => console.error(e));   // the game writes its settings as it leaves
     else if (why !== 'setup' || section === 'game') draw();
+    if (wasActive && !active) {
+      refreshIcloud();   // the save went up to iCloud Drive as the game closed
+      refreshBackups();
+    }
     wasActive = active;
   });
   wasActive = env().gameBusy;
@@ -660,6 +679,7 @@ export async function render(el, ctx) {
     draw();
   }).catch((e) => console.warn('repair_last', e));
   refreshBackups();
+  refreshIcloud();
   refreshSteam();
   api('save_sources').then((list) => {
     sources = list;

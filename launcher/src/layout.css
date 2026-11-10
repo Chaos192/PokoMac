@@ -118,3 +118,7 @@ body[data-shell="full"] #titlebar { left: 0; }
   .art, .scrim { transition: none; }
   .entering, .entering *, .task-fill { animation: none !important; }
 }
+
+/* macOS: the native window buttons sit over the top-left corner (tauri.macos.conf.json trafficLightPosition): the sidebar's brand row starts
+   below them. */
+:root[data-os="mac"] #nav { padding-top: 34px; }

@@ -2,7 +2,7 @@
 // shown here; the on/off setting and the interval are plain pkp.ini keys ([backup] interval_minutes, keep) drawn by the settings schema.
 import { api, confirm, errText, esc, toast } from '../ui.js';
 
-const KIND = { auto: 'Automatic', exit: 'When the game closed', manual: 'Back up now', 'before-restore': 'Before a restore' };
+const KIND = { auto: 'Automatic', exit: 'When the game closed', manual: 'Back up now', 'before-restore': 'Before a restore', 'before-icloud': 'Before a newer save came from iCloud Drive' };
 
 export const size = (b) => (b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : b >= 1024 ? `${Math.round(b / 1024)} KB` : `${b} B`);
 export const when = (iso) => {
