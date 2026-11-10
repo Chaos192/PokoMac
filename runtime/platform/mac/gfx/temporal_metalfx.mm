@@ -24,6 +24,7 @@
 #include "extras/temporal.h"
 
 #include <pthread.h>
+#include <time.h>
 
 #include <algorithm>
 #include <atomic>
@@ -96,6 +97,54 @@ Diag g_diag;
 uint64_t now_ns() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 }
+
+// [upscale] metalfx_check: an RGBA16F image read back and scanned: NaN / Inf / negative texels, black texels and fully black rows, the largest finite value.
+float half_to_float(uint16_t h) {
+    const uint32_t s = (h >> 15) & 1, e = (h >> 10) & 31, m = h & 1023;
+    float v;
+    if (e == 0) v = std::ldexp(static_cast<float>(m), -24);
+    else if (e == 31) v = m ? NAN : INFINITY;
+    else v = std::ldexp(static_cast<float>(m | 1024), static_cast<int>(e) - 25);
+    return s ? -v : v;
+}
+void scan_rgba16f(const char* what, uint64_t k, const uint16_t* p, uint32_t w, uint32_t h) {
+    uint64_t nan = 0, inf = 0, neg = 0, black = 0, black_rows = 0;
+    double sum = 0, mx = 0;
+    for (uint32_t y = 0; y < h; ++y) {
+        uint32_t row_black = 0;
+        for (uint32_t x = 0; x < w; ++x) {
+            const uint16_t* t = p + (static_cast<size_t>(y) * w + x) * 4;
+            bool all0 = true;
+            for (int c = 0; c < 3; ++c) {
+                const uint16_t b = t[c];
+                if ((b & 0x7C00) == 0x7C00) { (b & 0x3FF) ? ++nan : ++inf; all0 = false; continue; }
+                const float v = half_to_float(b);
+                if (v < 0) ++neg;
+                if (v != 0) all0 = false;
+                sum += v;
+                mx = std::max(mx, static_cast<double>(v));
+            }
+            black += all0;
+            row_black += all0;
+        }
+        black_rows += row_black == w;
+    }
+    NXLOG_I("metalfx", "check frame %llu, %s %ux%u: NaN %llu, Inf %llu, negative %llu, black texels %llu (%.2f%%), black rows %llu, mean %.4f, max %.1f",
+            static_cast<unsigned long long>(k), what, w, h, static_cast<unsigned long long>(nan), static_cast<unsigned long long>(inf),
+            static_cast<unsigned long long>(neg), static_cast<unsigned long long>(black), 100.0 * black / (static_cast<double>(w) * h),
+            static_cast<unsigned long long>(black_rows), sum / (3.0 * w * h), mx);
+}
+
+// The hand-off, per frame, on the host clock Metal stamps command buffers with (mach_absolute_time, ns),
+// and order checks on the semaphore. Frame k: its first part signals 2k - 1, MetalFX k runs, then 2k lets the rest go.
+uint64_t host_ns() { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
+struct HandoffTimes {
+    std::atomic<uint64_t> commit[64] = {}, release[64] = {}, sem_at_release[64] = {}, done_at_release[64] = {};
+    std::mutex mu;
+    uint64_t n = 0, viol_release = 0, viol_done = 0, viol_prev = 0;
+    double sum[4] = {}, mx[4] = {};
+};
+HandoffTimes g_ho;
 
 // The host round trip (no MTLSharedEvent of the semaphore: KosmicKrisp). Each job waits on the CPU until the first part of a frame has run
 // (the semaphore reaches `wait`) and then sets our event, which the already committed Metal command buffer waits for. One thread, jobs in
@@ -175,6 +224,14 @@ private:
             }
             g_diag.waiting.store(0);
             g_diag.released.store(j.ev_value);
+            {   // order check: nothing may have passed 2k - 1 yet (2k comes from MetalFX k), and MetalFX k - 1 must have completed
+                uint64_t v = 0;
+                vkGetSemaphoreCounterValue(dev_->device(), sem_, &v);
+                const unsigned i = j.ev_value % 64;
+                g_ho.release[i].store(host_ns());
+                g_ho.sem_at_release[i].store(v);
+                g_ho.done_at_release[i].store(g_diag.completed.load());
+            }
             j.ev.signaledValue = j.ev_value;   // (also after a failure: the Metal command buffer and the rest of the frame must not hang)
         }
     }
@@ -603,21 +660,75 @@ private:
                           toTexture:copy_to destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
                 [be endEncoding];
             }
+            // [upscale] metalfx_check = N (0: off): every Nth frame, the colour input and MetalFX's result are read back and scanned
+            static const int64_t check_every = config_get_int("upscale", "metalfx_check", 0);
+            id<MTLBuffer> chk_in = nil, chk_out = nil;
+            const uint32_t rw = f.render.width, rh = f.render.height, ow = f.out.width, oh = f.out.height;
+            if (check_every > 0 && k % static_cast<uint64_t>(check_every) == 0) {
+                chk_in = [mdev_ newBufferWithLength:static_cast<NSUInteger>(rw) * rh * 8 options:MTLResourceStorageModeShared];
+                chk_out = [mdev_ newBufferWithLength:static_cast<NSUInteger>(ow) * oh * 8 options:MTLResourceStorageModeShared];
+                id<MTLBlitCommandEncoder> be = [mcb blitCommandEncoder];
+                [be copyFromTexture:in[0]->tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(rw, rh, 1)
+                           toBuffer:chk_in destinationOffset:0 destinationBytesPerRow:rw * 8 destinationBytesPerImage:static_cast<NSUInteger>(rw) * rh * 8];
+                [be copyFromTexture:out sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(ow, oh, 1)
+                           toBuffer:chk_out destinationOffset:0 destinationBytesPerRow:ow * 8 destinationBytesPerImage:static_cast<NSUInteger>(ow) * oh * 8];
+                [be endEncoding];
+            }
             if (vk_event_) [mcb encodeSignalEvent:vk_event_ value:done];
             const bool gpu_signal = vk_event_ != nil;
             MetalFx* me = this;   // the backend lives as long as the process
             [mcb addCompletedHandler:^(id<MTLCommandBuffer> b) {
+                if (chk_in) scan_rgba16f("colour in", k, static_cast<const uint16_t*>(chk_in.contents), rw, rh);
+                if (chk_out) scan_rgba16f("MetalFX out", k, static_cast<const uint16_t*>(chk_out.contents), ow, oh);
+                me->note_times(k, ready, b);
                 g_diag.completed.store(k);
                 g_diag.status.store(static_cast<int64_t>(b.status));
                 const bool ok = b.status == MTLCommandBufferStatusCompleted;
                 if (!ok) me->failed_on_gpu(b);
                 if (!gpu_signal || !ok) me->signal_done(done);   // KosmicKrisp: the rest of the frame runs after this
             }];
+            g_ho.commit[k % 64].store(host_ns());
             [mcb commit];
             g_diag.issued.store(k);
             g_diag.committed_ns.store(now_ns());
             last_ = mcb;
             if (!vk_event_) bridge_.push(ready, own_event_, k);
+        }
+    }
+
+    // Frame k's hand-off times and order checks, logged per 600 frames ([upscale] metalfx_trace = N: also each of the first N frames) (Metal's completion thread, before `done` is signalled).
+    void note_times(uint64_t k, uint64_t ready, id<MTLCommandBuffer> b) {
+        static const int64_t trace = config_get_int("upscale", "metalfx_trace", 0);
+        const uint64_t t_done = host_ns();
+        uint64_t v = 0;
+        vkGetSemaphoreCounterValue(dev_->device(), sem_, &v);
+        const unsigned i = k % 64;
+        const uint64_t c = g_ho.commit[i].load(), r = g_ho.release[i].load(), sr = g_ho.sem_at_release[i].load(), dr = g_ho.done_at_release[i].load();
+        const double gs = b.GPUStartTime * 1e9, ge = b.GPUEndTime * 1e9;
+        // segments, ms: first part (commit -> the bridge saw 2k - 1), event -> MetalFX GPU start, MetalFX on the GPU, GPU end -> handler
+        const double seg[4] = {r > c ? (r - c) / 1e6 : 0.0, gs > r ? (gs - r) / 1e6 : 0.0, ge > gs ? (ge - gs) / 1e6 : 0.0, t_done > ge ? (t_done - ge) / 1e6 : 0.0};
+        std::lock_guard<std::mutex> lk(g_ho.mu);
+        ++g_ho.n;
+        for (int s = 0; s < 4; ++s) {
+            g_ho.sum[s] += seg[s];
+            g_ho.mx[s] = std::max(g_ho.mx[s], seg[s]);
+        }
+        const bool bad_rel = sr > ready, bad_done = v > ready, bad_prev = k > 1 && dr + 1 < k;
+        g_ho.viol_release += bad_rel;
+        g_ho.viol_done += bad_done;
+        g_ho.viol_prev += bad_prev;
+        if (static_cast<int64_t>(k) <= trace || ((bad_rel || bad_done || bad_prev) && g_ho.viol_release + g_ho.viol_done + g_ho.viol_prev <= 20))
+            NXLOG_I(kTag, "frame %llu: first part %.2f ms, event to GPU %.2f, MetalFX GPU %.2f, to handler %.2f; semaphore %llu at release, %llu at "
+                          "completion (expected %llu), MetalFX done up to %llu at release%s",
+                    static_cast<unsigned long long>(k), seg[0], seg[1], seg[2], seg[3], static_cast<unsigned long long>(sr), static_cast<unsigned long long>(v),
+                    static_cast<unsigned long long>(ready), static_cast<unsigned long long>(dr), (bad_rel || bad_done || bad_prev) ? "  ORDER VIOLATION" : "");
+        if (g_ho.n % 600 == 0) {
+            NXLOG_I(kTag, "hand-off, last 600 frames (mean / max ms): first part %.2f / %.2f, event to GPU %.2f / %.2f, MetalFX GPU %.2f / %.2f, GPU end to "
+                          "handler %.2f / %.2f; order violations: at release %llu, at completion %llu, previous MetalFX unfinished %llu",
+                    g_ho.sum[0] / 600, g_ho.mx[0], g_ho.sum[1] / 600, g_ho.mx[1], g_ho.sum[2] / 600, g_ho.mx[2], g_ho.sum[3] / 600, g_ho.mx[3],
+                    static_cast<unsigned long long>(g_ho.viol_release), static_cast<unsigned long long>(g_ho.viol_done),
+                    static_cast<unsigned long long>(g_ho.viol_prev));
+            for (int s = 0; s < 4; ++s) g_ho.sum[s] = g_ho.mx[s] = 0;
         }
     }
 
