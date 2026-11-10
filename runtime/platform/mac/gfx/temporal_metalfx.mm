@@ -154,7 +154,10 @@ HandoffTimes g_ho;
 // command buffer sits on the GPU from its commit until the first part has run, and the GPU's watchdog aborts it when that takes long
 // (kIOGPUCommandBufferCallbackErrorTimeout). It did in a MetalFX play session (unified log) and in a scripted
 // run under load (frame 2080: the first part not done after 250 ms, the MetalFX command buffer aborted in the same millisecond, MetalFX
-// off). A command buffer committed when its input is ready never waits on the GPU.
+// off). With every 300th frame released 1.5 s late ([upscale] metalfx_stall_ms) the device was lost at the first such frame when
+// committed early, at the third when committed late (the rest of the frame still waits on Vulkan's queue for that long). A command buffer
+// committed when its input is ready never waits on the GPU; the hand-off costs the same (commit or event to MetalFX's GPU start 0.1 to
+// 0.2 ms on average either way).
 class Bridge {
 public:
     void start(gfx::Device* dev, VkSemaphore sem) {
@@ -312,7 +315,7 @@ public:
             if (sync != "host")
                 NXLOG_I(kTag, "no MTLSharedEvent of the semaphore (VK_EXT_metal_objects %s, export %s): the host round trip is used",
                         dev.features().metal_objects ? "on" : "off", can_events ? "gave none or another device's" : "not tried");
-            late_commit_ = config_get_str("upscale", "metalfx_commit", "early") == "late";   // (default early until the A/B is in)
+            late_commit_ = config_get_str("upscale", "metalfx_commit", "late") != "early";
             if (!late_commit_) {
                 own_event_ = [mdev_ newSharedEvent];
                 if (!own_event_) return fail("no MTLSharedEvent");
