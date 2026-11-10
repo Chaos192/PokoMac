@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace nxrt::gfx { struct Image; }
 
@@ -117,6 +118,7 @@ bool temporal_metalfx_available();     // the GPU supports MetalFX's temporal sc
 const char* temporal_metalfx_why();    // why MetalFX does not run, or null while nothing failed
 void temporal_shutdown();              // the temporal pass's and MetalFX's objects (NVN back end tear-down: render thread, device idle)
 void temporal_metalfx_shutdown();      // MetalFX's part of it
+std::string temporal_metalfx_report(); // the state of MetalFX's hand-off for the freeze report (empty when it never ran)
 #endif
 bool temporal_dlss_started();   // Streamline was initialised before the Vulkan instance (needed for DLSS; set by streamline_preinit)
 

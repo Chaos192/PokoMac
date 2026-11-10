@@ -904,6 +904,10 @@ namespace {
 
 // The recording in progress (submit_on_render_thread), which split_prepare and split_recording act on. A recording can run inside another
 // (a texture dump inside a render job): the outer one is restored afterwards.
+// the last split, for the freeze report (gpu_report)
+std::atomic<uint64_t> g_splits{0}, g_split_serial{0}, g_split_signal{0}, g_split_ns{0};
+std::atomic<int> g_split_result{0};   // the first part's vkQueueSubmit2 result (1: not submitted yet)
+
 struct RecordingScope {
     Frame* frame;
     bool signalled;
@@ -989,6 +993,7 @@ void submit_part(VkCommandBuffer cb, Waits waits, VkSemaphore signal, uint64_t v
             nxrt::hitch_phase_add(nxrt::kHpRenderLockWait, nxrt::hitch_ticks() - tl);
             r = vkQueueSubmit2(g->dev->queue(), 1, &si, VK_NULL_HANDLE);
         }
+        g_split_result.store(static_cast<int>(r));
         if (r == VK_SUCCESS) return;
         if (!g->dev->device_lost()) {
             g->dev->note_result(r, "vkQueueSubmit2 (NVN split)");
@@ -1029,6 +1034,11 @@ VkCommandBuffer split_recording(VkCommandBuffer cb, VkSemaphore signal, uint64_t
         i.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
         waits.push_back(i);
     }
+    g_splits.fetch_add(1);
+    g_split_serial.store(f.serial);
+    g_split_signal.store(signal_value);
+    g_split_ns.store(steady_ns());
+    g_split_result.store(1);
     submit_part(cb, std::move(waits), signal, signal_value);
     g->ctr.submits.fetch_add(1);
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -1421,6 +1431,16 @@ std::string gpu_report() {
                       static_cast<unsigned long long>(g->sw->submitted()), g->sw->depth());
         out += b;
     }
+    if (const uint64_t sp = g_split_serial.load()) {
+        std::snprintf(b, sizeof b, "recording splits: %llu; the last split submission %llu, its first part (signals %llu) handed to the queue %.0f ms ago, result %d\n",
+                      static_cast<unsigned long long>(g_splits.load()), static_cast<unsigned long long>(sp),
+                      static_cast<unsigned long long>(g_split_signal.load()), static_cast<double>(steady_ns() - g_split_ns.load()) / 1e6,
+                      g_split_result.load());
+        out += b;
+    }
+#if defined(__APPLE__)
+    out += extras::temporal_metalfx_report();
+#endif
     return out;
 }
 }  // namespace

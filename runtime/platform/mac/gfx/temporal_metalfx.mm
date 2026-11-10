@@ -81,6 +81,22 @@ void set_why(const char* fmt, ...) {
     NXLOG_W(kTag, "MetalFX off: %s", buf);
 }
 
+// What the hand-off is doing, for the freeze report (temporal_metalfx_report) and the stall lines below. Written by the render thread (issued,
+// committed), the helper thread (waiting, released) and Metal's completion thread (completed, status); read by the watchdog.
+struct Diag {
+    std::atomic<uint64_t> issued{0};        // frame k last handed to MetalFX (its first part signals 2k - 1, its rest waits for 2k)
+    std::atomic<uint64_t> committed_ns{0};  // when that frame's Metal command buffer was committed
+    std::atomic<uint64_t> waiting{0};       // helper thread: the semaphore value it waits for now (0: idle)
+    std::atomic<uint64_t> waiting_ns{0};    // since when
+    std::atomic<uint64_t> released{0};      // helper thread: frames whose Metal command buffer it let start
+    std::atomic<uint64_t> completed{0};     // Metal: the last frame whose command buffer completed
+    std::atomic<int64_t> status{-1};        // its MTLCommandBufferStatus (4 completed, 5 error)
+};
+Diag g_diag;
+uint64_t now_ns() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
 // The host round trip (no MTLSharedEvent of the semaphore: KosmicKrisp). Each job waits on the CPU until the first part of a frame has run
 // (the semaphore reaches `wait`) and then sets our event, which the already committed Metal command buffer waits for. One thread, jobs in
 // frame order; it waits in slices so a lost device cannot keep it forever.
@@ -130,12 +146,35 @@ private:
             wi.semaphoreCount = 1;
             wi.pSemaphores = &sem_;
             wi.pValues = &j.wait;
+            const uint64_t t0 = now_ns();
+            g_diag.waiting_ns.store(t0);
+            g_diag.waiting.store(j.wait);
+            bool told = false;
             for (;;) {
                 const VkResult r = vkWaitSemaphores(dev_->device(), &wi, 100'000'000ull);
-                if (r == VK_TIMEOUT && !dev_->device_lost()) continue;
+                if (r == VK_TIMEOUT && !dev_->device_lost()) {
+                    // a frame's first part takes a few ms: a quarter of a second means the Vulkan queue is not reaching it
+                    if (!told && now_ns() - t0 > 250'000'000ull) {
+                        told = true;
+                        uint64_t v = 0;
+                        const VkResult rv = vkGetSemaphoreCounterValue(dev_->device(), sem_, &v);
+                        NXLOG_W(kTag, "frame %llu: the Vulkan work before MetalFX has not finished after 250 ms (semaphore %llu%s, waiting for %llu); "
+                                      "MetalFX frames released %llu, completed %llu (status %lld), issued %llu",
+                                static_cast<unsigned long long>(j.ev_value), static_cast<unsigned long long>(v), rv == VK_SUCCESS ? "" : " (unreadable)",
+                                static_cast<unsigned long long>(j.wait), static_cast<unsigned long long>(g_diag.released.load()),
+                                static_cast<unsigned long long>(g_diag.completed.load()), static_cast<long long>(g_diag.status.load()),
+                                static_cast<unsigned long long>(g_diag.issued.load()));
+                    }
+                    continue;
+                }
                 if (r != VK_SUCCESS && !dev_->device_lost()) NXLOG_E(kTag, "vkWaitSemaphores failed (%d): MetalFX goes on without the wait", static_cast<int>(r));
+                if (r != VK_SUCCESS)
+                    NXLOG_E(kTag, "frame %llu: the wait for its first part (semaphore %llu) ended with %d after %.0f ms", static_cast<unsigned long long>(j.ev_value),
+                            static_cast<unsigned long long>(j.wait), static_cast<int>(r), static_cast<double>(now_ns() - t0) / 1e6);
                 break;
             }
+            g_diag.waiting.store(0);
+            g_diag.released.store(j.ev_value);
             j.ev.signaledValue = j.ev_value;   // (also after a failure: the Metal command buffer and the rest of the frame must not hang)
         }
     }
@@ -568,11 +607,15 @@ private:
             const bool gpu_signal = vk_event_ != nil;
             MetalFx* me = this;   // the backend lives as long as the process
             [mcb addCompletedHandler:^(id<MTLCommandBuffer> b) {
+                g_diag.completed.store(k);
+                g_diag.status.store(static_cast<int64_t>(b.status));
                 const bool ok = b.status == MTLCommandBufferStatusCompleted;
                 if (!ok) me->failed_on_gpu(b);
                 if (!gpu_signal || !ok) me->signal_done(done);   // KosmicKrisp: the rest of the frame runs after this
             }];
             [mcb commit];
+            g_diag.issued.store(k);
+            g_diag.committed_ns.store(now_ns());
             last_ = mcb;
             if (!vk_event_) bridge_.push(ready, own_event_, k);
         }
@@ -660,6 +703,23 @@ bool temporal_metalfx_available() {
 const char* temporal_metalfx_why() {
     std::lock_guard<std::mutex> lk(g_why_mu);
     return g_why.empty() ? nullptr : g_why.c_str();
+}
+
+std::string temporal_metalfx_report() {
+    if (!g_inst || !g_diag.issued.load()) return {};
+    char b[512];
+    const uint64_t now = now_ns(), w = g_diag.waiting.load(), c = g_diag.committed_ns.load();
+    std::snprintf(b, sizeof b, "MetalFX: frame %llu issued %.0f ms ago, released %llu, completed %llu (status %lld)%s",
+                  static_cast<unsigned long long>(g_diag.issued.load()), c ? static_cast<double>(now - c) / 1e6 : 0.0,
+                  static_cast<unsigned long long>(g_diag.released.load()), static_cast<unsigned long long>(g_diag.completed.load()),
+                  static_cast<long long>(g_diag.status.load()), w ? "" : ", helper thread idle\n");
+    std::string out = b;
+    if (w) {
+        std::snprintf(b, sizeof b, ", helper thread waiting for semaphore %llu for %.0f ms\n", static_cast<unsigned long long>(w),
+                      static_cast<double>(now - g_diag.waiting_ns.load()) / 1e6);
+        out += b;
+    }
+    return out;
 }
 
 void temporal_metalfx_shutdown() {

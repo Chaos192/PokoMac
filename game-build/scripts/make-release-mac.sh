@@ -5,7 +5,7 @@
 #   cmake --build build/mac --target pkp_rt                                         -> build/mac/libpkp_rt.dylib
 #   tools/shaders/scripts/setup_ryujinx.sh <ryubing checkout> &&
 #     dotnet publish -c Release -r osx-arm64 --self-contained true tools/shaders/harness/SpirvHarness.csproj -o build/mac-harness
-#   game-build/scripts/make-release-mac.sh [--no-build] [--app <PokoMac.app>] [--rt <libpkp_rt.dylib>] [--harness <dir>]
+#   game-build/scripts/make-release-mac.sh [--no-build] [--keep-app] [--app <PokoMac.app>] [--rt <libpkp_rt.dylib>] [--harness <dir>]
 #       [--vulkan-sdk <SDK>/macOS] [--kbm-icons <dir>] [--out <dir>] [--cache <dir>]
 #
 # The version comes from one place, VERSION in the repository root. The script stamps it into launcher/src-tauri/tauri.conf.json and
@@ -52,6 +52,7 @@ out="$root/release" cache="$root/build/mac-release-cache"
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-build) build=0; shift;;
+        --keep-app) keep_app=1; shift;;
         --app) app="$2"; shift 2;;
         --rt) rt="$2"; shift 2;;
         --harness) harness="$2"; shift 2;;
@@ -209,3 +210,13 @@ ditto -c -k --keepParent "$pkg" "$out/$name.zip"
 hash=$(shasum -a 256 "$out/$name.zip" | cut -d' ' -f1)
 echo "$hash *$name.zip" > "$out/$name.zip.sha256"
 echo "wrote $out/$name.zip ($(( $(stat -f %z "$out/$name.zip") / 1048576 )) MiB), sha256 $hash, launcher version $app_version"
+
+# The zip is the product: the .app copies the build left behind (Tauri's bundle, the packing folder's) are removed and taken out of
+# Launch Services, so Launchpad and Spotlight show only the installed app. --keep-app keeps both (a later --no-build needs Tauri's).
+lsreg=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+for left in "$launcher/src-tauri/target/release/bundle/macos/$APP" "$pkg/$APP"; do
+    [ "${keep_app:-0}" = 1 ] && continue
+    [ -d "$left" ] || continue
+    "$lsreg" -u "$left" >/dev/null 2>&1 || true
+    rm -rf "$left"
+done
