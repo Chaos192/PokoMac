@@ -624,9 +624,9 @@ pub fn prepare(game_dir: &Path, tools_dir: &Path, cancel: &AtomicBool) -> Result
     }
 }
 
-/// macOS: the pipelines of the seed that ships with the app (Resources/runtime/pipeline_seed.nxpk: the title, a new game, the
-/// character creator and the first area) built once before play: `pkp --prepare-pipelines --if-needed` (runtime nvn_prewarm.cpp
-/// prewarm_prepare). On Metal a pipeline's first build is Apple's compiler working through MSL source, hundreds of milliseconds each
+/// macOS: the pipelines of the player's key file, with the seed that ships with the app merged in (Resources/runtime/pipeline_seed.nxpk:
+/// the title, a new game, the character creator and the first area), built once before play: `pkp --prepare-pipelines --if-needed`
+/// (runtime nvn_prewarm.cpp prewarm_prepare). On Metal a pipeline's first build is Apple's compiler working through MSL source, hundreds of milliseconds each
 /// and a few take minutes, and the game skips a draw whose pipeline is still being built, so without this a first start showed the
 /// opening and the character creator with things missing for minutes. macOS keeps what was compiled in its own cache, and a state
 /// file per Vulkan driver next to the key file (pipelines-<driver>.state) makes the next call quick. `progress(done, total)`. Ok(None) = cancelled.

@@ -126,8 +126,8 @@ pub fn start(app: &AppHandle, game_dir: &Path, minimize: bool) -> Result<(), Str
             Err(e) => format!(" Shaders were not prepared: {}.", e),
             _ => String::new(),
         };
-        // macOS: the seed's pipelines that are not compiled yet (a setup from before the seed, an update that brought a bigger one, or
-        // ones that waited for a shader the last run translated); a quick check when there are none (shaders.rs prepare_pipelines)
+        // macOS: the key file's pipelines that are not compiled yet (the ones the last session recorded, an update that brought a bigger
+        // seed, or ones that waited for a shader the last run translated); a quick check when there are none (shaders.rs prepare_pipelines)
         if let Err(e) = crate::shaders::prepare_pipelines(&dir, &tools, &std::sync::atomic::AtomicBool::new(false), None, |done, total| {
             set_status(&app2, Status { state: "running".into(), message: format!("Compiling the game's graphics for Metal: {} of {}...", done, total), ..Default::default() });
         }) {

@@ -301,9 +301,9 @@ int prepare_shaders_main(bool if_needed, int threads, const std::string& program
     return rc;
 }
 
-// --prepare-pipelines: no game, no window. The seed key file that ships with the release is merged into the player's key file and each of
-// its pipelines is built once on a headless device (nxrt/nvn_backend.h prepare_pipelines), so the driver and macOS have them compiled
-// before the first start. The same "prepare: <done> <total>" progress lines as --prepare-shaders; the end is "prepare: done ..." or
+// --prepare-pipelines: no game, no window. The seed key file that ships with the release is merged into the player's key file and every
+// pipeline of that key file is built once on a headless device (nxrt/nvn_backend.h prepare_pipelines), so the driver and macOS have them
+// compiled before the game starts. The same "prepare: <done> <total>" progress lines as --prepare-shaders; the end is "prepare: done ..." or
 // "prepare: ready" (nothing left to build). Exit code: 0 done or ready, 1 could not run, 3 cancelled.
 int prepare_pipelines_main(bool if_needed, int threads) {
     std::string err;

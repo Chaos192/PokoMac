@@ -5,6 +5,7 @@
 // Configuration (config.h): [gfx] hidden / NXRT_GFX_HIDDEN=1 creates the window hidden (automated tests).
 #pragma once
 #include <cstdint>
+#include <string>
 
 namespace nxrt::platform {
 
@@ -89,6 +90,12 @@ const char* const* vulkan_instance_extensions(uint32_t* count);
 bool mac_load_vulkan();
 // macOS: lets Metal's compiler service run as many shader compilations at once as the GPU allows (platform/mac/gfx/metal_mac.mm).
 void mac_metal_tune();
+// macOS: logs once which file of Metal's shader cache this process uses (Metal opens it at the first compilation, so this is called after
+// each pipeline until it has), with a warning when that is not where --prepare-pipelines compiled to (platform/mac/gfx/metal_mac.mm).
+void mac_metal_cache_report();
+// macOS: what Metal's shader cache of this program depends on (its identity, the macOS build, the creation of its cache folder), for the
+// state file of --prepare-pipelines: when it changes, what was compiled before is not in the cache any more.
+std::string mac_metal_cache_key();
 // macOS: the calling thread gets user-interactive QoS (the performance cores) and a real-time time-constraint policy with this period
 // and per-period budget ([gfx] render_thread_policy; platform/mac/core/thread_mac.cpp).
 void mac_realtime_thread(const char* what, double period_ms, double budget_ms);

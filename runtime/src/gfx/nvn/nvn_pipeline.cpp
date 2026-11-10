@@ -41,6 +41,7 @@
 #include "nxrt/gauge.h"
 #include "nxrt/host_device.h"
 #include "nxrt/log.h"
+#include "nxrt/platform.h"
 #include "nvn_format_guard.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_spirv_patch.h"
@@ -775,6 +776,19 @@ void note_pipeline_created(double ms, const char* what) {
     NXLOG_D(kTag, "%s created in %.1f ms", what, ms);
 }
 
+// For the slow pipeline lines: the driver's VkPipelineCache had the pipeline (creation feedback), so the time went into Apple's compiler,
+// whose own cache did not have it (KosmicKrisp's VkPipelineCache keeps MSL source; Metal compiles it again unless its cache has it).
+static const char* cache_hit_note(const VkPipelineCreationFeedback& fb) {
+    return (fb.flags & VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT) ? "; in the pipeline cache, so Metal compiled it again" : "";
+}
+
+// After every pipeline the driver made: on macOS, once Metal has opened its shader cache, which file of it this process uses.
+static void after_pipeline_built() {
+#if defined(__APPLE__)
+    nxrt::platform::mac_metal_cache_report();
+#endif
+}
+
 VkPipeline build_graphics_pipeline(const GraphicsKey& key, const ProgLayout& layout) {
     ensure_cache();
     const auto t0 = std::chrono::steady_clock::now();
@@ -866,6 +880,10 @@ VkPipeline build_graphics_pipeline(const GraphicsKey& key, const ProgLayout& lay
     ri.depthAttachmentFormat = static_cast<VkFormat>(key.depth_format);
     ri.stencilAttachmentFormat = static_cast<VkFormat>(key.stencil_format);
 
+    VkPipelineCreationFeedback fb = {};
+    VkPipelineCreationFeedbackCreateInfo fbi = {VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO};
+    fbi.pPipelineCreationFeedback = &fb;
+    ri.pNext = &fbi;                       // whether the VkPipelineCache had it, for the slow pipeline line
     VkGraphicsPipelineCreateInfo gi = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &ri};
     gi.stageCount = ns;
     gi.pStages = stages;
@@ -890,13 +908,14 @@ VkPipeline build_graphics_pipeline(const GraphicsKey& key, const ProgLayout& lay
     } else {
         counters().pipelines_created.fetch_add(1);
         g_cache_dirty.store(true, std::memory_order_relaxed);
-    g_new_since_save.fetch_add(1, std::memory_order_relaxed);
+        g_new_since_save.fetch_add(1, std::memory_order_relaxed);
         g_pipes_created.add(1);
+        after_pipeline_built();
         // A build of seconds is worth a line of its own: on Metal (KosmicKrisp hands MSL source to Apple's compiler) a few of the game's
         // pipelines take minutes the first time, which is why the setup builds the known ones ahead (--prepare-pipelines).
         if (ms_taken >= 3000.0)
-            NXLOG_W(kTag, "slow graphics pipeline: %.1f s (vs %s fs %s gs %s, %u colour targets)", ms_taken / 1000.0, key.stage[0] ? key.stage[0]->hash.c_str() : "-",
-                    key.stage[1] ? key.stage[1]->hash.c_str() : "-", key.stage[2] ? key.stage[2]->hash.c_str() : "-", key.color_count);
+            NXLOG_W(kTag, "slow graphics pipeline: %.1f s (vs %s fs %s gs %s, %u colour targets)%s", ms_taken / 1000.0, key.stage[0] ? key.stage[0]->hash.c_str() : "-",
+                    key.stage[1] ? key.stage[1]->hash.c_str() : "-", key.stage[2] ? key.stage[2]->hash.c_str() : "-", key.color_count, cache_hit_note(fb));
         else
             NXLOG_D(kTag, "graphics pipeline created in %.1f ms (vs %s fs %s)", ms_taken, key.stage[0] ? key.stage[0]->hash.c_str() : "-",
                     key.stage[1] ? key.stage[1]->hash.c_str() : "-");
@@ -1011,6 +1030,10 @@ VkPipeline create_compute(const ShaderInfo* cs, const ProgLayout& layout) {
     ci.stage.module = m;
     ci.stage.pName = "main";
     ci.layout = layout.layout;
+    VkPipelineCreationFeedback fb = {};
+    VkPipelineCreationFeedbackCreateInfo fbi = {VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO};
+    fbi.pPipelineCreationFeedback = &fb;
+    ci.pNext = &fbi;                       // whether the VkPipelineCache had it, for the slow pipeline line
     const uint64_t tp0 = nxrt::hitch_ticks();
     const auto tc0 = std::chrono::steady_clock::now();
     const VkResult cr = vkCreateComputePipelines(vkdev(), g_cache, 1, &ci, nullptr, &pipe);
@@ -1020,7 +1043,8 @@ VkPipeline create_compute(const ShaderInfo* cs, const ProgLayout& layout) {
         return VK_NULL_HANDLE;
     }
     if (const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - tc0).count(); s >= 3.0)
-        NXLOG_W(kTag, "slow compute pipeline: %.1f s (cs %s)", s, cs->hash.c_str());   // see the slow graphics pipeline line
+        NXLOG_W(kTag, "slow compute pipeline: %.1f s (cs %s)%s", s, cs->hash.c_str(), cache_hit_note(fb));   // see the slow graphics pipeline line
+    after_pipeline_built();
     counters().pipelines_created.fetch_add(1);
     ++g_pipeline_count;
     g_pipes_created.add(1);

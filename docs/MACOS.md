@@ -68,18 +68,29 @@ the pipelines are built before they are needed:
 
 - **Set up compiles the opening ahead.** The release carries `pipeline_seed.nxpk`: the pipeline keys (shader hashes and render state, no
   shader code) of the title, a new game, the character creator and the first area, recorded on this port. Set up runs
-  `pkp --prepare-pipelines`, which adds them to the player's own key file and builds each once on a headless device (about 50 s with
-  KosmicKrisp and 20 s with MoltenVK on an M5 Max). macOS keeps the compiled code in its own Metal cache, so at Play the game's prewarm
-  finds them in well under a second. A state file per driver (`pipelines-<driver>.state`) records what was built; every Play runs the
-  same command with `--if-needed`, which only builds what is new (an update with a larger seed, a driver update, or keys that waited for a
-  shader the game makes while it runs).
+  `pkp --prepare-pipelines`, which adds them to the player's own key file and builds every pipeline of that key file once on a headless
+  device, with the same function the game's prewarm uses at start (about 50 s with KosmicKrisp and 20 s with MoltenVK on an M5 Max). A
+  state file per driver (`pipelines-<driver>.state`) records what was built; every Play runs the same command with `--if-needed`, which
+  only builds what is new: the keys the last session recorded, an update with a larger seed, a driver or macOS update, or keys that
+  waited for a shader the game makes while it runs. The game's prewarm then finds every pipeline it builds at start compiled already.
+- **Metal's shader cache.** KosmicKrisp's `VkPipelineCache` (`pipeline_cache.bin`) keeps only the MSL source of a pipeline; Apple's
+  compiler turns it into GPU code again in every process unless Metal's own cache has it. That cache lives under the user's cache folder
+  (`getconf DARWIN_USER_CACHE_DIR`) in a folder per program identity, split into numbered files (`functions.data`, `functions1.data`, ...):
+  a process takes the first file no other running process of that folder holds and looks only in that file. Programs without an identity
+  all share one folder, so the game used to find what `--prepare-pipelines` compiled only when it got the same file, which any other such
+  program running at the time (a second game, a tool from a terminal) prevented, and then compiled every pipeline again while it loaded.
+  The game therefore has an identity of its own, one per game folder (`io.github.chaos192.pokomac.game.<hash>`, an Info.plist that Set
+  up's build links into `pkp`: `game-build/release_b/pkp_build.py` `write_identity`). The log says which cache file a process uses
+  (`Metal shader cache: ...`) and warns when it is not the first one; the state file's key includes the identity, the macOS build and the
+  cache folder's creation time, so a new compiler or an emptied cache builds everything again before Play.
 - **Shaders the game makes while it runs** are translated during play, every few seconds (`launcher/src-tauri/src/shaders.rs`
   `translate_live`), and the running game picks them up; the Windows build only does this between sessions.
 - **More builds at once.** Metal's compiler service runs as many compilations at once as the GPU allows (`shouldMaximizeConcurrentCompilation`,
   `runtime/platform/mac/gfx/metal_mac.mm`; MoltenVK's own setting too), the pipeline prewarm uses up to 8 threads and the in-play builds
   (`[nvn] async_whole_threads`) 8, so one slow pipeline never holds up the others. MoltenVK compiles under the lock of the
   `VkPipelineCache` a pipeline is made with, so with MoltenVK pipelines are made without one (`[nvn] pipeline_cache_moltenvk`).
-- A build of 3 s or more is logged (`slow graphics pipeline` / `slow compute pipeline`).
+- A build of 3 s or more is logged (`slow graphics pipeline` / `slow compute pipeline`), with `in the pipeline cache, so Metal compiled it
+  again` when the `VkPipelineCache` had it (Metal's cache did not).
 
 Apple's GPUs render in tiles: ending a render pass stores the tiles to memory and the next pass on the same targets loads them again.
 

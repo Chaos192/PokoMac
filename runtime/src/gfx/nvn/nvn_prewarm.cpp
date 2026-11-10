@@ -37,6 +37,7 @@
 #include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
+#include "nxrt/platform.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_pipeline.h"
 
@@ -221,8 +222,8 @@ void append_record(const Rec& r) { append_records(&r, 1); }
 // [nvn] pipeline_seed (default pipeline_seed.nxpk, next to the game; the macOS release ships one): a key file of the pipelines the
 // title, a new game and the first area use, recorded on a full play of them. Its records the player's own key file does not have yet are
 // added to it (in memory and on disk), so a first start builds them ahead like keys it recorded itself. Hashes and plain state only: no
-// shader code. g_mu held. Returns how many were added; *seed_out gets the seed's records (for --prepare-pipelines).
-size_t merge_seed_locked(std::vector<Rec>* seed_out = nullptr) {
+// shader code. g_mu held. Returns how many were added.
+size_t merge_seed_locked() {
     const std::string seed = config_get_str("nvn", "pipeline_seed", "pipeline_seed.nxpk");
     if (seed.empty()) return 0;
     std::vector<Rec> rs;
@@ -235,8 +236,29 @@ size_t merge_seed_locked(std::vector<Rec>* seed_out = nullptr) {
         fresh.push_back(r);
     }
     append_records(fresh.data(), fresh.size());
-    if (seed_out) *seed_out = std::move(rs);
     return fresh.size();
+}
+
+// One record built ahead, the same way for the boot prewarm (worker_main) and --prepare-pipelines (prewarm_prepare), so the second builds
+// exactly the pipelines the first asks the driver for: a compute record into the compute pipelines (compute_build_ahead: a dispatch finds
+// it by shader content and layout), a graphics record whole from stand-in shaders (*out; null when it failed). *have: false when a shader
+// of the record is not in the shader cache yet (a run-time shader not translated so far). True when the pipeline was built.
+bool build_record(const Rec& r, bool* have, VkPipeline* out) {
+    NXFT("prewarm.build");
+    *have = false;
+    *out = VK_NULL_HANDLE;
+    if (!shader_cache().is_open()) return false;
+    if (r.h[0] == kComputeTag) {
+        const ShaderInfo* cs = shader_cache().load_stub(hex16(r.h[1]));
+        *have = cs != nullptr;
+        return cs && compute_build_ahead(cs, r.h[2]);
+    }
+    GraphicsKey k;
+    const ProgLayout* pl = nullptr;
+    if (!stub_key(r, k, pl)) return false;
+    *have = true;
+    *out = build_graphics_pipeline(k, *pl);
+    return *out != VK_NULL_HANDLE;
 }
 
 void worker_main() {
@@ -253,38 +275,19 @@ void worker_main() {
             if (j->state != 0) continue;       // built already (it was moved ahead) or a draw took it over
             j->state = 1;
         }
-        if (j->compute) {                      // into the compute pipelines; a dispatch finds it by shader content and layout
-            bool ok = false;
-            {
-                NXFT("prewarm.build");
-                const ShaderInfo* cs = shader_cache().is_open() ? shader_cache().load_stub(hex16(j->rec.h[1])) : nullptr;
-                ok = cs && compute_build_ahead(cs, j->rec.h[2]);
-            }
-            {
-                std::lock_guard<std::mutex> lk(g_mu);
-                j->state = 2;
-                if (ok) ++g_stats.built; else ++g_stats.failed;
-            }
-            g_cv.notify_all();
-            continue;
-        }
+        bool have = false;
         VkPipeline p = VK_NULL_HANDLE;
-        {
-            NXFT("prewarm.build");
-            GraphicsKey k;
-            const ProgLayout* pl = nullptr;
-            if (stub_key(j->rec, k, pl)) p = build_graphics_pipeline(k, *pl);
-        }
+        const bool ok = build_record(j->rec, &have, &p);
         {
             std::lock_guard<std::mutex> lk(g_mu);
             j->state = 2;
-            if (p) ++g_stats.built; else ++g_stats.failed;
+            if (ok) ++g_stats.built; else ++g_stats.failed;
             if (j->up) {                       // a draw linked it meanwhile: this one replaces the linked one (gpl_take_upgrade)
                 j->up->pipe = p;
                 j->up->state.store(1, std::memory_order_release);
                 j->up.reset();
             } else {
-                j->pipe = p;
+                j->pipe = p;                   // a compute record leaves it null: the compute pipelines hold its pipeline
             }
         }
         g_cv.notify_all();
@@ -598,10 +601,11 @@ PrewarmStats prewarm_stats() {
 
 // ---- --prepare-pipelines (nxrt/nvn_backend.h prepare_pipelines) -----------------------------------------------------------------
 namespace {
-constexpr int kPipelinesScheme = 1;
+constexpr int kPipelinesScheme = 2;   // 2: every record of the key file, and Metal's cache in the key
 
-// What the state file is valid for: the GPU, the driver (its version and pipeline cache UUID change with an update, and macOS drops
-// compiled Metal code with a new compiler) and the settings that change every shader module.
+// What the state file is valid for: the GPU, the driver (its version and pipeline cache UUID change with an update), the settings that change
+// every shader module and, on macOS, Metal's shader cache of this program (a macOS update brings a new compiler and an empty cache; a cache
+// folder made anew lost what was compiled before).
 std::string pipelines_state_key() {
     const VkPhysicalDeviceProperties& p = device().properties();
     char uuid[40];
@@ -609,7 +613,11 @@ std::string pipelines_state_key() {
     char b[512];
     std::snprintf(b, sizeof b, "scheme=%d gpu=%s driver=%u api=%u cache=%s salt=%s reduced=%d", kPipelinesScheme, p.deviceName, p.driverVersion,
                   p.apiVersion, uuid, config_get_str("nvn", "spirv_salt", "").c_str(), config_get_bool("nvn", "reduced_precision", false) ? 1 : 0);
+#if defined(__APPLE__)
+    return std::string(b) + " " + nxrt::platform::mac_metal_cache_key();
+#else
     return b;
+#endif
 }
 
 // The digests of the records the state file lists as built (or failed for good), when it was written for this key.
@@ -647,13 +655,17 @@ bool prewarm_prepare(const nxrt::nvn::PipelinePrepareOptions& o, nxrt::nvn::Pipe
     nxrt::nvn::PipelinePrepareResult& r = res ? *res : local;
     r = nxrt::nvn::PipelinePrepareResult{};
     if (!shader_cache().is_open()) { r.error = "no shader cache is open"; return false; }
-    std::vector<Rec> seed;
+    // Every record the boot prewarm builds (prewarm_init): the player's key file with the seed merged in, so a start finds every pipeline it
+    // builds ahead compiled already, those the last session recorded included.
+    std::vector<Rec> recs;
     {
         std::lock_guard<std::mutex> lk(g_mu);
         g_path = config_get_str("nvn", "pipeline_keys", "pipeline_keys.bin");
         if (g_path.empty()) { r.error = "[nvn] pipeline_keys is empty: there is no key file to prepare"; return false; }
         load_file();
-        r.added = merge_seed_locked(&seed);
+        r.added = merge_seed_locked();
+        recs = g_cs_recs;
+        recs.insert(recs.end(), g_recs.begin(), g_recs.end());
     }
     // one state file per Vulkan driver (pipelines-KosmicKrisp.state, pipelines-MoltenVK.state): each compiles its own MSL, and a player
     // who switches drivers and back keeps what the first one built
@@ -675,7 +687,7 @@ bool prewarm_prepare(const nxrt::nvn::PipelinePrepareOptions& o, nxrt::nvn::Pipe
     std::unordered_set<uint64_t> done = o.only_if_needed ? read_pipelines_state(state_path, key) : std::unordered_set<uint64_t>{};
     std::vector<Rec> todo;
     std::unordered_set<uint64_t> seen;
-    for (const Rec& rec : seed) {
+    for (const Rec& rec : recs) {
         const uint64_t d = digest_of(rec.h, rec.rest);
         if (!done.count(d) && seen.insert(d).second) todo.push_back(rec);
     }
@@ -685,8 +697,7 @@ bool prewarm_prepare(const nxrt::nvn::PipelinePrepareOptions& o, nxrt::nvn::Pipe
         if (o.only_if_needed && !std::filesystem::exists(state_path)) write_pipelines_state(state_path, key, done);
         return true;
     }
-    // compute records first (each far cheaper), then the graphics ones in file order: the title's first
-    std::stable_partition(todo.begin(), todo.end(), [](const Rec& x) { return x.h[0] == kComputeTag; });
+    // compute records first (each far cheaper; recs has them in front), then the graphics ones in file order: the title's first
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
     const int threads = o.threads > 0 ? o.threads : static_cast<int>(hw > 3 ? hw - 2 : 1);
     const auto t0 = std::chrono::steady_clock::now();
@@ -707,22 +718,11 @@ bool prewarm_prepare(const nxrt::nvn::PipelinePrepareOptions& o, nxrt::nvn::Pipe
             const size_t i = next.fetch_add(1);
             if (i >= todo.size()) break;
             const Rec& rec = todo[i];
-            bool have = false, ok = false;
+            bool have = false;
+            VkPipeline p = VK_NULL_HANDLE;
             const auto tb = std::chrono::steady_clock::now();
-            if (rec.h[0] == kComputeTag) {
-                const ShaderInfo* cs = shader_cache().load_stub(hex16(rec.h[1]));
-                have = cs != nullptr;
-                ok = have && compute_build_ahead(cs, rec.h[2]);
-            } else {
-                GraphicsKey k;
-                const ProgLayout* pl = nullptr;
-                have = stub_key(rec, k, pl);
-                if (have) {
-                    const VkPipeline p = build_graphics_pipeline(k, *pl);
-                    ok = p != VK_NULL_HANDLE;
-                    if (p) vkDestroyPipeline(vkdev(), p, nullptr);   // only its compilation is wanted: macOS and the pipeline cache keep it
-                }
-            }
+            const bool ok = build_record(rec, &have, &p);           // as the boot prewarm builds it
+            if (p) vkDestroyPipeline(vkdev(), p, nullptr);         // only its compilation is wanted: Metal's cache and the pipeline cache keep it
             if (std::chrono::steady_clock::now() - tb >= std::chrono::seconds(3)) slow.fetch_add(1);
             if (!have) {
                 missing.fetch_add(1);                 // not in the state: tried again once the game made that shader and it was translated
@@ -742,7 +742,7 @@ bool prewarm_prepare(const nxrt::nvn::PipelinePrepareOptions& o, nxrt::nvn::Pipe
         for (auto& t : pool) t.join();
     }
     if (built.load()) pipeline_cache_save();
-    write_pipelines_state(state_path, key, done);
+    write_pipelines_state(state_path, pipelines_state_key(), done);   // asked again: Metal made its cache folder at the first compilation
     if (o.progress) o.progress(n_done.load(), todo.size());
     r.built = built.load();
     r.missing_shaders = missing.load();
@@ -750,7 +750,7 @@ bool prewarm_prepare(const nxrt::nvn::PipelinePrepareOptions& o, nxrt::nvn::Pipe
     r.slow = slow.load();
     r.cancelled = cancel.load();
     r.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    NXLOG_I(kTag, "prepare pipelines: %llu of the seed to build, %llu built, %llu waiting for a run-time shader, %llu failed, %llu slow (3 s or more), "
+    NXLOG_I(kTag, "prepare pipelines: %llu of the key file to build, %llu built, %llu waiting for a run-time shader, %llu failed, %llu slow (3 s or more), "
                   "%llu added to %s, %.1f s on %d threads%s",
             static_cast<unsigned long long>(r.pipelines), static_cast<unsigned long long>(r.built), static_cast<unsigned long long>(r.missing_shaders),
             static_cast<unsigned long long>(r.failed), static_cast<unsigned long long>(r.slow), static_cast<unsigned long long>(r.added), g_path.c_str(),
