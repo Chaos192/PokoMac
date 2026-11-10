@@ -1868,7 +1868,10 @@ bool tsr_jitter(uint32_t* words, size_t n_words) {
     extras::scene_fraction(&fx, &fy);   // the scene's viewport is that part of the target: half a pixel of it
     const uint32_t w = std::max<uint32_t>(1, static_cast<uint32_t>(std::lround(e.width * fx)));
     const uint32_t h = std::max<uint32_t>(1, static_cast<uint32_t>(std::lround(e.height * fy)));
-    return extras::temporal_jitter_block(words, n_words, w, h, g_tsr_frame);
+    if (extras::temporal_jitter_block(words, n_words, w, h, g_tsr_frame)) return true;
+    // a scene draw whose block holds the view-projection alone (temporal_scene_vp_offset): only draws into the scene's depth target, so a
+    // shadow or reflection camera is never jittered
+    return g_tsr_depth && d == g_tsr_depth.get() && extras::temporal_jitter_scene_block(words, n_words, w, h, g_tsr_frame);
 }
 
 // Descriptor set number `set` of the bound program: the one of the last draw (SetMemo below), a set of this submission with the same contents (g_set_cache), or a new one.
@@ -2036,14 +2039,14 @@ VkDescriptorSet build_set_resolved(const ProgLayout& pl, uint32_t set) {
                         BufRef br = resolve_read(bind.addr, bind.size, kReadUniform);
                         const VkDeviceSize align = device().properties().limits.minUniformBufferOffsetAlignment;
                         const float ufs = ufs_scale_for(d, idx);
-                        const bool tsr = d.nvn_stage == kVertex && idx == 0 && bind.size >= 272 && extras::temporal_wanted() && S.depth_tex;
+                        const bool tsr = d.nvn_stage == kVertex && idx == 0 && bind.size >= 64 && extras::temporal_wanted() && S.depth_tex;
                         if (br.ok && (ufs != 1.0f || tsr)) {
                             // the game's scale on some floats of this block (nxrt/gfx_tuning.h): bound from a patched copy in the upload ring
                             const VkDeviceSize n = std::min<VkDeviceSize>({bind.size ? bind.size : 65536, br.avail, 65536});
                             UploadAlloc u = F->upload(n, std::max<VkDeviceSize>(align, 256));
                             if (u) {
                                 std::memcpy(u.ptr, host_ptr(bind.addr), n);
-                                if (tsr && n >= 272) tsr_jitter(reinterpret_cast<uint32_t*>(u.ptr), static_cast<size_t>(n / 4));   // temporal upscaling
+                                if (tsr && n >= 64) tsr_jitter(reinterpret_cast<uint32_t*>(u.ptr), static_cast<size_t>(n / 4));   // temporal upscaling
                                 const uint32_t mask = ufs != 1.0f ? nxrt::gfx::tuning().ufs_mask.load(std::memory_order_relaxed) : 0u;
                                 for (uint32_t i = 0; i < 32; ++i) {
                                     if (!(mask & (1u << i)) || (i + 1) * 4 > n) continue;
@@ -2586,6 +2589,78 @@ void temporal_gbuffer_note() {
     if (extras::temporal_camera_ready()) g_tsr_depth = S.depth_tex;
 }
 
+// [upscale] jitter_audit: which draws into the scene's depth target (the G-buffer's, g_tsr_depth) get the frame's jitter. A draw whose camera
+// is not a slot-0 camera block (extras::temporal_is_camera_block) keeps the unjittered camera, and a temporal upscaler then sees that surface
+// move by the jitter every frame. For each such vertex shader the audit looks for the scene's view-projection in its vertex uniform slots
+// and logs where it is, every 600 frames.
+struct JitterAudit {
+    struct Row { uint64_t draws = 0; std::string where; };
+    std::unordered_map<std::string, Row> rows;
+    uint64_t jittered = 0, plain = 0, since_frame = 0;
+};
+void jitter_audit_draw() {
+    static const bool on = nxrt::config_get_bool("upscale", "jitter_audit", false);
+    if (!on || !g_tsr_depth || S.depth_tex.get() != g_tsr_depth.get() || !S.stage[kVertex]) return;
+    static JitterAudit a;
+    const GState::Bind& u0 = S.ubo[kVertex][0];
+    bool cam = false;
+    if (u0.addr && u0.size >= 64) {
+        uint32_t w[68] = {};
+        const size_t nw = std::min<size_t>(68, u0.size / 4);
+        std::memcpy(w, host_ptr(u0.addr), nw * 4);
+        cam = (nw >= 68 && extras::temporal_is_camera_block(w, 68)) || extras::temporal_scene_vp_offset(w, nw) >= 0;
+    }
+    if (cam) {
+        ++a.jittered;
+    } else {
+        ++a.plain;
+        JitterAudit::Row& r = a.rows[S.stage[kVertex]->hash];
+        ++r.draws;
+        float vp[16];
+        if (r.where.empty() && extras::temporal_scene_view_projection(vp)) {
+            char b[96];
+            for (int slot = 0; slot < 16 && r.where.empty(); ++slot) {
+                const GState::Bind& u = S.ubo[kVertex][slot];
+                if (!u.addr || u.size < 64) continue;
+                const uint64_t n = std::min<uint64_t>(u.size, 16384);
+                const float* f = reinterpret_cast<const float*>(host_ptr(u.addr));
+                for (uint64_t off = 0; off + 64 <= n && r.where.empty(); off += 16) {
+                    const float* m = f + off / 4;
+                    bool same = true, transposed = true;
+                    for (int i = 0; i < 16 && (same || transposed); ++i) {
+                        const float tol = 1e-4f * std::max(1.0f, std::fabs(vp[i]));
+                        same &= std::fabs(m[i] - vp[i]) <= tol;
+                        transposed &= std::fabs(m[(i % 4) * 4 + i / 4] - vp[i]) <= tol;
+                    }
+                    if (same || transposed) {
+                        std::snprintf(b, sizeof b, "the scene view-projection%s in slot %d at +0x%llx", transposed && !same ? " (transposed)" : "", slot,
+                                      static_cast<unsigned long long>(off));
+                        r.where = b;
+                    }
+                }
+            }
+            if (r.where.empty()) {
+                std::snprintf(b, sizeof b, "no copy of the scene view-projection in its vertex uniforms (slot 0: %u bytes)", static_cast<unsigned>(u0.size));
+                r.where = b;
+            }
+        }
+    }
+    if (g_tsr_frame - a.since_frame < 600) return;
+    a.since_frame = g_tsr_frame;
+    std::vector<std::pair<std::string, JitterAudit::Row>> top(a.rows.begin(), a.rows.end());
+    std::sort(top.begin(), top.end(), [](const auto& x, const auto& y) { return x.second.draws > y.second.draws; });
+    std::string list;
+    for (size_t i = 0; i < top.size() && i < 10; ++i) {
+        char b[256];
+        std::snprintf(b, sizeof b, "\n  vs %s: %llu draws, %s", top[i].first.c_str(), static_cast<unsigned long long>(top[i].second.draws), top[i].second.where.c_str());
+        list += b;
+    }
+    NXLOG_I(kTag, "jitter audit, last 600 frames: draws into the scene depth %llu jittered, %llu not (%zu vertex shaders)%s",
+            static_cast<unsigned long long>(a.jittered), static_cast<unsigned long long>(a.plain), a.rows.size(), list.c_str());
+    a.rows.clear();
+    a.jittered = a.plain = 0;
+}
+
 // The game's scene covers only part of its targets (extras::scene_fraction, Pokopia's [upscale] scene_scale, #116): the part of a scene
 // image of size `scene` that holds it, and the size of the image the tone-map draw then needs, out / fraction, so that its own lookup at
 // uv * fraction lands on the upscaled result in that image's top-left out-sized corner. False: the whole image is the scene.
@@ -2875,7 +2950,10 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     if (!pl) return false;
     if (pl->c0_graphics && g_draw_base_instance != g_bank_base_instance) g_dirty |= kDesc;   // c[0] + 0x644 changed: new sets
     rs_.arm(pl);
-    if (extras::temporal_wanted()) temporal_gbuffer_note();
+    if (extras::temporal_wanted()) {
+        temporal_gbuffer_note();
+        jitter_audit_draw();
+    }
     if (g_dirty & (kDesc | kPipe)) {
         RpScope rp_(kRpPrep);
         g_prog_writes = false;

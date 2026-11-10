@@ -90,6 +90,10 @@ bool temporal_wanted();   // a temporal mode is selected
 // A G-buffer draw: `words` is the vertex stage's uniform slot 0 (bytes / 4 words). Keeps the first block that holds a valid camera this frame.
 void temporal_note_gbuffer(const uint32_t* words, size_t n_words);
 bool temporal_camera_ready();   // a camera was kept since the last evaluation
+// [upscale] jitter_audit: whether a block is a camera block the jitter is added to, and the scene's unjittered view-projection (column-
+// major floats, as the game stores it) of the latest G-buffer draw. False before the first one.
+bool temporal_is_camera_block(const uint32_t* words, size_t n_words);
+bool temporal_scene_view_projection(float out[16]);
 // The scene camera's jitter. Pokopia's own TAA jitter (0x7102574a18, written into a view object's projection at +0xc0) never reaches the
 // G-buffer camera block (its view-projection stays unjittered with the enable forced, run b7), so the runtime jitters every vertex uniform
 // slot 0 block that holds a valid camera: adds a Halton(2, 3) offset of the frame (8 phases at native size, more when upscaling, +-0.5 px of
@@ -97,6 +101,12 @@ bool temporal_camera_ready();   // a camera was kept since the last evaluation
 // [upscale] jitter = 0.
 uint32_t temporal_jitter_phase_count();
 bool temporal_jitter_block(uint32_t* words, size_t n_words, uint32_t width, uint32_t height, uint64_t frame);
+// A scene draw whose camera block is not that layout: most of Pokopia's ground and props keep only the view-projection, at +0x0 or
+// +0x10 of vertex slot 0 ([upscale] jitter_audit counted 4 of 5 scene draws). The offset of a perspective view-projection there (its w
+// row the camera's unit forward vector, its x and y rows perpendicular to it: no off-centre or jitter of the game's own), or -1.
+// temporal_jitter_scene_block adds the frame's jitter to it. The caller makes sure the draw renders into the scene's depth target.
+int temporal_scene_vp_offset(const uint32_t* words, size_t n_words);
+bool temporal_jitter_scene_block(uint32_t* words, size_t n_words, uint32_t width, uint32_t height, uint64_t frame);
 // The tone-map draw: colour (view in SHADER_READ_ONLY_OPTIMAL) and depth (depth-aspect view, layout depth_layout) of the scene, the part of
 // them that is upscaled being `render` from texel 0, 0; depth_neg_one: NVN depth mode NEAR_IS_MINUS_W (NDC z = 2 d - 1). Returns the result
 // (`out` large, in the top-left of an image of out_tex when that is larger; GENERAL layout, readable by fragment shaders after the recorded

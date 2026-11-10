@@ -136,6 +136,8 @@ struct State {
     uint32_t phases = 0;
     double phase_seen[32][2] = {};
     std::chrono::steady_clock::time_point last_eval{};
+    bool have_audit_vp = false;
+    float audit_vp[16] = {};   // the scene's unjittered view-projection, for [upscale] jitter_audit
     UpscaleMode last_mode = UpscaleMode::Off;
     VkExtent2D max_render = {}, last_out = {};
     bool logged_handover = false;
@@ -364,6 +366,58 @@ double radical_inverse(uint32_t i, uint32_t base) {
 
 // The game's own jitter does not reach the G-buffer camera (see temporal.h), so the runtime jitters it: Halton(2, 3), 8 phases at native
 // size and ceil(8 * ratio^2) when upscaling (at most 64), +-0.5 px.
+namespace {
+// The frame's jitter in NDC: Halton(2, 3) over the phase count, +-0.5 px of width x height.
+void frame_jitter(uint32_t width, uint32_t height, uint64_t frame, double* jx, double* jy) {
+    const uint32_t phases = temporal_jitter_phase_count();
+    const uint32_t idx = static_cast<uint32_t>(frame % phases) + 1;
+    *jx = (2.0 * radical_inverse(idx, 2) - 1.0) / width;
+    *jy = (2.0 * radical_inverse(idx, 3) - 1.0) / height;
+}
+// Column-major view-projection at f: ndc.x += jx, ndc.y += jy (clip x += jx * w).
+void jitter_vp(float* f, double jx, double jy) {
+    for (int col = 0; col < 4; ++col) {
+        f[col * 4 + 0] = static_cast<float>(f[col * 4 + 0] + jx * f[col * 4 + 3]);
+        f[col * 4 + 1] = static_cast<float>(f[col * 4 + 1] + jy * f[col * 4 + 3]);
+    }
+}
+// A perspective view-projection (column-major): w row = +-(the view's forward axis, its translation), so its xyz is a unit vector, and the x
+// and y rows are perpendicular to it when the projection is centred (an off-centre or already jittered one is left alone).
+bool is_perspective_vp(const float* f) {
+    for (int i = 0; i < 16; ++i) if (!std::isfinite(f[i])) return false;
+    const double w[3] = {f[3], f[7], f[11]}, x[3] = {f[0], f[4], f[8]}, y[3] = {f[1], f[5], f[9]};
+    auto dot = [](const double* a, const double* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
+    const double ww = dot(w, w), xx = dot(x, x), yy = dot(y, y);
+    if (std::fabs(ww - 1.0) > 0.02 || xx < 1e-4 || yy < 1e-4) return false;
+    return std::fabs(dot(x, w)) <= 1e-3 * std::sqrt(xx) && std::fabs(dot(y, w)) <= 1e-3 * std::sqrt(yy);
+}
+}  // namespace
+
+int temporal_scene_vp_offset(const uint32_t* words, size_t n_words) {
+    if (!words) return -1;
+    for (size_t off : {size_t{0}, size_t{4}}) {   // +0x0, +0x10 (in words)
+        if (off + 16 > n_words) break;
+        float f[16];
+        std::memcpy(f, words + off, sizeof f);
+        if (is_perspective_vp(f)) return static_cast<int>(off * 4);
+    }
+    return -1;
+}
+
+bool temporal_jitter_scene_block(uint32_t* words, size_t n_words, uint32_t width, uint32_t height, uint64_t frame) {
+    static const int mode = static_cast<int>(config_get_int("upscale", "jitter", 1));
+    if (mode == 0 || width < 16 || height < 16) return false;
+    const int off = temporal_scene_vp_offset(words, n_words);
+    if (off < 0) return false;
+    double jx = 0, jy = 0;
+    frame_jitter(width, height, frame, &jx, &jy);
+    float f[16];
+    std::memcpy(f, words + off / 4, sizeof f);
+    jitter_vp(f, jx, jy);
+    std::memcpy(words + off / 4, f, sizeof f);
+    return true;
+}
+
 bool temporal_jitter_block(uint32_t* words, size_t n_words, uint32_t width, uint32_t height, uint64_t frame) {
     static const int mode = static_cast<int>(config_get_int("upscale", "jitter", 1));   // 0 never, 1 when the projection has no jitter of its own
     if (mode == 0 || !words || n_words < 68 || width < 16 || height < 16) return false;
@@ -371,14 +425,11 @@ bool temporal_jitter_block(uint32_t* words, size_t n_words, uint32_t width, uint
     if (!parse_camera(words, n_words, c)) return false;
     if (std::fabs(c.jit[0]) * width > 0.01 || std::fabs(c.jit[1]) * height > 0.01) return false;   // already jittered (by the game)
     const uint32_t phases = temporal_jitter_phase_count();
-    const uint32_t idx = static_cast<uint32_t>(frame % phases) + 1;
-    const double jx = (2.0 * radical_inverse(idx, 2) - 1.0) / width, jy = (2.0 * radical_inverse(idx, 3) - 1.0) / height;
+    double jx = 0, jy = 0;
+    frame_jitter(width, height, frame, &jx, &jy);
     float f[16];
     std::memcpy(f, words, sizeof f);
-    for (int col = 0; col < 4; ++col) {   // column-major: ndc.x += jx, ndc.y += jy (clip x += jx * w)
-        f[col * 4 + 0] = static_cast<float>(f[col * 4 + 0] + jx * f[col * 4 + 3]);
-        f[col * 4 + 1] = static_cast<float>(f[col * 4 + 1] + jy * f[col * 4 + 3]);
-    }
+    jitter_vp(f, jx, jy);
     std::memcpy(words, f, sizeof f);
     static std::atomic<bool> logged{false};
     if (!logged.exchange(true))
@@ -399,12 +450,27 @@ void temporal_note_gbuffer(const uint32_t* words, size_t n_words) {
     }
     s.cam = c;
     s.have_cam = true;
+    for (int i = 0; i < 16; ++i) s.audit_vp[i] = static_cast<float>(c.vpu.m[i]);
+    s.have_audit_vp = true;
     if (!s.logged_cam) {
         s.logged_cam = true;
         NXLOG_I(kTag, "camera from the G-buffer uniform block (vertex slot 0: view-projection floats 0..15, view 52..67): projection x %.4f y %.4f, "
                       "z %.6g w-term %.4f, jitter %+.6f %+.6f NDC, camera at %.1f %.1f %.1f",
                 c.proj_u.at(0, 0), c.proj_u.at(1, 1), c.p22, c.p23, c.jit[0], c.jit[1], c.pos[0], c.pos[1], c.pos[2]);
     }
+}
+
+bool temporal_is_camera_block(const uint32_t* words, size_t n_words) {
+    Camera c;
+    return words && parse_camera(words, n_words, c);
+}
+
+bool temporal_scene_view_projection(float out[16]) {
+    State& s = st();
+    std::lock_guard<std::mutex> lk(s.mu);
+    if (!s.have_audit_vp) return false;
+    std::memcpy(out, s.audit_vp, sizeof s.audit_vp);
+    return true;
 }
 
 bool temporal_camera_ready() {
