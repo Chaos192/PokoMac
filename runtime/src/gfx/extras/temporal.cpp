@@ -635,6 +635,20 @@ VkImageView temporal_evaluate(void* gfx_device, VkCommandBuffer cb, VkImageView 
         vkCmdClearColorImage(cb, s.output.img.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &all);
         barrier(cb, s.output.img.image, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, any, rw);
     }
+    {   // [upscale] test_busy_clears = N, test_busy_every = F (tests): every Fth evaluation the GPU work before the backend is made long
+        // (N clears of the result image, each a short pass), as a slow frame under load is: the GPU is busy, nothing waits
+        static const int64_t busy = config_get_int("upscale", "test_busy_clears", 0), every = config_get_int("upscale", "test_busy_every", 300);
+        if (busy > 0 && every > 0 && s.evaluations > 0 && s.evaluations % static_cast<uint64_t>(every) == 0) {
+            NXLOG_I(kTag, "evaluation %llu: %lld clears of the result image before the backend ([upscale] test_busy_clears)",
+                    static_cast<unsigned long long>(s.evaluations), static_cast<long long>(busy));
+            const VkClearColorValue zero{};
+            const VkImageSubresourceRange all{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            for (int64_t i = 0; i < busy; ++i) {
+                vkCmdClearColorImage(cb, s.output.img.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &all);
+                barrier(cb, s.output.img.image, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, any, rw);
+            }
+        }
+    }
 
     // the backend
     TemporalFrame f;
