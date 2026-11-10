@@ -144,9 +144,9 @@ class XLdst:
     def i_sttrh(self, f, i, ops):
         return self.ldst(i, ops, 2, store=True)
 
-    # ---- FEAT_LRCPC / FEAT_LRCPC2: LDAPR[BH] and LDAPUR*, STLUR*. Same memory model as LDAR / STLR (an acquire load /
-    # release store, nx::ld_acq / nx::st_rel); the RCpc weakening against an earlier STLR is not modelled (stronger is
-    # fine). LDAPR has no offset; the LRCPC2 forms take a signed unscaled 9-bit byte offset and never write back. ---------
+    # ---- FEAT_LRCPC / FEAT_LRCPC2: LDAPR[BH] and LDAPUR*, STLUR*. LDAPR is an acquire load (nx::ld_acq: RCpc, as the C
+    # acquire), STLUR a release store like STLR (nx::st_rel, ctx.h stlr*). LDAPR has no offset; the LRCPC2 forms take a
+    # signed unscaled 9-bit byte offset and never write back. ---------
 
     def lrcpc_addr(self, i, ops):
         regs, mem, after = self.mem_ops(ops)

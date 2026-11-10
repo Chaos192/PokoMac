@@ -63,17 +63,31 @@ NX_INLINE T ld_poll(uint64_t a) {
     return v;
 }
 
+// LDAPR: an acquire load (RCpc, the C meaning).
 template <typename T>
 NX_INLINE T ld_acq(uint64_t a) {
     return __atomic_load_n(reinterpret_cast<T*>(a), __ATOMIC_ACQUIRE);
 }
 
-// STLR: sequentially consistent, not just release. AArch64 keeps an STLR ahead of a later LDAR (RCsc); on x86 only a seq_cst store
-// (xchg) stops the later load from passing it.
+// LDAR and STLR / STLUR: ctx.h ldar* / stlr*, where the ordering each host needs is decided.
 template <typename T>
-NX_INLINE void st_rel(uint64_t a, T v) {
-    __atomic_store_n(reinterpret_cast<T*>(a), v, __ATOMIC_SEQ_CST);
+NX_INLINE T ldar(uint64_t a) {
+    if constexpr (sizeof(T) == 1) return T(::ldar8(a));
+    else if constexpr (sizeof(T) == 2) return T(::ldar16(a));
+    else if constexpr (sizeof(T) == 4) return T(::ldar32(a));
+    else return T(::ldar64(a));
 }
+
+template <typename T>
+NX_INLINE void stlr(uint64_t a, T v) {
+    if constexpr (sizeof(T) == 1) ::stlr8(a, uint8_t(v));
+    else if constexpr (sizeof(T) == 2) ::stlr16(a, uint16_t(v));
+    else if constexpr (sizeof(T) == 4) ::stlr32(a, uint32_t(v));
+    else ::stlr64(a, uint64_t(v));
+}
+
+template <typename T>
+NX_INLINE void st_rel(uint64_t a, T v) { stlr<T>(a, v); }
 
 // Exclusive monitor: LDXR remembers (address, value); STXR succeeds if memory still holds that value.
 template <typename T>

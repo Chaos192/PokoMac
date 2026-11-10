@@ -172,6 +172,28 @@ NX_DEF_MEM(8) NX_DEF_MEM(16) NX_DEF_MEM(32) NX_DEF_MEM(64)
     }
 NX_DEF_STX(8) NX_DEF_STX(16) NX_DEF_STX(32) NX_DEF_STX(64)
 
+/* LDAR and STLR (and STLUR): the guest's acquire load and release store.
+ *  - AArch64 keeps an STLR ahead of a later LDAR (they are sequentially consistent with each other). A C acquire load is weaker:
+ *    for an apple_m1 target clang makes it LDAPR, which may complete before an earlier STLR to another address. So LDAR is a
+ *    seq_cst load: LDAR on arm64, a plain MOV on x86-64.
+ *  - Guest code also counts on a load after an STLR not passing it, which the architecture does not promise but the console's
+ *    cores kept (a Dekker-style wake-up: store my flag with STLR, then read the other side's word with a plain LDR). On x86-64 the
+ *    seq_cst store is an XCHG, a full barrier; on arm64 the STLR is followed by a DMB ISH.
+ *  - A plain store followed by an LDAR of another word is not ordered by the architecture either, and a store buffer (x86 too) lets
+ *    the load go first (Trinity's per-frame rendezvous: a plain flag store, then LDAR of the main thread's state). LDAR is preceded by
+ *    a full barrier.
+ * LDAPR (FEAT_LRCPC) stays an acquire load (nx::ld_acq): its RCpc meaning is the C one. */
+#if defined(__aarch64__) || defined(_M_ARM64)
+#define NX_AFTER_STLR() __atomic_thread_fence(__ATOMIC_SEQ_CST)
+#else
+#define NX_AFTER_STLR() ((void)0)
+#endif
+#define NX_DEF_ORDERED(bits) \
+    static inline uint##bits##_t ldar##bits(uint64_t a) { __atomic_thread_fence(__ATOMIC_SEQ_CST); return __atomic_load_n((uint##bits##_t *)(uintptr_t)a, __ATOMIC_SEQ_CST); } \
+    static inline void stlr##bits(uint64_t a, uint##bits##_t v) { \
+        __atomic_store_n((uint##bits##_t *)(uintptr_t)a, v, __ATOMIC_SEQ_CST); NX_AFTER_STLR(); }
+NX_DEF_ORDERED(8) NX_DEF_ORDERED(16) NX_DEF_ORDERED(32) NX_DEF_ORDERED(64)
+
 /* Exclusive pairs. 32-bit pair: one 64-bit access through ex_addr / ex_val and stx64. 64-bit pair: a 128-bit access,
  * compared and swapped as a whole (the monitor keeps the high half in ex_val_hi). Needs -mcx16 on x64 (cmpxchg16b). */
 static inline void ldxp128(Ctx *c, uint64_t a, uint64_t *lo, uint64_t *hi) {

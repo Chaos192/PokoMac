@@ -272,13 +272,13 @@ class MiscOps:
         regs, mem, _ = self.mem_ops(ops)
         d = self.regop(i, regs[0])
         sz = size or d.bits // 8
-        return d.w(f"nx::ld_acq<{u(sz * 8)}>(c->x[{Reg(i.reg_name(mem.mem.base)).n}])")
+        return d.w(f"nx::ldar<{u(sz * 8)}>(c->x[{Reg(i.reg_name(mem.mem.base)).n}])")
 
     def rel(self, i, ops, size):
         regs, mem, _ = self.mem_ops(ops)
         r = self.regop(i, regs[0])
         sz = size or r.bits // 8
-        return f"nx::st_rel<{u(sz * 8)}>(c->x[{Reg(i.reg_name(mem.mem.base)).n}], {u(sz * 8)}({r.r()}));"
+        return f"nx::stlr<{u(sz * 8)}>(c->x[{Reg(i.reg_name(mem.mem.base)).n}], {u(sz * 8)}({r.r()}));"
 
     def i_ldar(self, f, i, ops):
         return self.acq(i, ops, None)
