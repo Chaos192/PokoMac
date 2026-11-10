@@ -12,6 +12,7 @@
 #include <mutex>
 
 #include "nxrt/config.h"
+#include "nxrt/diag.h"
 #include "nxrt/extras.h"
 #include "nxrt/gfx.h"
 #include "nxrt/log.h"
@@ -136,6 +137,7 @@ struct State {
     uint32_t phases = 0;
     double phase_seen[32][2] = {};
     std::chrono::steady_clock::time_point last_eval{};
+    uint64_t last_eval_present = 0;   // diag_frame_count() at the last evaluation
     bool have_audit_vp = false;
     float audit_vp[16] = {};   // the scene's unjittered view-projection, for [upscale] jitter_audit
     UpscaleMode last_mode = UpscaleMode::Off;
@@ -553,7 +555,15 @@ VkImageView temporal_evaluate(void* gfx_device, VkCommandBuffer cb, VkImageView 
     const auto now = std::chrono::steady_clock::now();
     double ms = s.evaluations ? std::chrono::duration<double, std::milli>(now - s.last_eval).count() : 16.7;
     const char* why = reset ? (s.have_prev ? "size or mode change" : "first frame") : nullptr;
-    if (ms > 250.0 && !reset) { reset = true; why = "the scene was not drawn for a while"; }   // menus, loading
+    // The scene was not drawn for a while (menus, loading): the game presented frames without it. Counted in presents, not milliseconds: one long
+    // frame of the same scene (a GPU stall, a wait for the swapchain, a starved CPU) leaves the history valid, since the motion vectors come from
+    // depth and both cameras whatever the time between them, and a real cut is caught by the camera tests below. The old rule (a gap over
+    // 250 ms) reset on every such frame: in a Pokopia session under load, swapchain waits up to 1,010 ms with the camera moved 3.2
+    // units and facing dot 1.0000 dropped the history each time, which showed as flicker. 4: a scene drawn at a quarter of the present
+    // rate still keeps its history.
+    const uint64_t presents = diag_frame_count();
+    const uint64_t presents_since = s.evaluations && presents >= s.last_eval_present ? presents - s.last_eval_present : 1;
+    if (presents_since > 4 && !reset) { reset = true; why = "the scene was not drawn for a while"; }
     double moved = 0, dot = 1;
     if (s.have_prev) {
         dot = cur.fwd[0] * s.prev.fwd[0] + cur.fwd[1] * s.prev.fwd[1] + cur.fwd[2] * s.prev.fwd[2];
@@ -569,8 +579,8 @@ VkImageView temporal_evaluate(void* gfx_device, VkCommandBuffer cb, VkImageView 
         if (!reset && moved > cut_distance) { reset = true; why = "camera jumped"; }
     }
     if (reset && s.have_prev && s.resets < 40)   // why the history was dropped (each drop is a visible pop with a temporal upscaler)
-        NXLOG_I(kTag, "history reset %llu: %s (camera moved %.1f units, facing dot %.4f, frame %.1f ms)", static_cast<unsigned long long>(s.resets + 1),
-                why ? why : "?", moved, dot, ms);
+        NXLOG_I(kTag, "history reset %llu: %s (camera moved %.1f units, facing dot %.4f, frame %.1f ms, %llu presents)", static_cast<unsigned long long>(s.resets + 1),
+                why ? why : "?", moved, dot, ms, static_cast<unsigned long long>(presents_since));
     const Camera& prev = reset ? cur : s.prev;
     M4 inv_cur_j, inv_cur_u, inv_prev_u, inv_proj;
     if (!inverse(cur.vpj, inv_cur_j) || !inverse(cur.vpu, inv_cur_u) || !inverse(prev.vpu, inv_prev_u) || !inverse(cur.proj_u, inv_proj)) return VK_NULL_HANDLE;
@@ -688,6 +698,7 @@ VkImageView temporal_evaluate(void* gfx_device, VkCommandBuffer cb, VkImageView 
     s.last_jit_px[0] = jpx;
     s.last_jit_px[1] = jpy;
     s.last_eval = now;
+    s.last_eval_present = presents;
     s.last_mode = mode;
     s.max_render.width = std::max(s.max_render.width, render.width);
     s.max_render.height = std::max(s.max_render.height, render.height);
