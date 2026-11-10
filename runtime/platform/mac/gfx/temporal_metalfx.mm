@@ -12,8 +12,8 @@
 //            signals our timeline semaphore = 2k - 1 (frame k); the rest waits for 2k before it runs. Image ownership moves to
 //            VK_QUEUE_FAMILY_EXTERNAL at the end of the first part and back at the start of the rest; the images stay in GENERAL.
 //   sync     MoltenVK (VK_EXT_metal_objects) gives the semaphore's MTLSharedEvent: the Metal command buffer waits for 2k - 1 and signals 2k on
-//            the GPU. KosmicKrisp has no such export: the Metal command buffer is committed waiting for an event of ours, a helper thread
-//            waits for 2k - 1 on the CPU and sets that event, and the command buffer's completion handler signals 2k (vkSignalSemaphore).
+//            the GPU. KosmicKrisp has no such export: a helper thread waits for 2k - 1 on the CPU and then commits the Metal command buffer
+//            (encoded, held back until then: see Bridge), and the command buffer's completion handler signals 2k (vkSignalSemaphore).
 //            Neither path blocks the render thread. The semaphore only ever moves forward: the first part of frame k + 1 is submitted after
 //            the rest of frame k, which waits for 2k.
 //   lifetime the submission's serial is signalled by its last part, which waits for MetalFX, so everything the replay keeps alive until the
@@ -139,7 +139,7 @@ void scan_rgba16f(const char* what, uint64_t k, const uint16_t* p, uint32_t w, u
 // and order checks on the semaphore. Frame k: its first part signals 2k - 1, MetalFX k runs, then 2k lets the rest go.
 uint64_t host_ns() { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 struct HandoffTimes {
-    std::atomic<uint64_t> commit[64] = {}, release[64] = {}, sem_at_release[64] = {}, done_at_release[64] = {};
+    std::atomic<uint64_t> commit[64] = {}, release[64] = {}, sem_at_release[64] = {}, done_at_release[64] = {}, commit_late[64] = {};
     std::mutex mu;
     uint64_t n = 0, viol_release = 0, viol_done = 0, viol_prev = 0;
     double sum[4] = {}, mx[4] = {};
@@ -147,8 +147,14 @@ struct HandoffTimes {
 HandoffTimes g_ho;
 
 // The host round trip (no MTLSharedEvent of the semaphore: KosmicKrisp). Each job waits on the CPU until the first part of a frame has run
-// (the semaphore reaches `wait`) and then sets our event, which the already committed Metal command buffer waits for. One thread, jobs in
-// frame order; it waits in slices so a lost device cannot keep it forever.
+// (the semaphore reaches `wait`) and then commits the frame's Metal command buffer, encoded but held back until then. One thread, jobs in
+// frame order (so the command buffers reach the queue in frame order); it waits in slices so a lost device cannot keep it forever.
+//
+// Why not commit at once and let the command buffer wait for an event of ours ([upscale] metalfx_commit = early, the old way): such a
+// command buffer sits on the GPU from its commit until the first part has run, and the GPU's watchdog aborts it when that takes long
+// (kIOGPUCommandBufferCallbackErrorTimeout). It did in a MetalFX play session (unified log) and in a scripted
+// run under load (frame 2080: the first part not done after 250 ms, the MetalFX command buffer aborted in the same millisecond, MetalFX
+// off). A command buffer committed when its input is ready never waits on the GPU.
 class Bridge {
 public:
     void start(gfx::Device* dev, VkSemaphore sem) {
@@ -156,10 +162,11 @@ public:
         sem_ = sem;
         th_ = std::thread([this] { run(); });
     }
-    void push(uint64_t wait, id<MTLSharedEvent> ev, uint64_t ev_value) {
+    // cb: committed once the semaphore reaches `wait` (late commit); else ev is set to ev_value then (the command buffer waits for it).
+    void push(uint64_t wait, id<MTLCommandBuffer> cb, id<MTLSharedEvent> ev, uint64_t ev_value) {
         {
             std::lock_guard<std::mutex> lk(mu_);
-            q_.push_back({wait, ev, ev_value});
+            q_.push_back({wait, cb, ev, ev_value});
         }
         cv_.notify_one();
     }
@@ -176,6 +183,7 @@ public:
 private:
     struct Job {
         uint64_t wait;
+        id<MTLCommandBuffer> cb;
         id<MTLSharedEvent> ev;
         uint64_t ev_value;
     };
@@ -222,6 +230,13 @@ private:
                             static_cast<unsigned long long>(j.wait), static_cast<int>(r), static_cast<double>(now_ns() - t0) / 1e6);
                 break;
             }
+            {   // [upscale] metalfx_stall_ms = N, metalfx_stall_every = F (tests): every Fth frame is released N ms late, as after a slow first part
+                static const int64_t stall_ms = config_get_int("upscale", "metalfx_stall_ms", 0), stall_every = config_get_int("upscale", "metalfx_stall_every", 600);
+                if (stall_ms > 0 && stall_every > 0 && j.ev_value % static_cast<uint64_t>(stall_every) == 0) {
+                    NXLOG_I(kTag, "frame %llu: released %lld ms late ([upscale] metalfx_stall_ms)", static_cast<unsigned long long>(j.ev_value), static_cast<long long>(stall_ms));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(stall_ms));
+                }
+            }
             g_diag.waiting.store(0);
             g_diag.released.store(j.ev_value);
             {   // order check: nothing may have passed 2k - 1 yet (2k comes from MetalFX k), and MetalFX k - 1 must have completed
@@ -232,7 +247,15 @@ private:
                 g_ho.sem_at_release[i].store(v);
                 g_ho.done_at_release[i].store(g_diag.completed.load());
             }
-            j.ev.signaledValue = j.ev_value;   // (also after a failure: the Metal command buffer and the rest of the frame must not hang)
+            // (also after a failure: the Metal command buffer and the rest of the frame must not hang)
+            if (j.cb) {
+                g_ho.commit_late[j.ev_value % 64].store(host_ns());
+                [j.cb commit];
+                g_diag.committed_ns.store(now_ns());
+                j.cb = nil;
+            } else {
+                j.ev.signaledValue = j.ev_value;
+            }
         }
     }
     gfx::Device* dev_ = nullptr;
@@ -289,15 +312,21 @@ public:
             if (sync != "host")
                 NXLOG_I(kTag, "no MTLSharedEvent of the semaphore (VK_EXT_metal_objects %s, export %s): the host round trip is used",
                         dev.features().metal_objects ? "on" : "off", can_events ? "gave none or another device's" : "not tried");
-            own_event_ = [mdev_ newSharedEvent];
-            if (!own_event_) return fail("no MTLSharedEvent");
+            late_commit_ = config_get_str("upscale", "metalfx_commit", "early") == "late";   // (default early until the A/B is in)
+            if (!late_commit_) {
+                own_event_ = [mdev_ newSharedEvent];
+                if (!own_event_) return fail("no MTLSharedEvent");
+            }
             bridge_.start(dev_, sem_);
         }
         queue_ = [mdev_ newCommandQueue];
         if (!queue_) return fail("no Metal command queue");
         queue_.label = @"MetalFX";
         NXLOG_I(kTag, "MetalFX ready on %s (%s driver): scale %.2f to %.2f per side, sync %s", mdev_.name.UTF8String, driver_.c_str(),
-                static_cast<double>(min_scale_), static_cast<double>(max_scale_), vk_event_ ? "on the GPU (the semaphore's MTLSharedEvent)" : "by a host round trip");
+                static_cast<double>(min_scale_), static_cast<double>(max_scale_),
+                vk_event_      ? "on the GPU (the semaphore's MTLSharedEvent)"
+                : late_commit_ ? "by a host round trip (each command buffer committed once its first part has run)"
+                               : "by a host round trip (command buffers committed at once, waiting for an event: [upscale] metalfx_commit = early)");
         return true;
     }
 
@@ -635,7 +664,7 @@ private:
             }
             mcb.label = @"MetalFX";
             if (vk_event_) [mcb encodeWaitForEvent:vk_event_ value:ready];
-            else [mcb encodeWaitForEvent:own_event_ value:k];
+            else if (!late_commit_) [mcb encodeWaitForEvent:own_event_ value:k];   // (late commit: the bridge commits it once the first part has run)
             scaler_.colorTexture = in[0]->tex;
             scaler_.depthTexture = in[1]->tex;
             scaler_.motionTexture = in[2]->tex;
@@ -688,11 +717,16 @@ private:
                 if (!gpu_signal || !ok) me->signal_done(done);   // KosmicKrisp: the rest of the frame runs after this
             }];
             g_ho.commit[k % 64].store(host_ns());
-            [mcb commit];
+            g_ho.commit_late[k % 64].store(0);
             g_diag.issued.store(k);
-            g_diag.committed_ns.store(now_ns());
             last_ = mcb;
-            if (!vk_event_) bridge_.push(ready, own_event_, k);
+            if (!vk_event_ && late_commit_) {
+                bridge_.push(ready, mcb, nil, k);
+            } else {
+                [mcb commit];
+                g_diag.committed_ns.store(now_ns());
+                if (!vk_event_) bridge_.push(ready, nil, own_event_, k);
+            }
         }
     }
 
@@ -772,7 +806,8 @@ private:
     id<MTLTexture> own_out_ = nil;
     id<MTLCommandBuffer> last_ = nil;
     id<MTLSharedEvent> vk_event_ = nil;    // the semaphore's own event (MoltenVK)
-    id<MTLSharedEvent> own_event_ = nil;   // set by the bridge (host round trip)
+    id<MTLSharedEvent> own_event_ = nil;   // set by the bridge (host round trip, [upscale] metalfx_commit = early)
+    bool late_commit_ = true;              // host round trip: the bridge commits each command buffer once its first part has run
     Bridge bridge_;
     VkSemaphore sem_ = VK_NULL_HANDLE;
     uint64_t frame_ = 0;
