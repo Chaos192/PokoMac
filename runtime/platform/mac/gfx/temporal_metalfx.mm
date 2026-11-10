@@ -143,6 +143,8 @@ struct HandoffTimes {
     std::mutex mu;
     uint64_t n = 0, viol_release = 0, viol_done = 0, viol_prev = 0;
     double sum[4] = {}, mx[4] = {};
+    uint64_t last_c = 0, long_frames = 0;   // frame interval (encode to encode): its sum, maximum and the frames over 25 ms
+    double iv_sum = 0, iv_max = 0;
 };
 HandoffTimes g_ho;
 
@@ -315,8 +317,10 @@ public:
             if (sync != "host")
                 NXLOG_I(kTag, "no MTLSharedEvent of the semaphore (VK_EXT_metal_objects %s, export %s): the host round trip is used",
                         dev.features().metal_objects ? "on" : "off", can_events ? "gave none or another device's" : "not tried");
-            late_commit_ = config_get_str("upscale", "metalfx_commit", "late") != "early";
-            if (!late_commit_) {
+            const std::string commit = config_get_str("upscale", "metalfx_commit", "late");
+            late_commit_ = commit != "early";
+            alternate_ = commit == "alternate";   // (tests: 600 frames early, 600 late, ... for an A/B in one run)
+            if (!late_commit_ || alternate_) {
                 own_event_ = [mdev_ newSharedEvent];
                 if (!own_event_) return fail("no MTLSharedEvent");
             }
@@ -667,7 +671,7 @@ private:
             }
             mcb.label = @"MetalFX";
             if (vk_event_) [mcb encodeWaitForEvent:vk_event_ value:ready];
-            else if (!late_commit_) [mcb encodeWaitForEvent:own_event_ value:k];   // (late commit: the bridge commits it once the first part has run)
+            else if (!late_for(k)) [mcb encodeWaitForEvent:own_event_ value:k];   // (late commit: the bridge commits it once the first part has run)
             scaler_.colorTexture = in[0]->tex;
             scaler_.depthTexture = in[1]->tex;
             scaler_.motionTexture = in[2]->tex;
@@ -723,7 +727,7 @@ private:
             g_ho.commit_late[k % 64].store(0);
             g_diag.issued.store(k);
             last_ = mcb;
-            if (!vk_event_ && late_commit_) {
+            if (!vk_event_ && late_for(k)) {
                 bridge_.push(ready, mcb, nil, k);
             } else {
                 [mcb commit];
@@ -746,6 +750,13 @@ private:
         const double seg[4] = {r > c ? (r - c) / 1e6 : 0.0, gs > r ? (gs - r) / 1e6 : 0.0, ge > gs ? (ge - gs) / 1e6 : 0.0, t_done > ge ? (t_done - ge) / 1e6 : 0.0};
         std::lock_guard<std::mutex> lk(g_ho.mu);
         ++g_ho.n;
+        if (g_ho.last_c && c > g_ho.last_c) {
+            const double iv = static_cast<double>(c - g_ho.last_c) / 1e6;
+            g_ho.iv_sum += iv;
+            g_ho.iv_max = std::max(g_ho.iv_max, iv);
+            g_ho.long_frames += iv > 25.0;
+        }
+        g_ho.last_c = c;
         for (int s = 0; s < 4; ++s) {
             g_ho.sum[s] += seg[s];
             g_ho.mx[s] = std::max(g_ho.mx[s], seg[s]);
@@ -760,12 +771,16 @@ private:
                     static_cast<unsigned long long>(k), seg[0], seg[1], seg[2], seg[3], static_cast<unsigned long long>(sr), static_cast<unsigned long long>(v),
                     static_cast<unsigned long long>(ready), static_cast<unsigned long long>(dr), (bad_rel || bad_done || bad_prev) ? "  ORDER VIOLATION" : "");
         if (g_ho.n % 600 == 0) {
-            NXLOG_I(kTag, "hand-off, last 600 frames (mean / max ms): first part %.2f / %.2f, event to GPU %.2f / %.2f, MetalFX GPU %.2f / %.2f, GPU end to "
-                          "handler %.2f / %.2f; order violations: at release %llu, at completion %llu, previous MetalFX unfinished %llu",
-                    g_ho.sum[0] / 600, g_ho.mx[0], g_ho.sum[1] / 600, g_ho.mx[1], g_ho.sum[2] / 600, g_ho.mx[2], g_ho.sum[3] / 600, g_ho.mx[3],
-                    static_cast<unsigned long long>(g_ho.viol_release), static_cast<unsigned long long>(g_ho.viol_done),
-                    static_cast<unsigned long long>(g_ho.viol_prev));
+            NXLOG_I(kTag, "hand-off, last 600 frames (mean / max ms, commit %s): first part %.2f / %.2f, to GPU %.2f / %.2f, MetalFX GPU %.2f / %.2f, GPU end to "
+                          "handler %.2f / %.2f; frame interval %.2f / %.2f, %llu over 25 ms; order violations: at release %llu, at completion %llu, "
+                          "previous MetalFX unfinished %llu",
+                    vk_event_ ? "on the GPU" : late_for(k) ? "late" : "early", g_ho.sum[0] / 600, g_ho.mx[0], g_ho.sum[1] / 600, g_ho.mx[1],
+                    g_ho.sum[2] / 600, g_ho.mx[2], g_ho.sum[3] / 600, g_ho.mx[3], g_ho.iv_sum / 599, g_ho.iv_max,
+                    static_cast<unsigned long long>(g_ho.long_frames), static_cast<unsigned long long>(g_ho.viol_release),
+                    static_cast<unsigned long long>(g_ho.viol_done), static_cast<unsigned long long>(g_ho.viol_prev));
             for (int s = 0; s < 4; ++s) g_ho.sum[s] = g_ho.mx[s] = 0;
+            g_ho.iv_sum = g_ho.iv_max = 0;
+            g_ho.long_frames = 0;
         }
     }
 
@@ -811,6 +826,8 @@ private:
     id<MTLSharedEvent> vk_event_ = nil;    // the semaphore's own event (MoltenVK)
     id<MTLSharedEvent> own_event_ = nil;   // set by the bridge (host round trip, [upscale] metalfx_commit = early)
     bool late_commit_ = true;              // host round trip: the bridge commits each command buffer once its first part has run
+    bool alternate_ = false;               // [upscale] metalfx_commit = alternate: blocks of 600 frames early, then late (tests)
+    bool late_for(uint64_t k) const { return alternate_ ? ((k - 1) / 600) % 2 == 1 : late_commit_; }
     Bridge bridge_;
     VkSemaphore sem_ = VK_NULL_HANDLE;
     uint64_t frame_ = 0;
