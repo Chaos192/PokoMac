@@ -303,6 +303,10 @@ struct Settings {
     // [meta] defaults_rev: the factory-defaults revision the file was written with (0 when the file has no [meta]). When a file with
     // bindings sections is read at an older revision, the newer factory bindings are added to it (play_config.cpp defaults_rev(): the game's GameDefaults::rev and additions).
     int defaults_rev = 0;
+    // [meta] display_rev: the display defaults the file has been brought to (0 when absent). 1: vsync on by default on macOS, where
+    // presenting without it (VK_PRESENT_MODE_IMMEDIATE_KHR on Metal) shows frames mid-refresh: tearing and partly drawn frames. A file
+    // below it gets vsync switched on once there (play_config.cpp parse_settings); the player can turn it off again.
+    int display_rev = 0;
     // Transient, never written to the file: set by load_settings when it upgraded an older file, so the caller can keep a .bak and save.
     bool migrated = false;
     std::string migration_added;   // transient: the bindings the upgrade added, for the log line

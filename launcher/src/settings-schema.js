@@ -304,7 +304,7 @@ export const SECTIONS = [
               { value: '120', label: '120' }, { value: '144', label: '144' }, { value: '0', label: 'Unlimited' },
             ],
           },
-          { id: 'vsync', label: 'VSync', type: 'toggle', at: controls('display', 'vsync'), def: '0' },
+          { id: 'vsync', label: 'VSync', type: 'toggle', at: controls('display', 'vsync'), def: IS_MAC ? '1' : '0' },
           { id: 'fps_show', label: 'Frame rate counter', type: 'toggle', at: controls('fps', 'show'), def: '0' },
         ],
       },

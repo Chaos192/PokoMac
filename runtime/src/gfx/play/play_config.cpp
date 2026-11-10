@@ -284,6 +284,7 @@ bool apply_fixed(Sec sec, const std::string& k, const std::string& v, Settings* 
     switch (sec) {
         case Sec::Meta:
             if (k == "defaults_rev") return set_int(0, 1000, &s->defaults_rev);
+            if (k == "display_rev") return set_int(0, 1000, &s->display_rev);
             break;
         case Sec::Mouse:
             if (k == "yaw") return set_num(&s->mouse.yaw_rad);
@@ -846,6 +847,21 @@ bool parse_onto(const std::string& text, Settings* s, std::string* err, std::vec
     } else if (with_default_bindings) {
         s->defaults_rev = defaults_rev();   // the factory bindings were applied, so the result is at the current revision
     }
+#if defined(__APPLE__)
+    // Display defaults revision 1 (macOS): vsync on. With it off the swapchain presents immediately and Metal shows frames mid-refresh;
+    // Pokopia on a MacBook tore and flashed partly drawn frames with the frame time swinging between 8 and 50 ms. Applied once to the
+    // factory text and to an older file (which is then saved); a player who turns vsync off afterwards keeps it off.
+    if (s->display_rev < 1) {
+        if (!s->display.vsync) {
+            s->display.vsync = true;
+            if (has_bindings) {
+                s->migrated = true;
+                s->migration_added += s->migration_added.empty() ? "vsync on (macOS)" : ", vsync on (macOS)";
+            }
+        }
+        s->display_rev = 1;
+    }
+#endif
     return true;
 }
 
@@ -905,6 +921,7 @@ std::string format_settings(const Settings& s) {
     o += (title && *title) ? std::string("# ") + title + ", play mode: controls and display.\n" : std::string("# Play mode: controls and display.\n");
     o += "\n[meta]\n";
     kv("defaults_rev", std::to_string(s.defaults_rev));
+    kv("display_rev", std::to_string(s.display_rev));
     o += "\n[mouse]\n";
     kv("yaw", num(s.mouse.yaw_rad));
     kv("pitch", num(s.mouse.pitch_rad));
