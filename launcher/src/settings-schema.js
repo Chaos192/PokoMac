@@ -232,7 +232,9 @@ const WRITE = {
 // ---- the page ---------------------------------------------------------------------------------------------------------------------
 
 const REPO_URL = 'https://github.com/Chaos192/PokoMac';
-// the one credit (Settings > About): the project this launcher and port are based on
+// the credits (Settings > About): the project PokoMac is built on (and takes its menus, cheats, mods and networking from), and the
+// project this launcher and port are based on
+const ANYSWITCH_URL = 'https://github.com/Chaos192/AnySwitch';
 const UPSTREAM_URL = 'https://github.com/Dittobyte/Recompia';
 const open = (url, label = 'Open') => ({ act: 'open-url', arg: url, label, icon: 'external-link' });
 const hasControls = (src) => src.controls_exists !== false;
@@ -642,6 +644,7 @@ export const SECTIONS = [
           { id: 'licence', label: 'Licence', type: 'info', value: 'GPL-3.0-or-later' },
           { id: 'built_with', label: 'Built with', type: 'info', value: 'Tauri 2, Lucide (ISC), Inter (OFL)' },
           { id: 'repo', label: 'Source code', type: 'info', actions: [open(REPO_URL, 'GitHub')] },
+          { id: 'built_on', label: 'Built on', type: 'info', value: 'Built on AnySwitch by Chaos192 — github.com/Chaos192/AnySwitch', actions: [open(ANYSWITCH_URL, 'GitHub')] },
           { id: 'based_on', label: 'Credits', type: 'info', value: 'Based on Recompia by Dittobyte — github.com/Dittobyte/Recompia', actions: [open(UPSTREAM_URL, 'GitHub')] },
           { id: 'koi-credit', label: "Koi's Camp", type: 'info', value: 'Artwork by Koi, hand drawn' },
           {

@@ -3,6 +3,10 @@
 PokoMac is based on **[Recompia](https://github.com/Dittobyte/Recompia) by Dittobyte** (GPL-3.0). The recompiler, the runtime, the
 launcher and the game work come from it; PokoMac adds the macOS platform layer, build and packaging ([docs/MACOS.md](docs/MACOS.md)).
 
+PokoMac is **built on [AnySwitch](https://github.com/Chaos192/AnySwitch) by Chaos192** (github.com/Chaos192/AnySwitch, GPL-3.0-or-later):
+AnySwitch grew out of PokoMac and generalised it to any Switch game; PokoMac takes its work back from it. Every file ported from AnySwitch
+says so in its header ("Ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch").
+
 ## Third-party licences
 
 PokoMac contains or downloads third-party code under its own licences. The licence texts are in `runtime/THIRD_PARTY_NOTICES.md`,

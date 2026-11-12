@@ -95,6 +95,10 @@ void draw_about_page(const std::string& settings_path) {
 #endif
     ImGui::Text("Built %s %s", __DATE__, __TIME__);
 
+    ImGui::SeparatorText("Credits");
+    ImGui::TextWrapped("Built on AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).");
+    ImGui::TextWrapped("Based on Recompia by Dittobyte (github.com/Dittobyte/Recompia).");
+
     ImGui::SeparatorText("Folders and files in use");
     path_row("Working folder", absolute("."));
     path_row("Settings (controls)", absolute(settings_path), "Written by Apply and save.");

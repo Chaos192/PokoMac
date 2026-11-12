@@ -2,7 +2,8 @@
 
 <p align="center">
   <b>Pokémon Pokopia (Switch 2) recompiled to run natively on Apple silicon Macs.</b><br>
-  Native arm64, Vulkan over Metal: no emulator, no Wine, no Rosetta.
+  Native arm64, Vulkan over Metal: no emulator, no Wine, no Rosetta.<br>
+  Built on <a href="https://github.com/Chaos192/AnySwitch">AnySwitch</a> by Chaos192 (github.com/Chaos192/AnySwitch).
 </p>
 
 <p align="center">
@@ -125,8 +126,9 @@ See [docs/MACOS.md](docs/MACOS.md#building-from-source-on-a-mac).
 
 ## Credits
 
-Based on **[Recompia](https://github.com/Dittobyte/Recompia) by Dittobyte**. The licences of the third-party code PokoMac contains
-ship with every release (`licenses/`) and are listed in [CREDITS.md](CREDITS.md).
+Built on **[AnySwitch](https://github.com/Chaos192/AnySwitch) by Chaos192** (github.com/Chaos192/AnySwitch). Based on
+**[Recompia](https://github.com/Dittobyte/Recompia) by Dittobyte**. The licences of the third-party code PokoMac contains ship with every
+release (`licenses/`) and are listed in [CREDITS.md](CREDITS.md).
 
 ## License
 
