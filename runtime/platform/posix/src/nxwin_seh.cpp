@@ -133,7 +133,18 @@ void on_signal(int sig, siginfo_t* si, void* uc_v) {
             break;
         case SIGILL: rec.ExceptionCode = EXCEPTION_ILLEGAL_INSTRUCTION; break;
         case SIGFPE: rec.ExceptionCode = EXCEPTION_INT_DIVIDE_BY_ZERO; break;
-        case SIGTRAP: rec.ExceptionCode = EXCEPTION_BREAKPOINT; break;
+        case SIGTRAP:
+#if defined(__aarch64__)
+            if (ec == 0x34 || ec == 0x35) {      // a watchpoint (lower / same EL): a data breakpoint, as Windows reports one
+                rec.ExceptionCode = EXCEPTION_SINGLE_STEP;
+                rec.NumberParameters = 2;
+                rec.ExceptionInformation[0] = (esr >> 6 & 1) ? 1 : 0;   // WnR: 1 a store
+                rec.ExceptionInformation[1] = far;
+                break;
+            }
+#endif
+            rec.ExceptionCode = EXCEPTION_BREAKPOINT;
+            break;
         case SIGABRT: rec.ExceptionCode = STATUS_FATAL_APP_EXIT; rec.ExceptionFlags = EXCEPTION_NONCONTINUABLE; break;
         default: rec.ExceptionCode = 0xC0000000u | static_cast<DWORD>(sig); break;
     }

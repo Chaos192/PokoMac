@@ -24,6 +24,18 @@
 .set-num { width: 84px; text-align: right; appearance: textfield; -moz-appearance: textfield; }
 .set-num::-webkit-inner-spin-button, .set-num::-webkit-outer-spin-button { appearance: none; -webkit-appearance: none; margin: 0; }
 .set-unit { flex: none; color: var(--color-text-2); font-size: var(--text-sm); }
+/* the cheats overlay's own accent colour: a swatch beside its select (a native colour picker) */
+.set-color {
+  flex: none;
+  width: var(--control-h);
+  height: var(--control-h);
+  padding: 0.1875rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  cursor: default;
+}
+.set-color:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
 .set-pathrow .row-label { flex: none; }
 .set-pathrow .row-control { flex: 1 1 0; max-width: none; }

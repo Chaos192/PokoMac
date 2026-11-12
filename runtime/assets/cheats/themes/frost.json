@@ -1,0 +1,25 @@
+{
+  "format": 1,
+  "author": "AnySwitch",
+  "name": "Frost",
+  "description": "Frosted glass: the game blurred behind a cool tint.",
+  "style": "glass",
+  "opacity": 97,
+  "blur": 70,
+  "tint": 48,
+  "radius": 24,
+  "accent": "#8ecbff",
+  "colors": {
+    "panel": "#0e1424",
+    "dialog": "#182033",
+    "surface": "#e6eeff",
+    "well": "#00000038",
+    "text": "#f2f6fc",
+    "on_accent": "#05213d",
+    "ok": "#8ee3c2",
+    "warn": "#ffc47e",
+    "danger": "#ff8d8d",
+    "danger_solid": "#d84a55",
+    "scrim": "#04081452"
+  }
+}

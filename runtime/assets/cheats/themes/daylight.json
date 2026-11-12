@@ -1,0 +1,29 @@
+{
+  "format": 1,
+  "author": "AnySwitch",
+  "name": "Daylight",
+  "description": "The launcher's Daylight tone: a light theme, blue accent.",
+  "style": "solid",
+  "opacity": 97,
+  "blur": 60,
+  "tint": 60,
+  "radius": 20,
+  "accent": "#0a66d8",
+  "colors": {
+    "panel": "#f3f5f9",
+    "dialog": "#ffffff",
+    "surface": "#121830",
+    "card": "#ffffffcc",
+    "well": "#1218300f",
+    "text": "#14161f",
+    "text3": "#14161f85",
+    "line": "#1218301a",
+    "line_strong": "#12183038",
+    "on_accent": "#ffffff",
+    "ok": "#0a6fbf",
+    "warn": "#9a5200",
+    "danger": "#c22d2d",
+    "danger_solid": "#cf3434",
+    "scrim": "#181e345c"
+  }
+}

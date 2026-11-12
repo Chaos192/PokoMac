@@ -365,6 +365,9 @@ public:
     void capture_next_frame(std::vector<uint8_t>* rgba, uint32_t* width, uint32_t* height);
     // True while a screenshot or a frame capture is requested and has not been taken yet (safe from any thread).
     bool capture_pending() const;
+    // The frame image can be read by the overlay's hook (TRANSFER_SRC: headless, or a swapchain that allows it): the cheats overlay's
+    // glass panel blurs the frame under it (extras/backdrop_blur.h), and draws solid without it.
+    bool frame_readable() const;
 
     RendererStats stats() const;
     void wait_idle();

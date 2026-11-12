@@ -7,7 +7,7 @@
 // An edit is { file, section, key, value }. file 'pkp' and 'controls' go to write_settings, 'config' to save_config.
 //
 // Field: { id, label, type, at, def, options, min, max, step, suffix, ... }
-//   type     segmented | select | choice | size | toggle | slider | path | clock
+//   type     segmented | select | choice | size | toggle | slider | path | clock | accent
 //   at       where it lives: controls(), pkp() or config(); an array when it has two keys
 //   read     (src) => the control's value, when the plain mapping of `type` does not fit
 //   write    (value, src) => edits, likewise
@@ -19,6 +19,16 @@
 //   quality  'value' | 'frame': a value quality presets set, so changing it by hand makes the preset Custom (see markCustom)
 // A choice is a list of presets plus Custom with a number field (custom: { min, max, suffix, start, label }), a size likewise with two.
 // Rows that are not fields: info (label, value, actions), keycap (label, key), note (a line of text), and { expand } for rows made from env.
+
+// The cheats overlay's look settings: defaults, ranges and the built-in themes, shared with the runtime (docs/CHEATS.md). The cheats menu and
+// its settings are ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+import CHEATS_LOOK from '../../runtime/assets/cheats/look.json' with { type: 'json' };
+
+/** The cheats overlay's built-in themes by name (runtime/assets/cheats/themes; CHEATS_LOOK.theme.builtin lists them). */
+const CHEATS_THEME_LABELS = { sunrise: 'Sunrise (the app’s)', dusk: 'Dusk', midnight: 'Midnight', daylight: 'Daylight (light)', paper: 'Paper (light)', frost: 'Frost (glass)' };
+/** The cheats overlay key's SDL names by the lower-cased word a select reads (wordOf). */
+const CHEATS_KEY_ALIASES = Object.fromEntries(['F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12', 'Insert', 'Home', 'End', 'PageUp', 'PageDown', 'Pause']
+  .map((k) => [k.toLowerCase(), k]));
 
 // MetalFX (Apple's temporal upscaler) exists in the macOS runtime only, where it is the default (runtime/include/nxrt/extras.h).
 const IS_MAC = typeof navigator !== 'undefined' && /Macintosh/.test(navigator.userAgent || '');
@@ -227,6 +237,7 @@ const WRITE = {
   slider: (f, v) => [edit(f.at, String(v))],
   path: (f, v) => [edit(f.at, fwd(v))],
   clock: (f, v) => [edit(f.at, String(clockMinutes(v)))],
+  accent: (f, v) => [edit(f.at, String(v))],
 };
 
 // ---- the page ---------------------------------------------------------------------------------------------------------------------
@@ -395,6 +406,109 @@ export const SECTIONS = [
             ],
           },
           { id: 'f1_bindings', label: 'Change bindings in game', type: 'keycap', key: 'F1' },
+        ],
+      },
+    ],
+  },
+  {
+    // docs/CHEATS.md: the runtime's cheats overlay ([cheats] of pkp.ini). Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+    id: 'cheats',
+    label: 'Cheats',
+    groups: [
+      {
+        title: '',
+        rows: [
+          { id: 'cheats_enable', label: 'Enable cheats', type: 'toggle', at: pkp('cheats', 'enable'), def: '0' },
+          { id: 'cheats_enable_note', type: 'note', note: () => ({ text: 'An in-game overlay to search memory and run cheat files. For single player.' }) },
+          {
+            // F1 is the settings menu's, so it is not offered. Stored as SDL's names; a select reads its value lower-cased, hence aliases
+            id: 'cheats_key', label: 'Overlay key', type: 'select', at: pkp('cheats', 'key'), def: 'F3', aliases: CHEATS_KEY_ALIASES,
+            options: [...['F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12'].map((k) => ({ value: k, label: k })),
+              { value: 'Insert', label: 'Insert' }, { value: 'Home', label: 'Home' }, { value: 'End', label: 'End' },
+              { value: 'PageUp', label: 'Page Up' }, { value: 'PageDown', label: 'Page Down' }, { value: 'Pause', label: 'Pause' }],
+          },
+          {
+            // play_types.cpp parse_pad_combo; never Minus + Plus, the quit combo ([quit] pad)
+            id: 'cheats_pad', label: 'Overlay controller combo', type: 'select', at: pkp('cheats', 'pad'), def: '',
+            options: [
+              { value: '', label: 'None' }, { value: 'minus+rstick', label: 'Minus + right stick press' },
+              { value: 'minus+lstick', label: 'Minus + left stick press' }, { value: 'plus+rstick', label: 'Plus + right stick press' },
+              { value: 'l+r+minus', label: 'L + R + Minus' }, { value: 'zl+zr+minus', label: 'ZL + ZR + Minus' },
+            ],
+          },
+          {
+            id: 'cheats_dir', label: 'Cheats folder', type: 'path', at: pkp('cheats', 'dir'), pick: 'Choose the cheats folder',
+            placeholder: () => '<game folder>/cheats',
+          },
+          {
+            id: 'cheats_dir_note', type: 'note',
+            note: () => ({ text: 'Cheat files go in <program id>/cheats/<build id>.txt, as on the console, or as <build id>.txt at the top. The overlay also keeps its saved cheat tables there.' }),
+          },
+          { id: 'cheats_pass_input', label: 'While open: input reaches the game', type: 'toggle', at: pkp('cheats', 'pass_input'), def: '0' },
+          { id: 'cheats_pause_game', label: 'While open: pause the game', type: 'toggle', at: pkp('cheats', 'pause_game'), def: '0' },
+          { id: 'cheats_mini', label: 'Active cheats strip when hidden', type: 'toggle', at: pkp('cheats', 'mini'), def: '0' },
+        ],
+      },
+      {
+        title: 'Overlay look',
+        rows: [
+          {
+            id: 'cheats_theme', label: 'Theme', type: 'select', at: pkp('cheats', 'theme'), def: CHEATS_LOOK.theme.default,
+            desc: 'The overlay\u2019s colours, corners and style. Your own themes (JSON files) go in the themes folder.',
+            read: (src) => String(has(src, pkp('cheats', 'theme')) ? rawOf(src, pkp('cheats', 'theme')) : CHEATS_LOOK.theme.default).trim(),
+            options: (env = {}) => [
+              ...CHEATS_LOOK.theme.builtin.map((t) => ({ value: t, label: CHEATS_THEME_LABELS[t] ?? t })),
+              ...(env.cheatsThemes ?? []).map((t) => ({ value: t.path, label: `${t.name} (your theme)` })),
+            ],
+          },
+          {
+            id: 'cheats_theme_files', label: 'Your themes', type: 'info',
+            value: (e) => (e.cheatsThemes?.length ? `${e.cheatsThemes.length} in the themes folder` : 'None yet'),
+            actions: [
+              { act: 'cheats-theme-import', label: 'Import theme\u2026', icon: 'upload' },
+              { act: 'cheats-themes-open', label: 'Open the folder', icon: 'folder-open' },
+            ],
+          },
+          {
+            id: 'cheats_style', label: 'Panel', type: 'select', at: pkp('cheats', 'style'), def: '',
+            options: [{ value: '', label: 'The theme\u2019s' }, { value: 'solid', label: 'Solid' }, { value: 'glass', label: 'Glass: the game blurred behind it' }],
+          },
+          {
+            id: 'cheats_opacity', label: 'Panel opacity', type: 'choice', at: pkp('cheats', 'opacity'), def: '',
+            options: [{ value: '', label: 'The theme\u2019s' }],
+            custom: { min: CHEATS_LOOK.opacity.min, max: CHEATS_LOOK.opacity.max, start: 90, label: 'Panel opacity', suffix: '%' },
+          },
+          {
+            id: 'cheats_blur', label: 'Glass blur', type: 'choice', at: pkp('cheats', 'blur'), def: '',
+            options: [{ value: '', label: 'The theme\u2019s' }],
+            custom: { min: CHEATS_LOOK.blur.min, max: CHEATS_LOOK.blur.max, start: 60, label: 'Blur', suffix: '%' },
+          },
+          {
+            id: 'cheats_tint', label: 'Glass tint', type: 'choice', at: pkp('cheats', 'tint'), def: '',
+            options: [{ value: '', label: 'The theme\u2019s' }],
+            custom: { min: CHEATS_LOOK.tint.min, max: CHEATS_LOOK.tint.max, start: 55, label: 'Tint', suffix: '%' },
+          },
+          {
+            id: 'cheats_accent', label: 'Accent', type: 'accent', at: pkp('cheats', 'accent'), def: CHEATS_LOOK.accent.default,
+            read: (src) => String(has(src, pkp('cheats', 'accent')) ? rawOf(src, pkp('cheats', 'accent')) : CHEATS_LOOK.accent.default).trim(),
+            options: [
+              { value: 'theme', label: 'The theme\u2019s' },
+              { value: 'auto', label: 'From the game picture' },
+              ...['blue', 'green', 'amber', 'violet', 'red', 'teal', 'slate'].map((c) => ({ value: c, label: c[0].toUpperCase() + c.slice(1) })),
+              { value: 'custom', label: 'Your own colour' },
+            ],
+            color: { start: '#ffc23d', label: 'Accent colour' },
+          },
+          {
+            id: 'cheats_scale', label: 'Size', type: 'slider', at: pkp('cheats', 'scale'), def: CHEATS_LOOK.scale.default, min: CHEATS_LOOK.scale.min,
+            max: CHEATS_LOOK.scale.max, step: CHEATS_LOOK.scale.step, suffix: '%',
+          },
+          {
+            id: 'cheats_hud_opacity', label: 'HUD over the game', type: 'slider', at: pkp('cheats', 'hud_opacity'), def: CHEATS_LOOK.hud_opacity.default,
+            min: CHEATS_LOOK.hud_opacity.min, max: CHEATS_LOOK.hud_opacity.max, step: CHEATS_LOOK.hud_opacity.step, suffix: '%',
+            desc: 'Values and cheats you pin in the overlay show over the game in a small strip, at this opacity.',
+          },
+          { id: 'cheats_animations', label: 'Animations', type: 'toggle', at: pkp('cheats', 'animations'), def: CHEATS_LOOK.animations.default ? '1' : '0' },
         ],
       },
     ],
@@ -718,13 +832,16 @@ export function splitEdits(edits) {
 // ---- what a control shows ---------------------------------------------------------------------------------------------------------
 
 /** The option a value selects, 'custom' when it is none of them. Never changes the value itself. */
-export function shownChoice(f, value) {
-  return f.options.some((o) => o.value === String(value)) ? String(value) : 'custom';
+export function shownChoice(f, value, env = {}) {
+  return optionList(f, env).some((o) => o.value === String(value)) ? String(value) : 'custom';
 }
+
+/** A field's options: its list, or what its function makes of the page's env (the cheats overlay's theme files). */
+const optionList = (f, env = {}) => (typeof f.options === 'function' ? f.options(env) : f.options);
 
 /** The options to offer. Custom is a real choice on a number control, and on a plain list only the name of a value it cannot show. */
 export function optionsFor(f, value, env = {}) {
-  const list = f.options.filter((o) => !o.offer || o.offer(env) || o.value === value).map(({ value: v, label }) => ({ value: v, label }));
+  const list = optionList(f, env).filter((o) => !o.offer || o.offer(env) || o.value === value).map(({ value: v, label }) => ({ value: v, label }));
   if (f.type === 'choice' || f.type === 'size') return [...list, { value: 'custom', label: 'Custom' }];
   return list.some((o) => o.value === value) ? list : [...list, { value: 'custom', label: 'Custom', disabled: true }];
 }

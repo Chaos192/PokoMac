@@ -29,8 +29,11 @@
 #include "nxrt/nvn.h"
 #include "nxrt/platform.h"
 #include "nxrt/services_api.h"
+#include "extras/backdrop_blur.h"
 #include "extras/overlay_composite.h"
 #include "fps_stats.h"
+#include "../cheats/control.h"
+#include "play/cheats_ui.h"
 
 namespace nxrt::gfx {
 namespace {
@@ -196,6 +199,23 @@ struct Overlay::Impl {
     void draw_touch_button(bool open);       // inside an ImGui frame
     std::mutex mu;                    // guards the ImGui context: events arrive on the game's main thread, drawing happens on the presenting thread
     int toggle_sc = SDL_SCANCODE_F1;
+    // The cheats overlay (phase 6): a separate layer with its own key and settings (cheats_ui.cpp draws it).
+    std::atomic<bool> cheats_visible{false};
+    int cheats_sc = SDL_SCANCODE_F3;
+    bool cheats_enabled = false;      // [cheats] enable: the overlay and its key exist at all
+    bool cheats_pass = false;         // [cheats] pass_input: input also reaches the game while it is open
+    bool cheats_pause = false;        // [cheats] pause_game
+    bool cheats_inited = false;       // cheats::ui::init ran (the table, hotkeys and frame callbacks run from the first frame on)
+    bool cheats_paused_it = false;    // [cheats] pause_game: this overlay paused the game when it opened
+    // the cheats key while the panel is open: a press closes it (on release), holding it peeks at the game (cheats_ui.h set_key_peek)
+    std::atomic<bool> cheats_key_held{false};
+    std::atomic<bool> cheats_key_peeking{false};
+    std::atomic<int64_t> cheats_key_down_ms{0};
+    // the auto accent: one frame without the overlay is read back when it opens (Renderer::capture_next_frame)
+    std::atomic<bool> cheats_cap_req{false};
+    bool cheats_cap_wait = false;
+    std::vector<uint8_t> cheats_cap;
+    uint32_t cheats_cap_w = 0, cheats_cap_h = 0;
     bool restore_relative = false;
     std::chrono::steady_clock::time_point last_frame = std::chrono::steady_clock::now();
     uint64_t drawn = 0;
@@ -215,6 +235,11 @@ struct Overlay::Impl {
     VkFormat color_format = VK_FORMAT_UNDEFINED;
     bool hdr = false;                 // HDR swapchain: the overlay is drawn into an RGBA8 target and composited (draw)
     extras::OverlayComposite composite;
+    // the cheats overlay's glass panel: the frame blurred under it (made at the first glass frame; never while it is solid or closed)
+    extras::BackdropBlur blur;
+    bool blur_failed = false;
+    VkDescriptorSet blur_tex = VK_NULL_HANDLE;   // the blur's level 0 as an ImGui texture
+    VkImageView blur_tex_view = VK_NULL_HANDLE;
 
     // Corner frame-rate counter. set_counter() stores the settings from any thread; the rest is used by the presenting thread only.
     std::atomic<bool> ptr_show{false}, ptr_in_shots{true};
@@ -492,6 +517,15 @@ std::unique_ptr<Overlay> Overlay::create(const Context& ctx, std::string* error)
     if (const SDL_Scancode sc = SDL_GetScancodeFromName(key.c_str()); sc != SDL_SCANCODE_UNKNOWN) s.toggle_sc = sc;
     else NXLOG_W(kTag, "unknown [gfx] overlay_key '%s': using F1", key.c_str());
 
+    // The cheats overlay (phase 6): its own key, separate from the F1 dev menu above.
+    s.cheats_enabled = config_get_bool("cheats", "enable", false);
+    const std::string ckey = config_get_str("cheats", "key", "F3");
+    if (const SDL_Scancode sc = SDL_GetScancodeFromName(ckey.c_str()); sc != SDL_SCANCODE_UNKNOWN) s.cheats_sc = sc;
+    else NXLOG_W(kTag, "unknown [cheats] key '%s': using F3", ckey.c_str());
+    if (s.cheats_sc == s.toggle_sc) { NXLOG_W(kTag, "[cheats] key equals [gfx] overlay_key (%s): keeping F3 for cheats", key.c_str()); s.cheats_sc = SDL_SCANCODE_F3; }
+    s.cheats_pass = config_get_bool("cheats", "pass_input", false);
+    s.cheats_pause = config_get_bool("cheats", "pause_game", false);
+
     IMGUI_CHECKVERSION();
     s.imgui = ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
@@ -501,6 +535,7 @@ std::unique_ptr<Overlay> Overlay::create(const Context& ctx, std::string* error)
     io.BackendFlags |= ImGuiBackendFlags_HasGamepad;   // without it ImGui ignores the gamepad keys that set_keyboard_pad sends while the page is open
     ImGui::StyleColorsDark();
     io.Fonts->AddFontDefaultVector();          // the scalable default font: stays sharp at every UI scale (update_scale)
+    cheats::ui::load_fonts(io.Fonts);          // the cheats overlay's Inter (the launcher's typeface); the default above stays the menu's
     ImGui::GetStyle().FontSizeBase = 16.0f;
     s.base_style = ImGui::GetStyle();
     const VkExtent2D e = ctx.renderer->extent();
@@ -537,6 +572,13 @@ Overlay::~Overlay() {
     if (!impl_) return;
     if (impl_->ctx.device) impl_->ctx.device->wait_idle();
     impl_->composite.shutdown();
+    if (impl_->blur_tex && impl_->backend_ready) {
+        ImGuiContext* prev = ImGui::GetCurrentContext();
+        ImGui::SetCurrentContext(impl_->imgui);
+        ImGui_ImplVulkan_RemoveTexture(impl_->blur_tex);
+        ImGui::SetCurrentContext(prev);
+    }
+    impl_->blur.shutdown();
     if (impl_->backend_ready) ImGui_ImplVulkan_Shutdown();
     if (impl_->imgui) ImGui::DestroyContext(impl_->imgui);
     delete impl_;
@@ -569,6 +611,41 @@ bool Overlay::visible() const { return impl_->visible; }
 void Overlay::toggle() { set_visible(!impl_->visible); }
 int Overlay::toggle_scancode() const { return impl_->toggle_sc; }
 void Overlay::set_toggle_scancode(int sc) { impl_->toggle_sc = sc; }
+
+void Overlay::set_cheats_visible(bool v) {
+    Impl& s = *impl_;
+    if (s.cheats_visible == v) return;
+    s.cheats_visible = v;
+    if (v) {
+        cheats::ui::on_shown();
+        if (cheats::ui::wants_frame_colour()) s.cheats_cap_req = true;   // the accent from the game frame under it (draw)
+        if ((s.cheats_pause || cheats::ui::pause_while_open()) && !cheats::ctl::paused()) {
+            cheats::ctl::pause(true);
+            s.cheats_paused_it = true;
+        }
+    }
+    if (!v) {
+        s.cheats_key_held = false;            // a peek ends with the panel
+        if (s.cheats_key_peeking.exchange(false)) cheats::ui::set_key_peek(false);
+        if (s.cheats_paused_it) {
+            cheats::ctl::pause(false);
+            s.cheats_paused_it = false;
+        }
+        cheats::ui::save();
+        std::lock_guard<std::mutex> lk(s.mu);     // drop any latched input when it closes
+        ImGuiContext* prev = ImGui::GetCurrentContext();
+        ImGui::SetCurrentContext(s.imgui);
+        ImGui::GetIO().ClearInputKeys();
+        ImGui::GetIO().ClearInputMouse();
+        ImGui::SetCurrentContext(prev);
+    }
+    NXLOG_I(kTag, "cheats overlay %s", v ? "shown" : "hidden");
+}
+void Overlay::toggle_cheats() { set_cheats_visible(!impl_->cheats_visible); }
+bool Overlay::cheats_visible() const { return impl_->cheats_visible; }
+int Overlay::cheats_scancode() const { return impl_->cheats_sc; }
+void Overlay::set_cheats_scancode(int sc) { impl_->cheats_sc = sc; }
+bool Overlay::cheats_blocks_game() const { return impl_->cheats_visible && !impl_->cheats_pass; }
 uint64_t Overlay::frames_drawn() const { return impl_->drawn; }
 
 void Overlay::set_pointer(bool show, float x, float y, bool in_screenshots) {
@@ -959,7 +1036,7 @@ bool Overlay::take_quit_confirmed() { return impl_->quit_confirmed.exchange(fals
 bool Overlay::take_settings_wanted() { return impl_->settings_wanted.exchange(false); }
 
 bool Overlay::keyboard_open() const { return impl_->kb_poll(); }
-bool Overlay::blocks_game() const { return impl_->visible || impl_->quit_open || impl_->kb_poll(); }
+bool Overlay::blocks_game() const { return impl_->visible || impl_->quit_open || impl_->kb_poll() || cheats_blocks_game(); }
 void Overlay::set_keyboard_abxy(bool by_label) { impl_->kb_by_label.store(by_label, std::memory_order_relaxed); }
 
 uint64_t Overlay::set_keyboard_pad(uint64_t buttons, int lx, int ly) {
@@ -972,7 +1049,28 @@ uint64_t Overlay::set_keyboard_pad(uint64_t buttons, int lx, int ly) {
     if (ly <= -kHalf) b |= hid::btn(hid::kBtnStickLDown);
     const bool quit = s.quit_open;
     const bool page = !quit && s.visible && !s.kb_poll();   // the F1 page: the pad moves its focus, and stays away from the game
-    const bool open = quit || page || s.kb_poll();
+    // the cheats overlay: its hotkeys see the pad always; while it is open (and does not pass input through) the pad drives its windows
+    if (s.cheats_enabled) cheats::ui::pad_input(b);
+    const bool cheats_page = !quit && !page && !s.kb_poll() && s.cheats_visible && !s.cheats_pass;
+    bool close_cheats = false;
+    if (cheats_page) {
+        // A activates and B backs out (after the player's mapping, as on the F1 page), X opens a row's actions (ImGui's context menu), - the
+        // menu bar; Y, L, R, ZL, ZR and + are the overlay's own (cheats_ui.cpp: the keyboard, window switching, paging, close)
+        struct Map { uint64_t bits; ImGuiKey key; };
+        const Map keys[] = {{kKbDirBits[0], ImGuiKey_GamepadDpadUp}, {kKbDirBits[1], ImGuiKey_GamepadDpadDown}, {kKbDirBits[2], ImGuiKey_GamepadDpadLeft},
+                            {kKbDirBits[3], ImGuiKey_GamepadDpadRight}, {hid::btn(hid::kBtnA), ImGuiKey_GamepadFaceDown},
+                            {hid::btn(hid::kBtnB), ImGuiKey_GamepadFaceRight}, {hid::btn(hid::kBtnX), ImGuiKey_GamepadFaceUp},
+                            {hid::btn(hid::kBtnMinus), ImGuiKey_GamepadFaceLeft}};
+        std::lock_guard<std::mutex> lk(s.mu);
+        ImGuiContext* prev = ImGui::GetCurrentContext();
+        ImGui::SetCurrentContext(s.imgui);
+        ImGuiIO& io = ImGui::GetIO();
+        for (const Map& m : keys)
+            if (((b ^ s.pad_prev) & m.bits) != 0) io.AddKeyEvent(m.key, (b & m.bits) != 0);
+        ImGui::SetCurrentContext(prev);
+        close_cheats = (b & ~s.pad_prev & hid::btn(hid::kBtnPlus)) != 0 && !cheats::ui::hotkey_capture_active() && !cheats::ui::keyboard_open();
+    }
+    const bool open = quit || page || s.kb_poll() || cheats_page;
     bool close_page = false;
     if (page) {
         // Switch A / B are after the player's mapping, as in the quit prompt. + closes the page.
@@ -995,7 +1093,7 @@ uint64_t Overlay::set_keyboard_pad(uint64_t buttons, int lx, int ly) {
         else if (!s.quit_confirmed && (fresh & hid::btn(hid::kBtnB))) s.quit_answer(false);
         else if (!s.quit_confirmed && (fresh & hid::btn(hid::kBtnX))) s.quit_to_settings();
         s.pad_mask = b;
-    } else if (page) {
+    } else if (page || cheats_page) {
         s.pad_mask = b;
     } else if (open) {
         s.pad_new.fetch_or(b & ~s.pad_prev);
@@ -1006,12 +1104,13 @@ uint64_t Overlay::set_keyboard_pad(uint64_t buttons, int lx, int ly) {
     s.pad_held.store(b);
     s.pad_prev = b;
     if (close_page) set_visible(false);   // after the lock is released: set_visible takes it too
+    if (close_cheats) set_cheats_visible(false);
     return open ? ~0ull : s.pad_mask;
 }
 
-bool Overlay::wants_input() const { return impl_->visible && imgui_wants(impl_->mu, impl_->imgui, true, true); }
-bool Overlay::wants_mouse() const { return impl_->visible && imgui_wants(impl_->mu, impl_->imgui, true, false); }
-bool Overlay::wants_keyboard() const { return impl_->visible && imgui_wants(impl_->mu, impl_->imgui, false, true); }
+bool Overlay::wants_input() const { return (impl_->visible || cheats_blocks_game()) && imgui_wants(impl_->mu, impl_->imgui, true, true); }
+bool Overlay::wants_mouse() const { return (impl_->visible || cheats_blocks_game()) && imgui_wants(impl_->mu, impl_->imgui, true, false); }
+bool Overlay::wants_keyboard() const { return (impl_->visible || cheats_blocks_game()) && imgui_wants(impl_->mu, impl_->imgui, false, true); }
 
 void Overlay::add_panel(const std::string& title, std::function<void()> fn) { impl_->panels.push_back({title, std::move(fn)}); }
 
@@ -1022,6 +1121,28 @@ bool Overlay::handle_event(const input::Event& e) {
         if (e.type == EventType::KeyDown && !(e.flags & input::kFlagRepeat)) toggle();
         return true;   // the toggle key never reaches the game (press, repeat and release)
     }
+    if (s.cheats_enabled && (e.type == EventType::KeyDown || e.type == EventType::KeyUp) && e.u.key.scancode == s.cheats_sc) {
+        // closed: a press opens it at once. Open: a press closes it when the key is let go, unless it was held long enough to peek (draw)
+        const int64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (e.type == EventType::KeyDown && !(e.flags & input::kFlagRepeat)) {
+            if (!s.cheats_visible) toggle_cheats();
+            else {
+                s.cheats_key_down_ms = ms;
+                s.cheats_key_held = true;
+            }
+        } else if (e.type == EventType::KeyUp && s.cheats_key_held.exchange(false)) {
+            if (s.cheats_key_peeking.exchange(false)) cheats::ui::set_key_peek(false);
+            else if (s.cheats_visible) toggle_cheats();
+        }
+        return true;   // the cheats key is the overlay's, never the game's
+    }
+    // the cheats table's and scripts' hotkeys see every key, also while the cheats overlay is hidden (they do not take it from the game);
+    // while a hotkey is being bound, the key is the binding's only
+    if (s.cheats_enabled && (e.type == EventType::KeyDown || e.type == EventType::KeyUp) && !(e.flags & input::kFlagRepeat)) {
+        const bool capture = cheats::ui::hotkey_capture_active();
+        cheats::ui::key_event(e.u.key.scancode, e.type == EventType::KeyDown);
+        if (capture && s.cheats_visible) return true;
+    }
     if (s.quit_open) {               // the quit prompt takes every key; the mouse goes to ImGui (its buttons), not to the game
         if (e.type == EventType::KeyDown || e.type == EventType::KeyUp || e.type == EventType::Text) return s.quit_key_event(e);
     }
@@ -1031,7 +1152,9 @@ bool Overlay::handle_event(const input::Event& e) {
     if (!s.visible && !kb && s.touch_btn.load(std::memory_order_relaxed) && (e.flags & input::kFlagTouch) &&
         (e.type == EventType::MouseMotion || e.type == EventType::MouseButtonDown || e.type == EventType::MouseButtonUp))
         return s.touch_button_event(e);
-    if (!s.visible && !kb) return false;
+    // The cheats overlay takes input while it is open, unless "pass input through" is set.
+    const bool cheats_take = s.cheats_visible && !s.cheats_pass;
+    if (!s.visible && !kb && !cheats_take) return false;
     std::lock_guard<std::mutex> lk(s.mu);
     ImGuiContext* prev = ImGui::GetCurrentContext();
     ImGui::SetCurrentContext(s.imgui);
@@ -1227,7 +1350,49 @@ void Overlay::draw(const FrameInfo& f) {
     const bool kb_on = !quit_on && s.kb_poll();
     const bool save_on = s.save_notice_visible(now_s);
     const bool touch_on = s.touch_btn.load(std::memory_order_relaxed) && !kb_on && !quit_on;   // the corner button (menu closed: "Menu", open: "Close")
-    if (!s.visible && !counter_on && !note_on && !save_on && !ptr_on && !kb_on && !quit_on && !touch_on) {
+    if (s.cheats_enabled && !s.cheats_inited) {          // the cheat table, its hotkeys and the frame callbacks start with the first frame
+        s.cheats_inited = true;
+        cheats::ui::init();
+    }
+    if (s.cheats_visible.load(std::memory_order_relaxed) && cheats::ui::take_close_request()) set_cheats_visible(false);   // its close button
+    // the cheats key held for 0.3 s while the panel is open: peek at the game until it is let go (handle_event)
+    if (s.cheats_key_held.load(std::memory_order_relaxed) && !s.cheats_key_peeking.load(std::memory_order_relaxed)) {
+        const int64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+        if (ms - s.cheats_key_down_ms.load(std::memory_order_relaxed) >= 300) {
+            s.cheats_key_peeking = true;
+            cheats::ui::set_key_peek(true);
+        }
+    }
+    // the auto accent: the frame after the open request is read back without the cheats overlay on it; the next one has its colour
+    bool cheats_sampling = false;
+    if (s.cheats_cap_req.load(std::memory_order_relaxed) && !s.ctx.renderer->capture_pending()) {
+        s.cheats_cap_req = false;
+        s.cheats_cap.clear();
+        s.ctx.renderer->capture_next_frame(&s.cheats_cap, &s.cheats_cap_w, &s.cheats_cap_h);
+        s.cheats_cap_wait = true;
+        cheats_sampling = true;
+    } else if (s.cheats_cap_wait && !s.ctx.renderer->capture_pending()) {
+        s.cheats_cap_wait = false;
+        // the colour that stands out: pixels weighted by saturation and brightness (a grey frame stays grey)
+        double r = 0, g = 0, b = 0, wsum = 0;
+        const size_t n = s.cheats_cap.size() / 4;
+        for (size_t i = 0; i < n; i += 61) {
+            const uint8_t* p = s.cheats_cap.data() + i * 4;
+            const int mx = std::max({p[0], p[1], p[2]}), mn = std::min({p[0], p[1], p[2]});
+            const double wgt = (mx - mn) / 255.0 * (mx / 255.0) + 0.02;
+            r += p[0] * wgt; g += p[1] * wgt; b += p[2] * wgt; wsum += wgt;
+        }
+        if (wsum > 0) {
+            const unsigned char c[4] = {static_cast<unsigned char>(r / wsum), static_cast<unsigned char>(g / wsum), static_cast<unsigned char>(b / wsum), 255};
+            cheats::ui::set_frame_colour(c);
+        }
+        s.cheats_cap.clear();
+        s.cheats_cap.shrink_to_fit();
+    }
+    const bool cheats_on = s.cheats_visible.load(std::memory_order_relaxed) && !kb_on && !quit_on && !cheats_sampling;
+    // the HUD over the game (pinned values and cheats, or [cheats] mini's list): only when it has something to show
+    const bool cheats_mini_on = s.cheats_enabled && cheats::ui::hud_wanted() && !cheats_on && !kb_on && !quit_on && (s.counter_in_shots.load(std::memory_order_relaxed) || !s.ctx.renderer->capture_pending());
+    if (!s.visible && !counter_on && !note_on && !save_on && !ptr_on && !kb_on && !quit_on && !touch_on && !cheats_on && !cheats_mini_on) {
         s.last_frame = now;
         s.counter_was_on = false;
         return;
@@ -1250,7 +1415,7 @@ void Overlay::draw(const FrameInfo& f) {
     }
     // a screenshot leaves the counter out unless asked for; with the menu hidden there is then nothing to draw
     const bool show_counter = counter_on && (s.counter_in_shots.load(std::memory_order_relaxed) || !s.ctx.renderer->capture_pending());
-    if (!s.visible && !show_counter && !note_on && !save_on && !ptr_on && !kb_on && !quit_on && !touch_on) {
+    if (!s.visible && !show_counter && !note_on && !save_on && !ptr_on && !kb_on && !quit_on && !touch_on && !cheats_on && !cheats_mini_on) {
         s.last_frame = now;
         return;
     }
@@ -1272,6 +1437,28 @@ void Overlay::draw(const FrameInfo& f) {
     ImGui::NewFrame();
     // the keyboard and the quit prompt are modal: the menu (and a keyboard under the prompt) comes back once they are answered
     if (s.visible && !kb_on && !quit_on) s.build_ui();
+    bool glass_ok = false;
+    if (cheats_on) {
+        // glass: the frame under the panel blurred on the GPU (SDR frames the hook can read; an HDR frame draws the panel solid)
+        if (!hdr_frame && cheats::ui::wants_glass() && s.ctx.renderer->frame_readable() && !s.blur_failed) {
+            if (!s.blur.initialised()) s.blur_failed = !s.blur.init(*s.ctx.device);
+            if (s.blur.initialised() && s.blur.ensure(f.extent)) {
+                if (s.blur_tex_view != s.blur.view()) {       // new images (first use, a new frame size): ImGui's texture for them
+                    if (s.blur_tex) ImGui_ImplVulkan_RemoveTexture(s.blur_tex);
+                    s.blur_tex = ImGui_ImplVulkan_AddTexture(s.blur.sampler(), s.blur.view(), VK_IMAGE_LAYOUT_GENERAL);
+                    s.blur_tex_view = s.blur.view();
+                }
+                glass_ok = s.blur_tex != VK_NULL_HANDLE;
+            }
+        }
+        cheats::ui::set_backdrop(glass_ok ? ImTextureRef(reinterpret_cast<ImTextureID>(s.blur_tex)) : ImTextureRef());
+        // the cheats overlay uses its own theme; save and restore the F1 menu's style around it so the two never clash
+        ImGuiStyle saved = ImGui::GetStyle();
+        cheats::ui::apply_theme(glass_ok);   // its look is its own ([cheats] theme and friends, read by cheats::ui::init)
+        cheats::ui::draw(true, s.ctx.has_window);
+        ImGui::GetStyle() = saved;
+    }
+    if (cheats_mini_on) cheats::ui::draw_mini();
     if (kb_on) s.draw_keyboard(now_s);
     if (quit_on) s.draw_quit_prompt();
     if (touch_on) s.draw_touch_button(s.visible);
@@ -1289,6 +1476,12 @@ void Overlay::draw(const FrameInfo& f) {
         dl->AddPolyline(poly, 7, IM_COL32(0, 0, 0, 255), ImDrawFlags_Closed, 1.5f * k);
     }
     ImGui::Render();
+    // the glass panel's backdrop: the frame under it blurred before ImGui draws over the frame (only while it is open and glass)
+    if (glass_ok) {
+        int rect[4];
+        float strength = 0.f;
+        if (cheats::ui::backdrop_rect(rect, &strength)) s.blur.record(f.cmd, f.image, f.extent, rect, strength);
+    }
 
     // one dynamic-rendering pass that draws the ImGui draw data into view
     auto render_into = [&](VkImageView view, VkAttachmentLoadOp load) {

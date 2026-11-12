@@ -46,6 +46,11 @@ export async function render(el, ctx) {
   let steamBusy = false;
   let steam = null;     // steam.rs Status: Steam found and running, and whether the game and the launcher shortcuts are in it
   let icloud = null;    // icloud.rs Status: whether this Mac has iCloud Drive, and when the save last synced
+  // cheats_themes.rs: the player's own cheats overlay themes (the theme picker lists them after the built-in ones). The cheats settings are
+  // ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+  let cheatsThemes = [];
+  const loadCheatsThemes = () => api('cheats_themes').then((l) => { cheatsThemes = l ?? []; }).catch(() => { cheatsThemes = []; });
+  await loadCheatsThemes();
   let section = store.state.dlss ? 'graphics' : ctx.section || lastSection;
 
   const customOpen = new Set();   // choice rows showing their number field although the value is a preset
@@ -86,6 +91,7 @@ export async function render(el, ctx) {
       steam,
       steamBusy,
       icloud,
+      cheatsThemes,
       backupDetail: backupDetail(backups),
       importing,
       importResult,
@@ -124,7 +130,12 @@ export async function render(el, ctx) {
 
   const CONTROL = {
     segmented: (f, value, e, off) => segmented(f.id, optionsFor(f, value, e), value, { disabled: off }),
-    select: (f, value, e, off) => select(f.id, optionsFor(f, value, e), shownChoice(f, value), { disabled: off }),
+    select: (f, value, e, off) => select(f.id, optionsFor(f, value, e), shownChoice(f, value, e), { disabled: off }),
+    accent: (f, value, e, off) => {
+      const own = /^#[0-9a-f]{6}$/i.test(String(value));
+      return `${select(f.id, optionsFor(f, own ? 'custom' : value, e), own ? 'custom' : value, { disabled: off })}
+        ${own ? `<input type="color" class="set-color" id="${f.id}--color" value="${esc(String(value).toLowerCase())}" aria-label="${esc(f.color.label)}" ${off ? 'disabled' : ''}>` : ''}`;
+    },
     toggle: (f, value, e, off) => toggle(f.id, value, { disabled: off }),
     slider: (f, value, e, off) => slider(f.id, f.min, f.max, value, { step: f.step, suffix: f.suffix ?? '', disabled: off }),
     choice: (f, value, e, off) => {
@@ -337,6 +348,7 @@ export async function render(el, ctx) {
 
   /** The value a control holds, for the types that need no help. */
   function commitControl(f, t, part, final) {
+    if (part === 'color') return commit(f, t.value);   // the cheats accent's own colour (#rrggbb)
     if (part) return commitNumber(f, t, part, final);
     if (f.type === 'clock') {
       const picked = new Date(t.value);
@@ -373,6 +385,8 @@ export async function render(el, ctx) {
   }
 
   function onSelect(f, value) {
+    // the cheats accent's "your own colour": the colour picker opens with the colour in use (the theme's start colour the first time)
+    if (f.type === 'accent' && value === 'custom') return commit(f, f.color.start);
     if (f.type === 'choice' || f.type === 'size') {
       if (value === 'custom') {
         customOpen.add(f.id);
@@ -576,6 +590,15 @@ export async function render(el, ctx) {
     update: () => store.installUpdate(),
     'clock-real': (id) => commit(FIELDS[id], 0),
     'open-url': (url) => api('open_release_url', { url }),
+    'cheats-theme-import': async () => {
+      const t = await api('cheats_theme_import');
+      if (!t) return;
+      await loadCheatsThemes();
+      const f = FIELDS.cheats_theme;
+      if (f) await commit(f, t.path);   // the imported theme is the one in use
+      toast(`Theme \u201c${t.name}\u201d imported`);
+    },
+    'cheats-themes-open': () => api('cheats_themes_open'),
     async 'builds-open'() {
       await flush();
       await chooseBuild(src.config.channel === 'testing' ? 'testing' : 'stable', false);

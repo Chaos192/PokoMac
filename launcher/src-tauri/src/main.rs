@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod cheats_themes;
 mod dlss;
 mod dump;
 mod events;
@@ -1746,6 +1747,9 @@ fn main() {
             room_code_host,
             port_forward_status,
             port_forward_set,
+            cheats_themes::cheats_themes,
+            cheats_themes::cheats_theme_import,
+            cheats_themes::cheats_themes_open,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the launcher");

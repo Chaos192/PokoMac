@@ -26,12 +26,18 @@ std::set<uint32_t> g_sysregs_seen;
 
 extern "C" {
 
-void call_indirect(Ctx* c, uint64_t addr) { nxrt::dispatch_call(c, addr); }
+// call_indirect and host_import are the lifted code's safe points for a requested pause (the cheats overlay, kernel thread.cpp): the
+// registers are in c at every call out of lifted code.
+void call_indirect(Ctx* c, uint64_t addr) {
+    nxrt::kernel::thread_safepoint();
+    nxrt::dispatch_call(c, addr);
+}
 
 // A call to a symbol another module provides: the lifted PLT stub passes NX_IMPORT_ID(module index, symbol index) of its own
 // module. The registry (nxmodule.cpp) names the import and finds its target: a function another lifted module defines, else the HLE
 // handler or logging stub of that name.
 void host_import(Ctx* c, uint32_t import_id) {
+    nxrt::kernel::thread_safepoint();
     const uint64_t target = nxrt::import_resolve(import_id);
     if (!target) {
         char what[96];

@@ -1,0 +1,25 @@
+{
+  "format": 1,
+  "author": "AnySwitch",
+  "name": "Midnight",
+  "description": "The launcher's Midnight tone: blue on near black.",
+  "style": "solid",
+  "opacity": 97,
+  "blur": 60,
+  "tint": 55,
+  "radius": 20,
+  "accent": "#6aa9ff",
+  "colors": {
+    "panel": "#0e0f12",
+    "dialog": "#17191e",
+    "surface": "#ebf0fa",
+    "well": "#0000004d",
+    "text": "#f4f5f7",
+    "on_accent": "#04162e",
+    "ok": "#7fd6a8",
+    "warn": "#ffc47e",
+    "danger": "#ff8d8d",
+    "danger_solid": "#d84a55",
+    "scrim": "#000000a8"
+  }
+}

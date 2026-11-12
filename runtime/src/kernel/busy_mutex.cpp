@@ -47,6 +47,7 @@ void lock_busy_mutex(::Ctx* c) {
 // WFE and YIELD of the lifted code (nx_spin_hint in recomp ctx.h). WFE: the thread waits for an event, so it gives the processor away at
 // once. YIELD marks a spin loop that expects the other side to run soon: a PAUSE, and every 64th call a real hand-over.
 void spin_hint(int kind) {
+    thread_safepoint();   // a spinner waiting for a paused thread's lock parks here (the cheats overlay's pause, thread.cpp)
     thread_local uint32_t n = 0;
     if (kind == 1 || (++n & 63) == 0) yield_host();
     else YieldProcessor();

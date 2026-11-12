@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <functional>
 
@@ -21,6 +22,9 @@
 #include "nxrt/module.h"
 
 namespace nxrt::kernel {
+
+thread_local std::atomic<bool>* t_pause_req = nullptr;
+
 namespace {
 
 SRWLOCK g_list_lock = SRWLOCK_INIT;
@@ -50,6 +54,7 @@ void finish_current(KThread& t) {
     diag_unregister_thread();
     detail::thread_mark_exited(t);
     t_self = nullptr;
+    t_pause_req = nullptr;
 }
 
 DWORD WINAPI host_thread_main(LPVOID param) {
@@ -58,6 +63,7 @@ DWORD WINAPI host_thread_main(LPVOID param) {
     delete box;
     KThread* t = t_keepalive.get();
     t_self = t;
+    t_pause_req = &t->pause_req;
     t->host_tid = GetCurrentThreadId();
     log_set_thread_name(t->name.c_str());
     diag_register_thread(t->name.c_str(), &t->ctx, t->id);
@@ -187,6 +193,7 @@ uint32_t main_thread_adopt(uint64_t stack_size, const char* name) {
     t->host_tid = GetCurrentThreadId();
     t->started = true;
     t_self = t.get();
+    t_pause_req = &t->pause_req;
     log_set_thread_name(t->name.c_str());
     diag_register_thread(t->name.c_str(), &t->ctx, t->id);
     sched_apply(*t);
@@ -265,6 +272,20 @@ void kernel_reset() {
     ReleaseSRWLockExclusive(&g_list_lock);
     handles_reset();
     detail::sync_reset();
+}
+
+// ---- pausing (the cheats overlay: cheats/control.h; ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch) --------------------
+// A thread inside the runtime counts as not running: its guest registers are in ctx, since lifted code stores them before any call out; a
+// thread in lifted code parks at its next call into the runtime (SVC end, indirect call, import). The resume clears the request under the
+// lock the parked thread waits on, so a pause that comes before the woken thread has run finds it still parked (nxnative
+// docs/reference/threads.md, "A pause acknowledged past its resume"). svcSetThreadActivity stays a no-op in PokoMac (svc_thread.cpp).
+void thread_park(KThread& t) {
+    std::unique_lock<std::mutex> lk(t.pause_mu);
+    if (!t.pause_req.load()) return;
+    t.parked = true;
+    t.pause_cv.notify_all();
+    t.pause_cv.wait(lk, [&] { return !t.pause_req.load(); });
+    t.parked = false;
 }
 
 }  // namespace nxrt::kernel

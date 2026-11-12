@@ -3,6 +3,7 @@
 // stretch. The behaviour and the thread rules are the contract in include/nxrt/frame_limiter.h.
 #include "nxrt/frame_limiter.h"
 
+#include "nxrt/kernel.h"
 #include "nxrt/log.h"
 
 #include <windows.h>
@@ -167,7 +168,7 @@ uint64_t FrameLimiter::begin_frame_nohook() {
         return entry;
     }
 
-    const double period = 1e9 / fps;
+    const double period = 1e9 / (fps * kernel::time_scale());   // the cheats overlay's speed hack (1.0: unchanged)
     double next;
     {
         std::lock_guard<std::mutex> lk(s.mu);

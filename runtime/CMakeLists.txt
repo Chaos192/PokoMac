@@ -76,6 +76,14 @@ add_subdirectory(third_party/pokopia-coop)   # [net] protocol = native: pokopia-
 target_link_libraries(nxrt PRIVATE pokopia_coop)
 add_subdirectory(third_party/miniz)   # zlib streams (MIT): the Pokopia save repair, games/pkp/pkp_save_uuid.cpp
 include(cmake/media_deps.cmake)   # libvpx for the Switch 2 video decoders (optional)
+# The cheats menu (src/cheats, src/gfx/play/cheats_ui*; ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch)
+include(cmake/lua_deps.cmake)     # Lua 5.4 (MIT) for the cheats overlay's scripts (src/cheats/luavm.cpp)
+target_link_libraries(nxrt PRIVATE nxrt_lua)
+if(MSVC)
+    # the cheat tools read any guest address: gmem.cpp's __try must catch a fault inside memcpy, which clang-cl does only with asynchronous
+    # exceptions (with /EHsc a read of a reserved page ended the process: 0xC0000005 in memcpy_repmovs under gmem::read)
+    set_source_files_properties(src/cheats/gmem.cpp PROPERTIES COMPILE_OPTIONS "/EHa")
+endif()
 
 if(NXRT_BUILD_GFX)
     include(cmake/gfx.cmake)

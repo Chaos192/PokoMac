@@ -161,9 +161,14 @@ ViState& vi() {
 // The display's vsync: a host thread signals the event at 60 Hz. Started by the first GetDisplayVsyncEvent, stopped by vi_nv_reset().
 void vsync_main() {
     ViState& s = vi();
+    // the cheats overlay's speed hack scales the period (kernel::time_scale; at 1.0 the wait is the 16667 us it always was)
+    auto period = [] {
+        const double k = kernel::time_scale();
+        return k == 1.0 ? std::chrono::microseconds(16667) : std::chrono::microseconds(static_cast<int64_t>(16667.0 / k));
+    };
     std::unique_lock<std::mutex> lk(s.mu);
     while (!s.vsync_stop) {
-        s.cv.wait_for(lk, std::chrono::microseconds(16667), [&] { return s.vsync_stop; });
+        s.cv.wait_for(lk, period(), [&] { return s.vsync_stop; });
         if (s.vsync_stop) break;
         s.vsync.signal();
     }

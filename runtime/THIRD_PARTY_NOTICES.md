@@ -335,3 +335,32 @@ Files: `third_party/nvidia_streamline/include/` (unmodified). Copyright (c) NVID
 ## NVIDIA DLSS (nvngx_dlss.dll, not shipped) and Intel XeSS (not shipped)
 
 `nvngx_dlss.dll` (NVIDIA DLSS Super Resolution 310.9.16) is under the NVIDIA RTX SDKs LICENSE (v. March 14, 2024; https://github.com/NVIDIA/DLSS/blob/main/LICENSE.txt, a copy is `licenses/LICENSE.NVIDIA-RTX-SDKs.txt` in the release). That licence requires redistributors to pass on terms at least as protective as its own and forbids any use that subjects the SDK to a licence requiring it to be redistributable at no charge (section 4e), which does not fit a GPL-3.0 package, so neither the repository nor the release package contains the file. The launcher's Game files page offers to download it from NVIDIA's own repository (https://github.com/NVIDIA/DLSS, tag v310.9.16, sha256 checked) into `upscalers/streamline/` on the player's PC after showing the licence. `libxess.dll` (Intel XeSS) is never shipped either; `xess_dll` is read but not used (see `docs/CONFIG.md`). The DLSS SDK itself (NGX static library) is not used.
+
+## The cheats menu's third-party parts (ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch)
+
+### Inter 4 (SIL Open Font License 1.1)
+
+The cheats overlay's typeface (`src/gfx/play/cheats_theme.cpp`), the same as the launcher's (`@fontsource-variable/inter`). Copyright 2016
+The Inter Project Authors (https://github.com/rsms/inter). `assets/fonts/Inter-Regular.ttf`, `Inter-Regular-Ext.ttf` and
+`Inter-SemiBold.ttf` are static instances (weights 400 and 600) of the launcher's variable Inter files, subset to Latin and Latin Extended,
+made with fontTools (`varLib.instancer`, `subset`) and compiled into the runtime. The font names are kept; the OFL allows subsetting and
+embedding. Licence text: `assets/fonts/LICENSE-Inter.txt`.
+
+### stb_image 2.30 (public domain or MIT, the user's choice)
+
+`third_party/stb/stb_image.h`, unmodified, from https://github.com/nothings/stb at 013ac3beddff3dbffafd5177e7972067cd2b5083 (2024-05-31;
+git blob 9eedabedc45b3e6fd88fae6f14a160b4d53272ec). Copyright (c) 2017 Sean Barrett. Used under its MIT licence (the text is at the end of
+the file); compiled into `src/gfx/play/cheats_icon.cpp` for JPEG only (the game's icon in the cheats overlay).
+
+### Lua 5.4.7 (MIT)
+
+The cheats overlay's scripts (`src/cheats/luavm.cpp`). Fetched by `cmake/lua_deps.cmake` from https://github.com/lua/lua (tag v5.4.7,
+SHA-256 checked) and compiled into the runtime without io, os, package and debug. Copyright (C) 1994-2024 Lua.org, PUC-Rio. Permission is
+hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software. THE
+SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

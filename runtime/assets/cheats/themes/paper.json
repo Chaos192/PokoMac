@@ -1,0 +1,29 @@
+{
+  "format": 1,
+  "author": "AnySwitch",
+  "name": "Paper",
+  "description": "The launcher's Paper tone: a light theme, warm paper with a rust accent.",
+  "style": "solid",
+  "opacity": 97,
+  "blur": 60,
+  "tint": 60,
+  "radius": 16,
+  "accent": "#b3470d",
+  "colors": {
+    "panel": "#f6f1e8",
+    "dialog": "#fffdf8",
+    "surface": "#302412",
+    "card": "#fffdf8cc",
+    "well": "#3024120f",
+    "text": "#1d1a15",
+    "text3": "#1d1a158a",
+    "line": "#3024121c",
+    "line_strong": "#3024123d",
+    "on_accent": "#ffffff",
+    "ok": "#1b6e4b",
+    "warn": "#8f4c00",
+    "danger": "#b92a2a",
+    "danger_solid": "#c93131",
+    "scrim": "#34281861"
+  }
+}

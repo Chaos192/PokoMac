@@ -1,0 +1,25 @@
+{
+  "format": 1,
+  "author": "AnySwitch",
+  "name": "Sunrise",
+  "description": "The launcher's default tone: amber on warm dark.",
+  "style": "solid",
+  "opacity": 97,
+  "blur": 60,
+  "tint": 55,
+  "radius": 20,
+  "accent": "#ffc23d",
+  "colors": {
+    "panel": "#1a140f",
+    "dialog": "#241c15",
+    "surface": "#ffeedc",
+    "well": "#00000042",
+    "text": "#f8f3ed",
+    "on_accent": "#2a1700",
+    "ok": "#9fd8ff",
+    "warn": "#ffb35c",
+    "danger": "#ff7a6b",
+    "danger_solid": "#d8434c",
+    "scrim": "#0a06038c"
+  }
+}

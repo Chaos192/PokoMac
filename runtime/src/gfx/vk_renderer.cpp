@@ -1017,6 +1017,7 @@ void Renderer::capture_next_frame(std::vector<uint8_t>* rgba, uint32_t* width, u
 }
 
 bool Renderer::capture_pending() const { return impl_->cap_pending.load(std::memory_order_relaxed); }
+bool Renderer::frame_readable() const { return impl_->headless || impl_->capture_supported; }
 
 RendererStats Renderer::stats() const { return impl_->st; }
 void Renderer::wait_idle() { impl_->dev->wait_idle(); }

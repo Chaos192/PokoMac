@@ -32,6 +32,7 @@
 #include <utility>
 #include <vector>
 
+#include "nxrt/cheats.h"
 #include "nxrt/config.h"
 #include "nxrt/diag.h"
 #include "nxrt/dispatch.h"
@@ -553,6 +554,10 @@ int main(int argc, char** argv) {
     } else {
         nxrt::module_protect_all();
     }
+
+    // Cheats (ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch): with [cheats] enable, start the 1/12 s cheat engine now,
+    // as a console's dmnt attaches before the first instruction. Default off; the overlay (its own key) and the scanner still work without this.
+    nxrt::cheats::engine_start_if_configured();
 
     if (const std::string spec = nxrt::config_get_str("boot", "press", ""); !spec.empty()) {
         parse_presses(spec);

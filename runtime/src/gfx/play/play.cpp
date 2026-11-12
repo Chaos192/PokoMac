@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "nxrt/audio_sink.h"
+#include "nxrt/cheats.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/game.h"
 #include "play_display.h"
@@ -226,6 +227,7 @@ struct G {
     double pitch_limit_deg = 0;
     bool overlay_combo_held = false;   // poll_pads: the [overlay] pad combination was held at the last poll (the menu toggles on the rising edge)
     bool quit_combo_held = false;      // poll_pads: the [quit] pad combination was held on a pad at the last poll (the prompt opens on the rising edge)
+    bool cheats_combo_held = false;    // poll_pads: the [cheats] pad combination was held at the last poll (the cheats overlay toggles on the rising edge)
 
     // frame state (main thread)
     uint64_t update_seq = 0, aim_seq = 0;
@@ -397,6 +399,21 @@ bool key_sink(const char* name, bool down) {
         m.u.motion.x = px;
         m.u.motion.y = py;
         input::queue_push(m);
+        return true;
+    }
+    // Scripted typing (the overlays' text fields): `keydown text 1234` delivers the characters as text events, as a keyboard's typing does
+    if (name && std::strncmp(name, "text ", 5) == 0) {
+        if (!down) return true;
+        for (const char* p = name + 5; *p;) {
+            input::Event t;
+            t.type = input::EventType::Text;
+            size_t n = 0;
+            while (p[n] && n < sizeof t.u.text.utf8 - 1) ++n;
+            std::memcpy(t.u.text.utf8, p, n);
+            t.u.text.utf8[n] = 0;
+            input::queue_push(t);
+            p += n;
+        }
         return true;
     }
     // Scripted virtual gamepad (S35 tests): `keydown vpad attach xbox`, `keydown vpad axis ry 0.8`, `keydown vpad button south 1`, `keydown vpad gyro 0 1 0` ...
@@ -695,12 +712,23 @@ void poll_pads(uint64_t now) {
         }
         overlay_combo = 0;
     }
+    // [cheats] pad: the controller combo that shows/hides the cheats overlay (phase 6), read once; ignored if it clashes with quit or overlay.
+    static const uint32_t cheats_combo = [] {
+        uint32_t c = 0;
+        const std::string spec = config_get_str("cheats", "pad", "");
+        if (!spec.empty() && !parse_pad_combo(spec, &c)) c = 0;
+        return c;
+    }();
+    uint32_t cheats_pad = cheats_combo;
+    if (cheats_pad && (cheats_pad == quit_combo || cheats_pad == overlay_combo)) cheats_pad = 0;
+    bool cheats_held = false;
     for (size_t i = 0; i < n; ++i) {
         platform::GamepadRaw raw;
         if (!platform::gamepad_poll(infos[i].id, &raw)) continue;
         // the quit combination: every button of it held on this one pad (physical buttons, before [padmap])
         if (quit_combo && (pad_src_held(raw, st.settings.pad) & quit_combo) == quit_combo) quit_held = true;
         if (overlay_combo && (pad_src_held(raw, st.settings.pad) & overlay_combo) == overlay_combo) overlay_held = true;
+        if (cheats_pad && (pad_src_held(raw, st.settings.pad) & cheats_pad) == cheats_pad) cheats_held = true;
         hid::NpadInput tmp;
         map_pad(raw, st.settings.pad, &tmp);
         {   // a pressed button or a stick well off centre makes this the pad the prompts follow
@@ -742,6 +770,10 @@ void poll_pads(uint64_t now) {
     if (st.overlay && overlay_held && !st.overlay_combo_held && !st.overlay->quit_prompt_open() && !st.overlay->keyboard_open()) st.overlay->toggle();
     st.overlay_combo_held = overlay_held;
     if (overlay_held) pf.buttons = 0;
+    // The cheats overlay toggles on the rising edge of its own combination; its buttons are held back from the game while held.
+    if (st.overlay && cheats_held && !st.cheats_combo_held && !st.overlay->quit_prompt_open() && !st.overlay->keyboard_open()) st.overlay->toggle_cheats();
+    st.cheats_combo_held = cheats_held;
+    if (cheats_held) pf.buttons = 0;
     // The on-screen keyboard and the quit prompt read the merged pad before it is held back; what it returns stays away from the game (everything while it is
     // open, then the button that closed it until it is released).
     if (st.overlay) {
@@ -859,6 +891,8 @@ int update_hook(::Ctx*, uint64_t, void*) {
     if (st.overlay && st.overlay->take_quit_confirmed()) quit_now("quit from the menu");
     // Settings was chosen in the same prompt: the F1 page opens here, on the main thread, as the F1 key does
     if (st.overlay && st.overlay->take_settings_wanted()) st.overlay->set_visible(true);
+    // the cheats overlay's frame callbacks (hotkeys, scripts); while it has the game paused this holds the thread (pause_service runs meanwhile)
+    cheats::frame_hook();
     const GamePlay* gp = game_play();
     if (gp && gp->frame_begin) gp->frame_begin();
     if (st.engine) st.engine->frame_tick();
@@ -1028,6 +1062,25 @@ void keyboard_service() {
         if (platform::relative_mouse()) platform::set_relative_mouse(false);
         platform::set_cursor_visible(true);
     }
+    input::Event buf[64];
+    for (;;) {
+        const size_t got = input::queue_drain(buf, 64);
+        if (!got) break;
+        for (size_t i = 0; i < got; ++i) handle_event(buf[i], now);
+    }
+    poll_pads(now);
+    if (st.overlay->take_quit_confirmed()) quit_now("quit from the menu");
+    nvn::present_last_frame_again();
+}
+
+// The cheats overlay has the game paused (cheats/control.h): its presenting thread waits in update_hook's frame hook, where this keeps the
+// window, the pads and the overlay going and shows the last frame again, as keyboard_service does while the software keyboard is up.
+void pause_service() {
+    G& st = g();
+    if (!st.started || !st.overlay) return;
+    const uint64_t now = now_ns();
+    platform::pump_events();          // also headless (scripted runs): SDL's virtual pads update here
+    if (st.window) g_last_pump_ms.store(SDL_GetTicks(), std::memory_order_relaxed);
     input::Event buf[64];
     for (;;) {
         const size_t got = input::queue_drain(buf, 64);
@@ -1405,6 +1458,7 @@ bool start(const StartOptions& opt) {
     hid::set_vibration_sink(&vib_sink, nullptr);
     tt::set_mouse_sink(&input::mouse_delta_add);
     tt::set_key_sink(&key_sink);
+    cheats::set_pause_service(&pause_service);
     if (st.renderer) tt::set_screenshot_provider(&screenshot_provider, nullptr);
     if (const std::string script = config_get_str("play", "selftest", ""); !script.empty()) {
         std::string err;

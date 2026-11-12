@@ -1,0 +1,76 @@
+{
+  "about": "The cheats overlay's look settings ([cheats] in pkp.ini): the one source of their defaults and ranges. The runtime compiles this file in (runtime/src/gfx/play/cheats_theme_file.cpp); the launcher imports it (launcher/src/settings-schema.js). docs/CHEATS.md. A null default means: the theme's own value (each theme sets its style, opacity, blur and tint; the player's setting, when set, wins).",
+  "theme": {
+    "default": "sunrise",
+    "builtin": [
+      "sunrise",
+      "dusk",
+      "midnight",
+      "daylight",
+      "paper",
+      "frost"
+    ]
+  },
+  "accent": {
+    "default": "theme",
+    "presets": [
+      "theme",
+      "auto",
+      "blue",
+      "green",
+      "amber",
+      "violet",
+      "red",
+      "teal",
+      "slate"
+    ]
+  },
+  "style": {
+    "default": null,
+    "values": [
+      "solid",
+      "glass"
+    ]
+  },
+  "opacity": {
+    "default": null,
+    "min": 30,
+    "max": 100,
+    "step": 5
+  },
+  "blur": {
+    "default": null,
+    "min": 0,
+    "max": 100,
+    "step": 5
+  },
+  "tint": {
+    "default": null,
+    "min": 0,
+    "max": 100,
+    "step": 5
+  },
+  "scale": {
+    "default": 100,
+    "min": 50,
+    "max": 200,
+    "step": 10
+  },
+  "animations": {
+    "default": true
+  },
+  "hud_opacity": {
+    "default": 85,
+    "min": 30,
+    "max": 100,
+    "step": 5
+  },
+  "dock": {
+    "default": "centre",
+    "values": [
+      "left",
+      "centre",
+      "right"
+    ]
+  }
+}

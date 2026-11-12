@@ -39,6 +39,14 @@ public:
     bool handle_event(const input::Event& e);
 
     void set_visible(bool v);
+    // The cheats overlay (phase 6): a separate layer from the F1 dev menu, with its own key ([cheats] key, default F3) and controller combo.
+    // It shares this ImGui context (input routing, the renderer hook, the DPI scale) but its own visibility, so it never clashes with F1.
+    void toggle_cheats();
+    void set_cheats_visible(bool v);
+    bool cheats_visible() const;
+    int cheats_scancode() const;             // SDL scancode of the cheats toggle key
+    void set_cheats_scancode(int sc);
+    bool cheats_blocks_game() const;         // cheats visible and not "pass input through": the game gets no keyboard/mouse
     // Touch screens: a "Menu" button in the bottom left corner of the frame (a handheld has no F1 key). A finger on it opens the menu; while the
     // menu is open it reads "Close" and closes it. The menu also gets finger-sized controls while this is on. Any thread. Off by default.
     void set_touch_button(bool on);

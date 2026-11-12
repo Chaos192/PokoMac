@@ -140,6 +140,7 @@ void sleep_rem_locked(KThread& t, int64_t rem_ns) {
 
 // Waits (g_k held, released while sleeping) until t.wake or the timeout; false on timeout.
 bool block_on_wake(KThread& t, int64_t timeout_ns) {
+    timeout_ns = scale_wait_ns(timeout_ns);                 // the speed hack (1.0: unchanged)
     const int64_t until = timeout_ns < 0 ? 0 : now_ns() + timeout_ns;
     while (!t.wake) {
         int64_t rem = -1;
@@ -356,6 +357,7 @@ uint32_t wait_synchronization(const uint32_t* handles, int32_t count, int64_t ti
             if (objs[i]->signaled()) return i;
         return -1;
     };
+    timeout_ns = scale_wait_ns(timeout_ns);                 // the speed hack (1.0: unchanged)
     const int64_t until = timeout_ns <= 0 ? 0 : now_ns() + timeout_ns;
     Guard g;
     KThread& me = self();

@@ -2,6 +2,10 @@
 // System tick and high-resolution sleep. Pattern from smo-recomp runtime/os/os_threads.c sleep_ns and SuperMarioWonderRecomp kernel.cpp system_tick.
 #include <windows.h>
 
+#include <atomic>
+#include <cstdint>
+#include <mutex>
+
 #include <string>
 
 #include "nxrt/config.h"
@@ -19,8 +23,8 @@ uint64_t tick_hz() {
     return hz;
 }
 
-uint64_t system_tick() {
-    if (uint64_t vt; tt::virtual_tick(&vt)) return vt;      // deterministic mode: the virtual clock (test tooling)
+namespace {
+uint64_t raw_tick() {
     static const uint64_t freq = [] {
         LARGE_INTEGER f;
         QueryPerformanceFrequency(&f);
@@ -31,6 +35,65 @@ uint64_t system_tick() {
     const uint64_t v = static_cast<uint64_t>(c.QuadPart);
     const uint64_t hz = tick_hz();
     return (v / freq) * hz + (v % freq) * hz / freq;     // split so the multiplication cannot overflow
+}
+
+// The speed hack's clock: tick = virt0 + (raw - raw0) * scale, read under a sequence lock so a change of scale is seen whole. Off (the raw
+// tick) until the scale first changes; after that the offset stays, so the clock never jumps back when the scale returns to 1.
+struct TimeScale {
+    std::atomic<bool> on{false};
+    std::atomic<uint32_t> seq{0};
+    std::atomic<uint64_t> raw0{0}, virt0{0};
+    std::atomic<double> scale{1.0};
+    std::mutex mu;
+};
+TimeScale& ts() {
+    static TimeScale t;
+    return t;
+}
+uint64_t scaled_tick(uint64_t raw) {
+    TimeScale& t = ts();
+    for (;;) {
+        const uint32_t s0 = t.seq.load(std::memory_order_acquire);
+        if (s0 & 1) continue;
+        const uint64_t r0 = t.raw0.load(std::memory_order_relaxed), v0 = t.virt0.load(std::memory_order_relaxed);
+        const double k = t.scale.load(std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (t.seq.load(std::memory_order_relaxed) != s0) continue;
+        return v0 + static_cast<uint64_t>(static_cast<double>(raw - r0) * k);
+    }
+}
+}  // namespace
+
+uint64_t system_tick() {
+    if (uint64_t vt; tt::virtual_tick(&vt)) return vt;      // deterministic mode: the virtual clock (test tooling)
+    const uint64_t raw = raw_tick();
+    if (!ts().on.load(std::memory_order_relaxed)) return raw;
+    return scaled_tick(raw);
+}
+
+void set_time_scale(double scale) {
+    if (!(scale > 0.0)) return;
+    TimeScale& t = ts();
+    std::lock_guard<std::mutex> lk(t.mu);
+    const uint64_t raw = raw_tick();
+    const uint64_t now = t.on.load() ? scaled_tick(raw) : raw;
+    t.seq.fetch_add(1, std::memory_order_acq_rel);          // odd: readers retry
+    t.raw0.store(raw, std::memory_order_relaxed);
+    t.virt0.store(now, std::memory_order_relaxed);
+    t.scale.store(scale, std::memory_order_relaxed);
+    t.seq.fetch_add(1, std::memory_order_release);
+    t.on.store(true);
+    NXLOG_I("kernel", "time scale x%.3f (the console clock, sleeps, timed waits and vsync)", scale);
+}
+
+double time_scale() { return ts().on.load(std::memory_order_relaxed) ? ts().scale.load(std::memory_order_relaxed) : 1.0; }
+
+int64_t scale_wait_ns(int64_t ns) {
+    if (ns <= 0 || !ts().on.load(std::memory_order_relaxed)) return ns;
+    const double k = ts().scale.load(std::memory_order_relaxed);
+    if (k == 1.0) return ns;
+    const double v = static_cast<double>(ns) / k;
+    return v < 1.0 ? 1 : v > 9.2e18 ? INT64_MAX : static_cast<int64_t>(v);
 }
 
 // SleepThread takes nanoseconds and the console timer is good to a few microseconds. Sleep() counts whole milliseconds on a
@@ -119,6 +182,7 @@ void detail::sleep_timer_ns(int64_t ns) {
 // waits: Pokopia's main thread sleeps in SleepThread while the software keyboard applet is open (the freeze report's main stack).
 void sleep_ns(int64_t ns) {
     if (tt::virtual_sleep(ns)) return;                      // deterministic mode: time advances, the thread only yields
+    ns = scale_wait_ns(ns);                                 // the speed hack (1.0: unchanged)
     constexpr int64_t kSlice = 10000000;
     void (*fn)() = ns > kSlice ? detail::blocked_hook_here() : nullptr;
     if (!fn) return sleep_once(ns);

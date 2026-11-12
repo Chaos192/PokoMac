@@ -1,0 +1,25 @@
+{
+  "format": 1,
+  "author": "AnySwitch",
+  "name": "Dusk",
+  "description": "The launcher's Dusk tone: mint on deep blue.",
+  "style": "solid",
+  "opacity": 97,
+  "blur": 60,
+  "tint": 55,
+  "radius": 20,
+  "accent": "#7ee8c1",
+  "colors": {
+    "panel": "#10142a",
+    "dialog": "#191d35",
+    "surface": "#dce4ff",
+    "well": "#00000042",
+    "text": "#f3f5fc",
+    "on_accent": "#06231a",
+    "ok": "#7ee8c1",
+    "warn": "#ffc47e",
+    "danger": "#ff9095",
+    "danger_solid": "#d84a55",
+    "scrim": "#04050e9e"
+  }
+}

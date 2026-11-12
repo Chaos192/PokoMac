@@ -4,6 +4,8 @@
 // Pattern from SuperMarioWonderRecomp runtime/src/kernel.cpp + kernel_state.h (MIT) and smo-recomp runtime/os/os_threads.c (GPL-3.0).
 #pragma once
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -144,6 +146,16 @@ struct KThread : KObject {
     void* cv_storage[1] = {nullptr};    // CONDITION_VARIABLE is pointer sized: this thread's own wake-up (kernel_sync.cpp)
     void* precise_event = nullptr;      // [sched] precise_waits: the event the thread waits on in a wait's last stretch, set too on a wake
     std::weak_ptr<KThread> self;
+    // Pausing (the cheats overlay's pause, frame advance and code swaps: cheats/control.h park_others; ported from AnySwitch by Chaos192,
+    // github.com/Chaos192/AnySwitch, where svcSetThreadActivity uses it too), thread.cpp. The thread counts as paused while it is inside an
+    // SVC (in_runtime > 0; ctx holds its registers: lifted code stores them before every call out) or parked. While a pause is requested it
+    // parks when the SVC ends and at its next indirect call, import or spin hint. (HLE handlers are not counted: some call back into guest
+    // code, such as an exception's landing pads.) Nothing is requested unless the cheats overlay pauses the game.
+    std::atomic<bool> pause_req{false};
+    std::atomic<int> in_runtime{0};
+    bool parked = false;                // under pause_mu
+    std::mutex pause_mu;
+    std::condition_variable pause_cv;
     ~KThread() override;                // closes host_handle
     ObjType type() const override { return ObjType::Thread; }
     bool signaled() const override { return exited; }
@@ -175,6 +187,26 @@ uint64_t thread_count_running();                           // started and not ye
 bool thread_set_priority(KThread& t, int hos_prio);       // updates the object and the host thread
 int app_core_count();                 // application cores: 3 (Switch 1) or 6 (Switch 2)
 bool thread_set_core_mask(KThread& t, int ideal_core, uint64_t mask);   // console cores; false when mask has no usable core
+// The calling guest thread: waits while a pause is requested. Only where its ctx holds its registers (a call out of lifted code).
+void thread_park(KThread& t);
+// The calling guest thread's pause request, or nullptr on a host thread: the guest's safe points test it.
+extern thread_local std::atomic<bool>* t_pause_req;
+inline void thread_safepoint() {
+    if (std::atomic<bool>* p = t_pause_req; p && p->load(std::memory_order_relaxed)) thread_park(*current_thread());
+}
+// The calling thread is inside the runtime (an SVC) for the object's lifetime: it counts as paused, and parks at the end while a pause
+// is requested. Nothing inside may run guest code.
+struct InRuntime {
+    KThread* t;
+    InRuntime() : t(current_thread()) {
+        if (t) t->in_runtime.fetch_add(1);
+    }
+    ~InRuntime() {
+        if (t && t->in_runtime.fetch_sub(1) == 1 && t->pause_req.load()) thread_park(*t);
+    }
+    InRuntime(const InRuntime&) = delete;
+    InRuntime& operator=(const InRuntime&) = delete;
+};
 
 // ---- scheduling model (console cores) ----------------------------------------------------------------------------------------
 // The console runs the highest-priority ready thread on each of its three application cores. The model gives every console core one host
@@ -209,6 +241,11 @@ void sched_reset_for_tests();            // forget the slot and re-read the conf
 
 // ---- time --------------------------------------------------------------------------------------------------------------------
 uint64_t system_tick();                  // the console tick (tick_hz()), from QueryPerformanceCounter
+// The speed hack (cheats overlay, phase 6; cheats/control.h): the console clock, the guest's sleeps and timed waits, the display's vsync and
+// the frame limiter run at `scale` times real time. 1.0 (the default) changes nothing; the clock stays continuous across changes.
+void set_time_scale(double scale);
+double time_scale();
+int64_t scale_wait_ns(int64_t ns);       // how long a guest wait of ns lasts on the host (ns / scale; <= 0 and scale 1 unchanged)
 constexpr uint64_t kTickHzSwitch1 = 19200000;   // Switch 1 system tick (CNTFRQ_EL0)
 constexpr uint64_t kTickHzSwitch2 = 31250000;   // Switch 2 system tick (SDK 20.5 for Switch 2 uses 31.25 MHz)
 uint64_t tick_hz();                      // the registered game's platform tick frequency
