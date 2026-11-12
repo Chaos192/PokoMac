@@ -1217,4 +1217,20 @@ Device::MemoryStats Device::memory_stats() {
     return m;
 }
 
+// ---- video memory (Device::video_memory: the F1 menu's pins; ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch) ------
+bool Device::video_memory(VideoMemory* out) const {
+    if (!vma_ || !out) return false;
+    const uint32_t heap = device_local_heap(vma_);
+    VmaBudget b[VK_MAX_MEMORY_HEAPS] = {};
+    vmaGetHeapBudgets(vma_, b);
+    const VkPhysicalDeviceMemoryProperties* mp = nullptr;
+    vmaGetMemoryProperties(vma_, &mp);
+    out->usage = b[heap].usage;
+    out->budget = b[heap].budget;
+    out->heap = mp ? mp->memoryHeaps[heap].size : 0;
+    out->block_bytes = b[heap].statistics.blockBytes;
+    out->allocation_bytes = b[heap].statistics.allocationBytes;
+    return true;
+}
+
 }  // namespace nxrt::gfx

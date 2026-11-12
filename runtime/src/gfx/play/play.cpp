@@ -61,6 +61,8 @@
 #include "play_types.h"
 #include "play_vpad.h"
 #include "play_ui.h"
+#include "hotkeys.h"
+#include "perf_pins.h"
 #include "prompts.h"
 #include "pad_map.h"
 #include "pad_orient.h"
@@ -228,6 +230,8 @@ struct G {
     bool overlay_combo_held = false;   // poll_pads: the [overlay] pad combination was held at the last poll (the menu toggles on the rising edge)
     bool quit_combo_held = false;      // poll_pads: the [quit] pad combination was held on a pad at the last poll (the prompt opens on the rising edge)
     bool cheats_combo_held = false;    // poll_pads: the [cheats] pad combination was held at the last poll (the cheats overlay toggles on the rising edge)
+    uint32_t overlay_pad_in_force = 0; // poll_pads: the menu's controller chord in use ([menu] pad or [overlay] pad), for the menu's footer
+    std::vector<std::string> toggle_conflicts;   // the overlay's toggles against each other and the game's keys (refresh_toggle_conflicts; under mu)
 
     // frame state (main thread)
     uint64_t update_seq = 0, aim_seq = 0;
@@ -554,6 +558,81 @@ bool jc2_owns_clicks() {
     return device_only && st.engine && ctx_in_play(st.engine->context()) && hid::jc2_mouse_active();
 }
 
+// [hud] key / pad: hide or show every pin of the F1 menu (the app's setting, for every game or this one; F7 by default). Not in the
+// settings file: put back on every settings change (a factory reset keeps it).
+void hud_toggles(perf::HudSettings& h) {
+    static const KeyChord key = [] {
+        KeyChord k = perf::default_hud().key;
+        const std::string v = config_get_str("hud", "key", "");
+        if (!v.empty() && !parse_key_chord(v, &k)) {
+            NXLOG_W(kTag, "[hud] key '%s' is not a key: F7", v.c_str());
+            k = perf::default_hud().key;
+        }
+        return k;
+    }();
+    static const uint32_t pad = [] {
+        uint32_t b = 0;
+        const std::string v = config_get_str("hud", "pad", "");
+        if (!v.empty() && !parse_pad_combo(v, &b)) NXLOG_W(kTag, "[hud] pad '%s' is not a controller chord: none", v.c_str());
+        return b;
+    }();
+    h.key = key;
+    h.pad = pad;
+}
+
+// A key the overlay keeps for itself: the menu's, the cheats menu's, the pins' (hide-all and each pin's own). Never bound in the game.
+bool overlay_key(const InputId& id) {
+    G& st = g();
+    if (!st.overlay || id.kind != InKind::Key) return false;
+    if (id.code == st.overlay->toggle_scancode()) return true;
+    KeyChord c;
+    if (parse_key_chord(st.overlay->cheats_key_text(), &c) && !c.empty() && c.sc == id.code) return true;
+    const perf::HudSettings h = perf::board();
+    if (h.key.sc == id.code) return true;
+    for (const pins::Group& gr : h.groups)
+        if (gr.key.sc == id.code) return true;
+    return false;
+}
+
+// The overlay's toggles checked against each other, the quit chord and the game's keyboard bindings (hotkeys.h toggle_conflicts): logged
+// when they change and shown in the menu's footer. Main thread, whenever settings are applied.
+void refresh_toggle_conflicts(const Settings& s) {
+    G& st = g();
+    if (!st.overlay) return;
+    std::vector<ToggleSpec> t;
+    ToggleSpec menu{"The settings menu", {}, st.overlay_pad_in_force};
+    parse_key_chord(st.overlay->menu_key_text(), &menu.key);
+    t.push_back(menu);
+    if (const std::string ck = st.overlay->cheats_key_text(); !ck.empty()) {
+        ToggleSpec c{"The cheats menu", {}, 0};
+        parse_key_chord(ck, &c.key);
+        parse_pad_combo(config_get_str("cheats", "pad", ""), &c.pad);
+        t.push_back(c);
+    }
+    t.push_back({"Hide all pins", s.hud.key, s.hud.pad});
+    for (const pins::Group& gr : s.hud.groups) t.push_back({"Pin '" + (gr.name.empty() ? gr.id : gr.name) + "'", gr.key, gr.pad});
+    std::vector<int32_t> game_keys;
+    for (const Binding& b : s.bindings)
+        if (b.in.kind == InKind::Key && b.act != Act::None) game_keys.push_back(b.in.code);
+    std::vector<std::string> out;
+    for (const Conflict& c : toggle_conflicts(t, game_keys, s.quit.pad)) out.push_back(c.what);
+    std::lock_guard<std::mutex> lk(st.mu);
+    if (out != st.toggle_conflicts)
+        for (const std::string& w : out) NXLOG_W(kTag, "shortcut conflict: %s", w.c_str());
+    st.toggle_conflicts = std::move(out);
+}
+
+// The Switch buttons the physical buttons `src` press (PadSrc bits) with the player's [padmap].
+uint64_t switch_buttons_of(uint32_t src, const PadSettings& pad) {
+    uint64_t out = 0;
+    for (int i = 0; i < kPadSrcCount; ++i) {
+        if (!(src & pad_src_bit(static_cast<PadSrc>(i)))) continue;
+        const uint64_t r = pad.remap[i];
+        out |= r == kPadDefault ? pad_default_buttons(static_cast<PadSrc>(i), pad.label_abxy) : r;
+    }
+    return out;
+}
+
 void handle_event(const input::Event& e, uint64_t now) {
     G& st = g();
     using input::EventType;
@@ -703,7 +782,18 @@ void poll_pads(uint64_t now) {
     const uint32_t quit_combo = st.settings.quit.pad;
     bool quit_held = false, overlay_held = false;
     // [overlay] pad: the same combination as the quit one would open two things at once, so it is ignored (warned about once per pair)
-    uint32_t overlay_combo = st.settings.overlay.pad;
+    static const int menu_pad_cfg = [] {   // [menu] pad: the app's setting (for every game or this one); -1: none set, the file's [overlay] pad
+        const std::string v = config_get_str("menu", "pad", "");
+        uint32_t b = 0;
+        if (v.empty()) return -1;
+        if (!parse_pad_combo(v, &b)) {
+            NXLOG_W(kTag, "[menu] pad '%s' is not a controller chord: the settings file's [overlay] pad is used", v.c_str());
+            return -1;
+        }
+        return static_cast<int>(b);
+    }();
+    uint32_t overlay_combo = menu_pad_cfg >= 0 ? static_cast<uint32_t>(menu_pad_cfg) : st.settings.overlay.pad;
+    st.overlay_pad_in_force = overlay_combo != quit_combo ? overlay_combo : 0;
     if (overlay_combo && overlay_combo == quit_combo) {
         static uint32_t warned = 0;
         if (warned != overlay_combo) {
@@ -722,6 +812,7 @@ void poll_pads(uint64_t now) {
     uint32_t cheats_pad = cheats_combo;
     if (cheats_pad && (cheats_pad == quit_combo || cheats_pad == overlay_combo)) cheats_pad = 0;
     bool cheats_held = false;
+    const uint32_t free_bits = free_pad_buttons(st.settings.pad.remap);
     for (size_t i = 0; i < n; ++i) {
         platform::GamepadRaw raw;
         if (!platform::gamepad_poll(infos[i].id, &raw)) continue;
@@ -731,6 +822,9 @@ void poll_pads(uint64_t now) {
         if (cheats_pad && (pad_src_held(raw, st.settings.pad) & cheats_pad) == cheats_pad) cheats_held = true;
         hid::NpadInput tmp;
         map_pad(raw, st.settings.pad, &tmp);
+        // a pin's opt-in controller chord (perf_pins.h): while its free button is held first, its other buttons stay away from the game
+        if (const uint32_t pin_mask = perf::pad_step(static_cast<int>(i), pad_src_held(raw, st.settings.pad), free_bits))
+            tmp.buttons &= ~switch_buttons_of(pin_mask, st.settings.pad);
         {   // a pressed button or a stick well off centre makes this the pad the prompts follow
             auto off_centre = [](hid::StickValue v) { return static_cast<int64_t>(v.x) * v.x + static_cast<int64_t>(v.y) * v.y > 20000ll * 20000ll; };
             if (tmp.buttons != 0 || off_centre(tmp.left) || off_centre(tmp.right)) {
@@ -847,9 +941,13 @@ int update_hook(::Ctx*, uint64_t, void*) {
             const std::string old_mode = st.settings.display.window_mode;
             const int old_monitor = st.settings.display.monitor;
             const int old_w = st.settings.display.width, old_h = st.settings.display.height;
+            hud_toggles(s.hud);
             st.settings = s;
             st.settings_epoch++;
             lk.unlock();
+            perf::set_board(s.hud);
+            perf::fill_settings_readouts(s);
+            refresh_toggle_conflicts(s);
             st.engine->set_settings(s, now);
             apply_frame_cap(s);
             display_tuning(s.display);
@@ -1149,10 +1247,7 @@ public:
         return true;
     }
     void cancel_capture() override { g().capture_state.store(0); }
-    bool reserved_key(const InputId& id) const override {
-        G& st = g();
-        return st.overlay && id.kind == InKind::Key && id.code == st.overlay->toggle_scancode();
-    }
+    bool reserved_key(const InputId& id) const override { return overlay_key(id); }
 };
 GameHostImpl g_game_host;
 
@@ -1224,10 +1319,7 @@ public:
         return true;
     }
     void cancel_capture() override { g().capture_state.store(0); }
-    bool reserved_key(const InputId& id) const override {
-        G& st = g();
-        return st.overlay && id.kind == InKind::Key && id.code == st.overlay->toggle_scancode();
-    }
+    bool reserved_key(const InputId& id) const override { return overlay_key(id); }
     void request_quit_prompt() override {
         if (G& st = g(); st.overlay) st.overlay->open_quit_prompt();
     }
@@ -1355,6 +1447,23 @@ bool load() {
     // Display extras: a value set in mpr.ini or in the environment (NXRT_HDR_MODE ...) overrides the file; the file overrides the built-in defaults.
     st.settings.extras = merge_env(st.settings.extras);
     extras::set_settings(st.settings.extras);
+    // The F1 menu's pins: the file's [hud] when the player arranged them for this game, else the configuration's default groups ([hud]
+    // default: this game's pkp.ini, or the app's default for every game); the hide-all toggle from [hud] key / pad.
+    if (!st.settings.hud.in_file) {
+        std::string why;
+        st.settings.hud.groups = perf::configured_default_groups(&why);
+        if (!why.empty()) NXLOG_W(kTag, "[hud] default: %s (no pins)", why.c_str());
+    }
+    hud_toggles(st.settings.hud);
+    perf::set_board(st.settings.hud);
+    perf::fill_settings_readouts(st.settings);
+    perf::set_toggle_handler([](const std::string& group) {
+        // a pin's key or the hide-all key in the game: saved like the counter's hotkey (the board in force already shows it)
+        Settings s = g_host.settings();
+        if (!perf::flip(s.hud, group)) return;
+        s.hud.in_file = true;
+        g_host.apply(s);
+    });
     // S38 GPU paths: the file's choice becomes [nvn] pool_mirror / pass_barriers unless mpr.ini or the environment set them. The replay
     // reads both once, at its first pool and its first submission, after this.
 #ifdef __APPLE__
@@ -1486,9 +1595,20 @@ bool start(const StartOptions& opt) {
             if (!st.overlay) {
                 NXLOG_W(kTag, "no overlay: %s", err.c_str());
             } else {
-                st.overlay->add_panel("Settings", [] { draw_settings_page(g_host); });
+                st.overlay->set_menu([](MenuFrame& f) {
+                    G& s = g();
+                    const uint32_t mp = s.overlay_pad_in_force;
+                    f.menu_pad = mp ? pad_combo_text(mp) : std::string();
+                    f.pins_key = key_chord_text(perf::board().key);
+                    {
+                        std::lock_guard<std::mutex> lk(s.mu);
+                        f.conflicts = s.toggle_conflicts;
+                    }
+                    draw_menu(g_host, f);
+                });
                 st.overlay->install_on_renderer();
                 apply_fps_counter(st.settings.fps);
+                refresh_toggle_conflicts(st.settings);
                 {   // [overlay] touch_button: auto (the default: when the machine has a touch screen), on, off
                     std::string tb = config_get_str("overlay", "touch_button", "auto");
                     for (char& c : tb) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));

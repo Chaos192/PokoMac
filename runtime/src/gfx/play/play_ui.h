@@ -2,8 +2,12 @@
 // Play mode: the settings page (the "Controls" window of the F1 overlay). The page only talks to the game through UiHost, so it can be
 // tested and developed without a game running. It runs inside ImGui on the presenting thread; UiHost implementations are thread safe.
 #pragma once
+#include <imgui.h>
+
 #include <cstdint>
+#include <functional>
 #include <string>
+#include <vector>
 
 #include "play_engine.h"
 #include "play_types.h"
@@ -52,10 +56,37 @@ public:
     virtual void request_quit_prompt() {}
 };
 
-// Draws the settings menu: pages Display, Graphics, Controls (mouse, keyboard bindings, gamepad, Switch layout, status), Audio and About, plus
-// a Game page when the registered game has tweaks of its own. Call between ImGui::Begin / End of the window. Everything is laid out in units
-// of the font size, so it follows the overlay's UI scale (overlay.cpp). Keeps its editing state in a function-local static (one page per process).
+// What the overlay gives the menu for a frame, and what the menu gives back.
+struct MenuFrame {
+    ImTextureRef backdrop;            // glass: the game frame blurred (overlay.cpp's backdrop blur); none: the panel is solid
+    bool pad = false;                 // a controller was used last: the hints show its buttons
+    std::string menu_key, menu_pad;   // the toggles in force, for the footer ("F1", "back+right_stick"; empty = none)
+    std::string cheats_key;           // the cheats menu's key (empty: the cheats are off)
+    std::string pins_key;             // the hide-all-pins key
+    std::vector<std::string> conflicts;   // toggle conflicts (hotkeys.h toggle_conflicts), shown in the footer
+    std::function<void()> diagnostics;    // the overlay's diagnostics, drawn on the About page
+    // out
+    bool close = false;               // the close button
+    bool glass = false;               // the panel was drawn as glass: the blur must cover glass_rect (pixels: x, y, w, h)
+    int glass_rect[4] = {};
+    float glass_blur = 0.f;
+};
+
+// The F1 settings menu: one panel in the overlay's theme (cheats_theme.h, shared with the cheats menu: the same themes, glass and
+// accent) with the pages down the left: Display & FPS, Frame generation, Upscaler, Graphics, Audio, Controls (mouse, bindings, controller,
+// Switch layout, status), Performance HUD (the pins, perf_pins.h), Game (when the registered game has tweaks) and About (with the overlay's
+// diagnostics). A footer shows the description of the focused row, the controls of the device in use and the toggles in force. Works with
+// a controller alone (D-pad / stick, A, B, L / R pages, ZL / ZR scroll, + close), a mouse alone and a keyboard alone. Draws its own window
+// (call inside an ImGui frame with the theme applied, overlay.cpp), plus the pins while it is open (they can be dragged then). Keeps its
+// editing state in a static (one menu per process).
+void draw_menu(UiHost& host, MenuFrame& f);
+// The same with no overlay around it (tests).
 void draw_settings_page(UiHost& host);
+// Tests: show a page (0 Display & FPS, 1 Frame generation, 2 Upscaler, 3 Graphics, 4 Audio, 5 Controls, 6 Performance HUD, 7 Game,
+// 8 About), the Controls page's part (0 mouse .. 4 status) and the dock (0 left, 1 centre, 2 right); -1 keeps it.
+void menu_show(int page, int controls_part = -1, int dock = -1);
+int menu_page();
+void menu_scroll(float units);   // tests: scroll the page down this many UI units (at the next frame)
 
 // The About page (play_ui_about.cpp): version, build and the folders and files in use. Draws into the current window.
 void draw_about_page(const std::string& settings_path);

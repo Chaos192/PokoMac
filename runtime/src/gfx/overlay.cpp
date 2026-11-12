@@ -26,7 +26,10 @@
 #include "nxrt/host_device.h"
 #include "nxrt/input_source.h"
 #include "nxrt/log.h"
+#include "nxrt/extras.h"
+#include "nxrt/gfx_tuning.h"
 #include "nxrt/nvn.h"
+#include "nxrt/nvn_backend.h"
 #include "nxrt/platform.h"
 #include "nxrt/services_api.h"
 #include "extras/backdrop_blur.h"
@@ -34,6 +37,9 @@
 #include "fps_stats.h"
 #include "../cheats/control.h"
 #include "play/cheats_ui.h"
+#include "play/hotkeys.h"
+#include "play/perf_pins.h"
+#include "play/play_ui.h"
 
 namespace nxrt::gfx {
 namespace {
@@ -198,10 +204,16 @@ struct Overlay::Impl {
     bool touch_button_event(const input::Event& e);   // the hidden menu's corner button; true = the event is the button's
     void draw_touch_button(bool open);       // inside an ImGui frame
     std::mutex mu;                    // guards the ImGui context: events arrive on the game's main thread, drawing happens on the presenting thread
-    int toggle_sc = SDL_SCANCODE_F1;
+    // The F1 menu's key ([menu] key; the older [gfx] overlay_key; F1): a key with modifiers (play/hotkeys.h). Its press, repeats and
+    // release never reach the game; the same key with other modifiers does.
+    play::KeyToggle menu_key;
+    std::function<void(play::MenuFrame&)> menu_fn;   // set_menu: the F1 settings menu (play_ui.h), else the panels
+    std::atomic<bool> menu_close_req{false};          // the menu's close button (apply_pending hides it outside the frame)
+    std::atomic<bool> pad_last{false};                // a controller was used last (the menu's hints show its buttons)
     // The cheats overlay (phase 6): a separate layer with its own key and settings (cheats_ui.cpp draws it).
     std::atomic<bool> cheats_visible{false};
-    int cheats_sc = SDL_SCANCODE_F3;
+    play::KeyToggle cheats_key;       // [cheats] key (F3)
+    play::KeyToggle cheats_hud_key;   // [cheats] hud_key: shows or hides the cheats menu's pins (none by default)
     bool cheats_enabled = false;      // [cheats] enable: the overlay and its key exist at all
     bool cheats_pass = false;         // [cheats] pass_input: input also reaches the game while it is open
     bool cheats_pause = false;        // [cheats] pause_game
@@ -258,6 +270,20 @@ struct Overlay::Impl {
     int counter_n = 0;
 
     void build_ui();
+    void diagnostics();               // the diagnostics' content (its own window, or the menu's About page)
+    // the F1 menu's glass: the blurred frame it shows through, and the rectangle it drew as glass last frame
+    ImTextureRef menu_backdrop;
+    bool menu_backdrop_ok = false;
+    bool menu_glass = false;
+    int menu_glass_rect[4] = {};
+    float menu_glass_blur = 0.f;
+    // the menu's pins (play/perf_pins.h): their numbers, read a few times a second while a pin or the menu is shown
+    FpsStats perf_stats;
+    bool perf_on = false;
+    std::chrono::steady_clock::time_point perf_prev{};
+    double perf_refresh_s = -1e9;
+    uint64_t perf_cpu_ns = 0, perf_frames = 0;
+    void perf_tick(double now_s, std::chrono::steady_clock::time_point now);
     void update_scale(const VkExtent2D& extent);
     void refresh_counter_text(double now_s);
     void draw_counter(const FrameInfo& f, double now_s);
@@ -371,98 +397,123 @@ void Overlay::Impl::draw_touch_button(bool open) {
     }
 }
 
-void Overlay::Impl::build_ui() {
+// The diagnostics: the GPU, presentation, the frame cap, the window, timing and the NVN front end. In their own window without the menu,
+// on the menu's About page with it.
+void Overlay::Impl::diagnostics() {
     Renderer& r = *ctx.renderer;
+    const GpuInfo& g = ctx.device->gpu();
+    ImGui::Text("GPU: %s", g.name.c_str());
+    ImGui::Text("Vulkan 1.3, driver 0x%08x, validation %s%s", g.driver_version, ctx.device->validation_enabled() ? "on" : "off",
+                ctx.device->headless() ? ", headless" : "");
+    const VkExtent2D e = r.extent();
+    ImGui::Text("Target: %ux%u, %u images, %u frames in flight", e.width, e.height, r.image_count(), r.frames_in_flight());
+
+    ImGui::SeparatorText("Presentation");
+    const PresentMode modes[] = {PresentMode::Fifo, PresentMode::FifoRelaxed, PresentMode::Mailbox, PresentMode::Immediate};
+    int cur = static_cast<int>(r.requested_present_mode());
+    if (ImGui::BeginCombo("Present mode", present_mode_name(modes[cur]))) {
+        for (int i = 0; i < 4; ++i) {
+            const bool ok = r.present_mode_supported(modes[i]);
+            ImGui::BeginDisabled(!ok);
+            if (ImGui::Selectable(present_mode_name(modes[i]), i == cur)) { want_mode = true; new_mode = modes[i]; }
+            ImGui::EndDisabled();
+        }
+        ImGui::EndCombo();
+    }
+    if (r.present_mode() != r.requested_present_mode()) ImGui::TextDisabled("in use: %s (requested mode unavailable)", present_mode_name(r.present_mode()));
+
+    if (ctx.limiter) {
+        char label[32];
+        const double t = ctx.limiter->target_fps();
+        std::snprintf(label, sizeof label, t > 0 ? "%.0f fps" : "unlimited", t);
+        if (ImGui::BeginCombo("Frame cap", label)) {
+            for (double v : kFpsChoices) {
+                std::snprintf(label, sizeof label, v > 0 ? "%.0f fps" : "unlimited", v);
+                if (ImGui::Selectable(label, v == t)) ctx.limiter->set_target_fps(v);
+            }
+            ImGui::EndCombo();
+        }
+        const float hz = platform::has_window() ? platform::display_refresh_hz() : 0.f;
+        if (hz > 0) {
+            ImGui::TextDisabled("display %.2f Hz; VRR-friendly cap %.1f fps", hz, suggest_vrr_cap(hz));
+            if (ImGui::SmallButton("Use VRR cap")) ctx.limiter->set_target_fps(suggest_vrr_cap(hz));
+        }
+    }
+
+    if (ctx.has_window && platform::has_window()) {
+        ImGui::SeparatorText("Window");
+        const auto fm = platform::fullscreen_mode();
+        if (ImGui::RadioButton("Windowed", fm == platform::FullscreenMode::Windowed)) { want_fullscreen = true; new_fullscreen = platform::FullscreenMode::Windowed; }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Borderless", fm == platform::FullscreenMode::Borderless)) { want_fullscreen = true; new_fullscreen = platform::FullscreenMode::Borderless; }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Exclusive", fm == platform::FullscreenMode::Exclusive)) { want_fullscreen = true; new_fullscreen = platform::FullscreenMode::Exclusive; }
+        bool rel = platform::relative_mouse();
+        if (ImGui::Checkbox("Raw mouse (relative mode)", &rel)) platform::set_relative_mouse(rel);
+        ImGui::SameLine();
+        ImGui::TextDisabled(platform::relative_mouse_is_raw() ? "(unaccelerated)" : "(system scaling!)");
+    }
+
+    ImGui::SeparatorText("Timing");
+    const RendererStats rs = r.stats();
+    const float dt_ms = ImGui::GetIO().DeltaTime * 1000.f;
+    frame_ms[frame_ms_pos] = dt_ms;
+    frame_ms_pos = (frame_ms_pos + 1) % 120;
+    ImGui::Text("CPU frame %.2f ms (%.0f fps)   GPU %.2f ms (avg %.2f)", dt_ms, dt_ms > 0 ? 1000.f / dt_ms : 0.f, rs.gpu_ms_last, rs.gpu_ms_avg);
+    ImGui::PlotLines("##ft", frame_ms, 120, frame_ms_pos, nullptr, 0.f, 33.f, ImVec2(0, 48));
+    ImGui::Text("frames %llu, swapchains %llu, out-of-date %llu, screenshots %llu", static_cast<unsigned long long>(rs.frames),
+                static_cast<unsigned long long>(rs.swapchain_creates), static_cast<unsigned long long>(rs.out_of_date),
+                static_cast<unsigned long long>(rs.screenshots));
+    const ValidationStats vs = ctx.device->validation_stats();
+    ImGui::Text("validation: %llu errors, %llu warnings", static_cast<unsigned long long>(vs.errors), static_cast<unsigned long long>(vs.warnings));
+
+    ImGui::SeparatorText("NVN front end");
+    ImGui::Text("%zu entry points, %zu implemented; stub calls %llu (%zu distinct)", nvn::entry_count(), nvn::implemented_count(),
+                static_cast<unsigned long long>(nvn::stub_calls_total()), nvn::stubs_called_distinct());
+    if (ImGui::TreeNode("Most called stubs")) {
+        auto calls = nvn::called_entries();
+        int shown = 0;
+        for (auto& c : calls) {
+            if (c.implemented) continue;
+            ImGui::Text("%8llu  %s", static_cast<unsigned long long>(c.calls), c.entry->name);
+            if (++shown >= 12) break;
+        }
+        if (!shown) ImGui::TextDisabled("none called");
+        ImGui::TreePop();
+    }
+}
+
+void Overlay::Impl::build_ui() {
     // First-use layout, in units of the UI scale (update_scale): the panels (the settings menu) sit at the top left, the diagnostics window
     // at the top right and folded up. The player moves them; nothing is remembered between runs.
     const ImVec2 disp = ImGui::GetIO().DisplaySize;
     const float k = ui_scale > 0.f ? ui_scale : 1.f;
     const float diag_w = std::min(420.f * k, std::max(200.f, disp.x - 32.f * k));
+    if (menu_fn) {
+        // the F1 settings menu, in the cheats menu's theme (one look for both menus: [cheats] theme and friends)
+        cheats::ui::init_look();
+        play::MenuFrame mf;
+        mf.backdrop = menu_backdrop;
+        mf.pad = pad_last.load(std::memory_order_relaxed);
+        mf.menu_key = play::key_chord_text(menu_key.chord);
+        if (cheats_enabled) mf.cheats_key = play::key_chord_text(cheats_key.chord);
+        mf.diagnostics = [this] { diagnostics(); };
+        ImGuiStyle saved = ImGui::GetStyle();
+        cheats::ui::apply_theme(menu_backdrop_ok);
+        menu_fn(mf);
+        ImGui::GetStyle() = saved;
+        if (mf.close) menu_close_req = true;
+        menu_glass = mf.glass;
+        if (mf.glass) {
+            for (int i = 0; i < 4; ++i) menu_glass_rect[i] = mf.glass_rect[i];
+            menu_glass_blur = mf.glass_blur;
+        }
+        return;
+    }
     ImGui::SetNextWindowPos(ImVec2(std::max(16.f * k, disp.x - diag_w - 16.f * k), 16.f * k), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(diag_w, 0), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowCollapsed(true, ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("Diagnostics")) {
-        const GpuInfo& g = ctx.device->gpu();
-        ImGui::Text("GPU: %s", g.name.c_str());
-        ImGui::Text("Vulkan 1.3, driver 0x%08x, validation %s%s", g.driver_version, ctx.device->validation_enabled() ? "on" : "off",
-                    ctx.device->headless() ? ", headless" : "");
-        const VkExtent2D e = r.extent();
-        ImGui::Text("Target: %ux%u, %u images, %u frames in flight", e.width, e.height, r.image_count(), r.frames_in_flight());
-
-        ImGui::SeparatorText("Presentation");
-        const PresentMode modes[] = {PresentMode::Fifo, PresentMode::FifoRelaxed, PresentMode::Mailbox, PresentMode::Immediate};
-        int cur = static_cast<int>(r.requested_present_mode());
-        if (ImGui::BeginCombo("Present mode", present_mode_name(modes[cur]))) {
-            for (int i = 0; i < 4; ++i) {
-                const bool ok = r.present_mode_supported(modes[i]);
-                ImGui::BeginDisabled(!ok);
-                if (ImGui::Selectable(present_mode_name(modes[i]), i == cur)) { want_mode = true; new_mode = modes[i]; }
-                ImGui::EndDisabled();
-            }
-            ImGui::EndCombo();
-        }
-        if (r.present_mode() != r.requested_present_mode()) ImGui::TextDisabled("in use: %s (requested mode unavailable)", present_mode_name(r.present_mode()));
-
-        if (ctx.limiter) {
-            char label[32];
-            const double t = ctx.limiter->target_fps();
-            std::snprintf(label, sizeof label, t > 0 ? "%.0f fps" : "unlimited", t);
-            if (ImGui::BeginCombo("Frame cap", label)) {
-                for (double v : kFpsChoices) {
-                    std::snprintf(label, sizeof label, v > 0 ? "%.0f fps" : "unlimited", v);
-                    if (ImGui::Selectable(label, v == t)) ctx.limiter->set_target_fps(v);
-                }
-                ImGui::EndCombo();
-            }
-            const float hz = platform::has_window() ? platform::display_refresh_hz() : 0.f;
-            if (hz > 0) {
-                ImGui::TextDisabled("display %.2f Hz; VRR-friendly cap %.1f fps", hz, suggest_vrr_cap(hz));
-                if (ImGui::SmallButton("Use VRR cap")) ctx.limiter->set_target_fps(suggest_vrr_cap(hz));
-            }
-        }
-
-        if (ctx.has_window && platform::has_window()) {
-            ImGui::SeparatorText("Window");
-            const auto fm = platform::fullscreen_mode();
-            if (ImGui::RadioButton("Windowed", fm == platform::FullscreenMode::Windowed)) { want_fullscreen = true; new_fullscreen = platform::FullscreenMode::Windowed; }
-            ImGui::SameLine();
-            if (ImGui::RadioButton("Borderless", fm == platform::FullscreenMode::Borderless)) { want_fullscreen = true; new_fullscreen = platform::FullscreenMode::Borderless; }
-            ImGui::SameLine();
-            if (ImGui::RadioButton("Exclusive", fm == platform::FullscreenMode::Exclusive)) { want_fullscreen = true; new_fullscreen = platform::FullscreenMode::Exclusive; }
-            bool rel = platform::relative_mouse();
-            if (ImGui::Checkbox("Raw mouse (relative mode)", &rel)) platform::set_relative_mouse(rel);
-            ImGui::SameLine();
-            ImGui::TextDisabled(platform::relative_mouse_is_raw() ? "(unaccelerated)" : "(system scaling!)");
-        }
-
-        ImGui::SeparatorText("Timing");
-        const RendererStats rs = r.stats();
-        const float dt_ms = ImGui::GetIO().DeltaTime * 1000.f;
-        frame_ms[frame_ms_pos] = dt_ms;
-        frame_ms_pos = (frame_ms_pos + 1) % 120;
-        ImGui::Text("CPU frame %.2f ms (%.0f fps)   GPU %.2f ms (avg %.2f)", dt_ms, dt_ms > 0 ? 1000.f / dt_ms : 0.f, rs.gpu_ms_last, rs.gpu_ms_avg);
-        ImGui::PlotLines("##ft", frame_ms, 120, frame_ms_pos, nullptr, 0.f, 33.f, ImVec2(0, 48));
-        ImGui::Text("frames %llu, swapchains %llu, out-of-date %llu, screenshots %llu", static_cast<unsigned long long>(rs.frames),
-                    static_cast<unsigned long long>(rs.swapchain_creates), static_cast<unsigned long long>(rs.out_of_date),
-                    static_cast<unsigned long long>(rs.screenshots));
-        const ValidationStats vs = ctx.device->validation_stats();
-        ImGui::Text("validation: %llu errors, %llu warnings", static_cast<unsigned long long>(vs.errors), static_cast<unsigned long long>(vs.warnings));
-
-        ImGui::SeparatorText("NVN front end");
-        ImGui::Text("%zu entry points, %zu implemented; stub calls %llu (%zu distinct)", nvn::entry_count(), nvn::implemented_count(),
-                    static_cast<unsigned long long>(nvn::stub_calls_total()), nvn::stubs_called_distinct());
-        if (ImGui::TreeNode("Most called stubs")) {
-            auto calls = nvn::called_entries();
-            int shown = 0;
-            for (auto& c : calls) {
-                if (c.implemented) continue;
-                ImGui::Text("%8llu  %s", static_cast<unsigned long long>(c.calls), c.entry->name);
-                if (++shown >= 12) break;
-            }
-            if (!shown) ImGui::TextDisabled("none called");
-            ImGui::TreePop();
-        }
-    }
+    if (ImGui::Begin("Diagnostics")) diagnostics();
     ImGui::End();
     for (auto& p : panels) {
         ImGui::SetNextWindowPos(ImVec2(16.f * k, 16.f * k), ImGuiCond_FirstUseEver);
@@ -471,6 +522,58 @@ void Overlay::Impl::build_ui() {
         if (ImGui::Begin(p.title.c_str())) p.fn();
         ImGui::End();
     }
+}
+
+// The menu's pins' numbers (play/perf_pins.h Sample). Every drawn frame: the frame time; four times a second: the rest.
+void Overlay::Impl::perf_tick(double now_s, std::chrono::steady_clock::time_point now) {
+    play::perf::Sample& smp = play::perf::sample();
+    if (!perf_on) {
+        perf_on = true;
+        perf_stats.reset();
+        perf_prev = now;
+        perf_refresh_s = -1e9;
+        perf_frames = 0;
+        perf_cpu_ns = play::perf::thread_cpu_ns();
+        return;
+    }
+    const double dt_ms = std::chrono::duration<double, std::milli>(now - perf_prev).count();
+    perf_prev = now;
+    if (dt_ms <= 1000.0) {   // over a second: a pause (debugger, window in the background), not a frame
+        perf_stats.push(now_s, dt_ms);
+        play::perf::push_frame_time(static_cast<float>(dt_ms));
+    }
+    ++perf_frames;
+    if (now_s - perf_refresh_s < 0.25) return;
+    perf_refresh_s = now_s;
+    const FpsStats::Snapshot sn = perf_stats.snapshot(now_s);
+    smp.fps = sn.fps;
+    smp.frame_ms = sn.avg_ms;
+    smp.low1_fps = sn.low1_fps;
+    smp.max_ms = sn.max_ms;
+    const RendererStats rs = ctx.renderer->stats();
+    smp.gpu_ms = rs.gpu_ms_avg > 0 ? rs.gpu_ms_avg : -1;
+    const uint64_t cpu = play::perf::thread_cpu_ns();
+    if (perf_frames && cpu >= perf_cpu_ns) smp.render_cpu_ms = static_cast<double>(cpu - perf_cpu_ns) / 1e6 / static_cast<double>(perf_frames);
+    perf_cpu_ns = cpu;
+    perf_frames = 0;
+    smp.fg_on = false;   // PokoMac has no frame generation
+    static const char* const kUp[] = {"", "FSR 1", "FSR 3", "DLSS", "XeSS", "NIS", "DLAA", "Nearest", "MetalFX", "MetalFX AA"};
+    const int um = static_cast<int>(extras::upscale_mode());
+    smp.upscaler = um >= 0 && um < static_cast<int>(sizeof kUp / sizeof kUp[0]) ? kUp[um] : "";
+    smp.scene_pct = extras::upscale_scene_scale();
+    smp.shaders_in_play = nvn::backend_installed() ? static_cast<int64_t>(nvn::backend_stats().pipelines_in_play) : -1;
+    smp.mem_bytes = play::perf::process_memory_bytes();
+    Device::VideoMemory vm;
+    if (ctx.device->video_memory(&vm)) {
+        smp.vram_used = vm.usage;
+        smp.vram_budget = vm.budget;
+    }
+    const Tuning& tu = tuning();
+    smp.src_w = tu.present_src_w.load(std::memory_order_relaxed);
+    smp.src_h = tu.present_src_h.load(std::memory_order_relaxed);
+    smp.out_w = tu.present_out_w.load(std::memory_order_relaxed);
+    smp.out_h = tu.present_out_h.load(std::memory_order_relaxed);
+    play::perf::refresh_readouts();
 }
 
 // DPI: the UI is laid out for a 1080 pixel high frame at 16 px text and grows with the frame (4K: twice the size; a Windows display scaling
@@ -513,16 +616,29 @@ std::unique_ptr<Overlay> Overlay::create(const Context& ctx, std::string* error)
             NXLOG_W(kTag, "HDR overlay composite failed to initialise: the overlay is drawn straight into the HDR swapchain (colours will look wrong)");
         }
     }
-    const std::string key = config_get_str("gfx", "overlay_key", "F1");
-    if (const SDL_Scancode sc = SDL_GetScancodeFromName(key.c_str()); sc != SDL_SCANCODE_UNKNOWN) s.toggle_sc = sc;
-    else NXLOG_W(kTag, "unknown [gfx] overlay_key '%s': using F1", key.c_str());
+    // The F1 menu's key: [menu] key (the app's setting, for every game or for this one), else the older [gfx] overlay_key, else F1. A key
+    // with modifiers ("Ctrl+F1") is fine; a key the game's own controls use is the menu's (play.cpp warns).
+    {
+        std::string why;
+        s.menu_key.chord = play::menu_key_from_config(&why);
+        if (!why.empty()) NXLOG_W(kTag, "%s", why.c_str());
+    }
 
-    // The cheats overlay (phase 6): its own key, separate from the F1 dev menu above.
+    // The cheats overlay (phase 6): its own key, separate from the F1 menu above.
     s.cheats_enabled = config_get_bool("cheats", "enable", false);
     const std::string ckey = config_get_str("cheats", "key", "F3");
-    if (const SDL_Scancode sc = SDL_GetScancodeFromName(ckey.c_str()); sc != SDL_SCANCODE_UNKNOWN) s.cheats_sc = sc;
-    else NXLOG_W(kTag, "unknown [cheats] key '%s': using F3", ckey.c_str());
-    if (s.cheats_sc == s.toggle_sc) { NXLOG_W(kTag, "[cheats] key equals [gfx] overlay_key (%s): keeping F3 for cheats", key.c_str()); s.cheats_sc = SDL_SCANCODE_F3; }
+    if (!play::parse_key_chord(ckey, &s.cheats_key.chord) || s.cheats_key.chord.empty()) {
+        NXLOG_W(kTag, "unknown [cheats] key '%s': using F3", ckey.c_str());
+        s.cheats_key.chord = {SDL_SCANCODE_F3, 0};
+    }
+    if (s.cheats_key.chord == s.menu_key.chord) {
+        NXLOG_W(kTag, "[cheats] key equals the menu's key (%s): the cheats menu keeps F3", play::key_chord_text(s.menu_key.chord).c_str());
+        s.cheats_key.chord = {s.menu_key.chord.sc == SDL_SCANCODE_F3 ? SDL_SCANCODE_F4 : SDL_SCANCODE_F3, 0};
+    }
+    // the cheats menu's pins: their own toggle (none by default)
+    const std::string hkey = config_get_str("cheats", "hud_key", "");
+    if (!play::parse_key_chord(hkey, &s.cheats_hud_key.chord)) NXLOG_W(kTag, "unknown [cheats] hud_key '%s': no key", hkey.c_str());
+    if (s.cheats_hud_key.chord == s.menu_key.chord || s.cheats_hud_key.chord == s.cheats_key.chord) s.cheats_hud_key.chord = {};
     s.cheats_pass = config_get_bool("cheats", "pass_input", false);
     s.cheats_pause = config_get_bool("cheats", "pause_game", false);
 
@@ -564,7 +680,8 @@ std::unique_ptr<Overlay> Overlay::create(const Context& ctx, std::string* error)
         return nullptr;
     }
     s.backend_ready = true;
-    NXLOG_I(kTag, "overlay ready (toggle key %s)", SDL_GetScancodeName(static_cast<SDL_Scancode>(s.toggle_sc)));
+    NXLOG_I(kTag, "overlay ready (menu key %s, cheats key %s)", play::key_chord_text(s.menu_key.chord).c_str(),
+            s.cheats_enabled ? play::key_chord_text(s.cheats_key.chord).c_str() : "off");
     return o;
 }
 
@@ -609,8 +726,11 @@ void Overlay::set_touch_button(bool on) { impl_->touch_btn.store(on); }
 
 bool Overlay::visible() const { return impl_->visible; }
 void Overlay::toggle() { set_visible(!impl_->visible); }
-int Overlay::toggle_scancode() const { return impl_->toggle_sc; }
-void Overlay::set_toggle_scancode(int sc) { impl_->toggle_sc = sc; }
+int Overlay::toggle_scancode() const { return impl_->menu_key.chord.sc; }
+void Overlay::set_toggle_scancode(int sc) { impl_->menu_key.chord = {sc, 0}; }
+void Overlay::set_menu(std::function<void(play::MenuFrame&)> fn) { impl_->menu_fn = std::move(fn); }
+std::string Overlay::menu_key_text() const { return play::key_chord_text(impl_->menu_key.chord); }
+std::string Overlay::cheats_key_text() const { return impl_->cheats_enabled ? play::key_chord_text(impl_->cheats_key.chord) : std::string(); }
 
 void Overlay::set_cheats_visible(bool v) {
     Impl& s = *impl_;
@@ -643,8 +763,8 @@ void Overlay::set_cheats_visible(bool v) {
 }
 void Overlay::toggle_cheats() { set_cheats_visible(!impl_->cheats_visible); }
 bool Overlay::cheats_visible() const { return impl_->cheats_visible; }
-int Overlay::cheats_scancode() const { return impl_->cheats_sc; }
-void Overlay::set_cheats_scancode(int sc) { impl_->cheats_sc = sc; }
+int Overlay::cheats_scancode() const { return impl_->cheats_key.chord.sc; }
+void Overlay::set_cheats_scancode(int sc) { impl_->cheats_key.chord = {sc, 0}; }
 bool Overlay::cheats_blocks_game() const { return impl_->cheats_visible && !impl_->cheats_pass; }
 uint64_t Overlay::frames_drawn() const { return impl_->drawn; }
 
@@ -665,6 +785,14 @@ void Overlay::set_counter(const CounterConfig& c) {
 }
 
 namespace {
+bool imgui_wants_text(std::mutex& mu, ImGuiContext* ctx) {
+    std::lock_guard<std::mutex> lk(mu);
+    ImGuiContext* prev = ImGui::GetCurrentContext();
+    ImGui::SetCurrentContext(ctx);
+    const bool w = ImGui::GetIO().WantTextInput;
+    ImGui::SetCurrentContext(prev);
+    return w;
+}
 bool imgui_wants(std::mutex& mu, ImGuiContext* ctx, bool mouse, bool keyboard) {
     std::lock_guard<std::mutex> lk(mu);
     ImGuiContext* prev = ImGui::GetCurrentContext();
@@ -1048,6 +1176,7 @@ uint64_t Overlay::set_keyboard_pad(uint64_t buttons, int lx, int ly) {
     if (ly >= kHalf) b |= hid::btn(hid::kBtnStickLUp);       // hid y: up = +
     if (ly <= -kHalf) b |= hid::btn(hid::kBtnStickLDown);
     const bool quit = s.quit_open;
+    if (b & ~s.pad_prev) s.pad_last.store(true, std::memory_order_relaxed);
     const bool page = !quit && s.visible && !s.kb_poll();   // the F1 page: the pad moves its focus, and stays away from the game
     // the cheats overlay: its hotkeys see the pad always; while it is open (and does not pass input through) the pad drives its windows
     if (s.cheats_enabled) cheats::ui::pad_input(b);
@@ -1077,7 +1206,9 @@ uint64_t Overlay::set_keyboard_pad(uint64_t buttons, int lx, int ly) {
         struct Map { uint64_t bits; ImGuiKey key; };
         const Map keys[] = {{kKbDirBits[0], ImGuiKey_GamepadDpadUp}, {kKbDirBits[1], ImGuiKey_GamepadDpadDown}, {kKbDirBits[2], ImGuiKey_GamepadDpadLeft},
                             {kKbDirBits[3], ImGuiKey_GamepadDpadRight}, {hid::btn(hid::kBtnA), ImGuiKey_GamepadFaceDown},
-                            {hid::btn(hid::kBtnB), ImGuiKey_GamepadFaceRight}};
+                            {hid::btn(hid::kBtnB), ImGuiKey_GamepadFaceRight}, {hid::btn(hid::kBtnL), ImGuiKey_GamepadL1},
+                            {hid::btn(hid::kBtnR), ImGuiKey_GamepadR1}, {hid::btn(hid::kBtnZL), ImGuiKey_GamepadL2},
+                            {hid::btn(hid::kBtnZR), ImGuiKey_GamepadR2}};
         std::lock_guard<std::mutex> lk(s.mu);
         ImGuiContext* prev = ImGui::GetCurrentContext();
         ImGui::SetCurrentContext(s.imgui);
@@ -1117,24 +1248,31 @@ void Overlay::add_panel(const std::string& title, std::function<void()> fn) { im
 bool Overlay::handle_event(const input::Event& e) {
     Impl& s = *impl_;
     using input::EventType;
-    if ((e.type == EventType::KeyDown || e.type == EventType::KeyUp) && e.u.key.scancode == s.toggle_sc) {
-        if (e.type == EventType::KeyDown && !(e.flags & input::kFlagRepeat)) toggle();
-        return true;   // the toggle key never reaches the game (press, repeat and release)
+    const bool is_key = e.type == EventType::KeyDown || e.type == EventType::KeyUp;
+    const bool key_down = e.type == EventType::KeyDown, key_repeat = (e.flags & input::kFlagRepeat) != 0;
+    if (e.type == EventType::KeyDown) s.pad_last.store(false, std::memory_order_relaxed);
+    if (e.type == EventType::MouseButtonDown && !(e.flags & input::kFlagTouch)) s.pad_last.store(false, std::memory_order_relaxed);
+    // the menu's key (with its modifiers): its press, repeats and release never reach the game
+    if (is_key) {
+        const play::KeyToggle::Hit h = s.menu_key.event(e.u.key.scancode, e.mods, key_down, key_repeat);
+        if (h == play::KeyToggle::Fired) toggle();
+        if (h != play::KeyToggle::NotOurs) return true;
     }
-    if (s.cheats_enabled && (e.type == EventType::KeyDown || e.type == EventType::KeyUp) && e.u.key.scancode == s.cheats_sc) {
+    if (s.cheats_enabled && is_key) {
         // closed: a press opens it at once. Open: a press closes it when the key is let go, unless it was held long enough to peek (draw)
+        const play::KeyToggle::Hit h = s.cheats_key.event(e.u.key.scancode, e.mods, key_down, key_repeat);
         const int64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-        if (e.type == EventType::KeyDown && !(e.flags & input::kFlagRepeat)) {
+        if (h == play::KeyToggle::Fired) {
             if (!s.cheats_visible) toggle_cheats();
             else {
                 s.cheats_key_down_ms = ms;
                 s.cheats_key_held = true;
             }
-        } else if (e.type == EventType::KeyUp && s.cheats_key_held.exchange(false)) {
+        } else if (h == play::KeyToggle::Swallowed && !key_down && s.cheats_key_held.exchange(false)) {
             if (s.cheats_key_peeking.exchange(false)) cheats::ui::set_key_peek(false);
             else if (s.cheats_visible) toggle_cheats();
         }
-        return true;   // the cheats key is the overlay's, never the game's
+        if (h != play::KeyToggle::NotOurs) return true;   // the cheats key is the overlay's, never the game's
     }
     // the cheats table's and scripts' hotkeys see every key, also while the cheats overlay is hidden (they do not take it from the game);
     // while a hotkey is being bound, the key is the binding's only
@@ -1148,6 +1286,16 @@ bool Overlay::handle_event(const input::Event& e) {
     }
     const bool kb = s.kb_poll() || s.quit_open;
     if (kb && !s.quit_open && (e.type == EventType::KeyDown || e.type == EventType::KeyUp || e.type == EventType::Text)) return s.kb_key_event(e);
+    // The pins' toggles: hide-all and each pin's own key (the F1 menu's, play/perf_pins.h) and the cheats menu's pins ([cheats] hud_key).
+    // Never the game's (press, repeat and release), whether the pins are shown or not; not while a text field of a menu has the keyboard.
+    if (is_key && !((s.visible || (s.cheats_visible && !s.cheats_pass)) && imgui_wants_text(s.mu, s.imgui))) {
+        if (play::perf::key_event(e.u.key.scancode, e.mods, key_down, key_repeat)) return true;
+        if (s.cheats_enabled) {
+            const play::KeyToggle::Hit h = s.cheats_hud_key.event(e.u.key.scancode, e.mods, key_down, key_repeat);
+            if (h == play::KeyToggle::Fired) cheats::ui::toggle_hud();
+            if (h != play::KeyToggle::NotOurs) return true;
+        }
+    }
     // a finger on the hidden menu's corner button (the finger's mouse events carry kFlagTouch)
     if (!s.visible && !kb && s.touch_btn.load(std::memory_order_relaxed) && (e.flags & input::kFlagTouch) &&
         (e.type == EventType::MouseMotion || e.type == EventType::MouseButtonDown || e.type == EventType::MouseButtonUp))
@@ -1201,6 +1349,7 @@ bool Overlay::handle_event(const input::Event& e) {
 
 void Overlay::apply_pending() {
     if (impl_->touch_toggle_req.exchange(false)) toggle();   // the corner button was tapped (outside the ImGui frame: set_visible takes the lock)
+    if (impl_->menu_close_req.exchange(false) && impl_->visible) set_visible(false);   // the menu's close button
     apply_present_pending();
     apply_window_pending();
 }
@@ -1392,7 +1541,12 @@ void Overlay::draw(const FrameInfo& f) {
     const bool cheats_on = s.cheats_visible.load(std::memory_order_relaxed) && !kb_on && !quit_on && !cheats_sampling;
     // the HUD over the game (pinned values and cheats, or [cheats] mini's list): only when it has something to show
     const bool cheats_mini_on = s.cheats_enabled && cheats::ui::hud_wanted() && !cheats_on && !kb_on && !quit_on && (s.counter_in_shots.load(std::memory_order_relaxed) || !s.ctx.renderer->capture_pending());
-    if (!s.visible && !counter_on && !note_on && !save_on && !ptr_on && !kb_on && !quit_on && !touch_on && !cheats_on && !cheats_mini_on) {
+    // the F1 menu's pins over the game while the menu is closed (display only: they take no input); like the counter, not in screenshots
+    // unless asked for
+    const bool menu_pins_on = !s.visible && !kb_on && !quit_on && play::perf::any_shown() &&
+                              (s.counter_in_shots.load(std::memory_order_relaxed) || !s.ctx.renderer->capture_pending());
+    if (!s.visible && !menu_pins_on) s.perf_on = false;
+    if (!s.visible && !counter_on && !note_on && !save_on && !ptr_on && !kb_on && !quit_on && !touch_on && !cheats_on && !cheats_mini_on && !menu_pins_on) {
         s.last_frame = now;
         s.counter_was_on = false;
         return;
@@ -1415,7 +1569,8 @@ void Overlay::draw(const FrameInfo& f) {
     }
     // a screenshot leaves the counter out unless asked for; with the menu hidden there is then nothing to draw
     const bool show_counter = counter_on && (s.counter_in_shots.load(std::memory_order_relaxed) || !s.ctx.renderer->capture_pending());
-    if (!s.visible && !show_counter && !note_on && !save_on && !ptr_on && !kb_on && !quit_on && !touch_on && !cheats_on && !cheats_mini_on) {
+    if (s.visible || menu_pins_on) s.perf_tick(now_s, now);   // the pins' numbers (cheap: a ring push, a refresh four times a second)
+    if (!s.visible && !show_counter && !note_on && !save_on && !ptr_on && !kb_on && !quit_on && !touch_on && !cheats_on && !cheats_mini_on && !menu_pins_on) {
         s.last_frame = now;
         return;
     }
@@ -1436,10 +1591,13 @@ void Overlay::draw(const FrameInfo& f) {
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
     // the keyboard and the quit prompt are modal: the menu (and a keyboard under the prompt) comes back once they are answered
-    if (s.visible && !kb_on && !quit_on) s.build_ui();
+    const bool menu_on = s.visible && !kb_on && !quit_on;
+    if (menu_on) cheats::ui::init_look();   // the menus' shared look (glass or solid)
     bool glass_ok = false;
-    if (cheats_on) {
-        // glass: the frame under the panel blurred on the GPU (SDR frames the hook can read; an HDR frame draws the panel solid)
+    s.menu_glass = false;
+    if (cheats_on || menu_on) {
+        // glass: the frame under the panel blurred on the GPU (SDR frames the hook can read; an HDR frame draws the panel solid). One blur:
+        // the F1 menu's panel when it is open, else the cheats menu's.
         if (!hdr_frame && cheats::ui::wants_glass() && s.ctx.renderer->frame_readable() && !s.blur_failed) {
             if (!s.blur.initialised()) s.blur_failed = !s.blur.init(*s.ctx.device);
             if (s.blur.initialised() && s.blur.ensure(f.extent)) {
@@ -1451,7 +1609,13 @@ void Overlay::draw(const FrameInfo& f) {
                 glass_ok = s.blur_tex != VK_NULL_HANDLE;
             }
         }
-        cheats::ui::set_backdrop(glass_ok ? ImTextureRef(reinterpret_cast<ImTextureID>(s.blur_tex)) : ImTextureRef());
+    }
+    const ImTextureRef blur_ref = glass_ok ? ImTextureRef(reinterpret_cast<ImTextureID>(s.blur_tex)) : ImTextureRef();
+    s.menu_backdrop = menu_on ? blur_ref : ImTextureRef();
+    s.menu_backdrop_ok = menu_on && glass_ok;
+    if (menu_on) s.build_ui();
+    if (cheats_on) {
+        cheats::ui::set_backdrop(menu_on ? ImTextureRef() : blur_ref);   // the blur is the F1 menu's while it is open
         // the cheats overlay uses its own theme; save and restore the F1 menu's style around it so the two never clash
         ImGuiStyle saved = ImGui::GetStyle();
         cheats::ui::apply_theme(glass_ok);   // its look is its own ([cheats] theme and friends, read by cheats::ui::init)
@@ -1459,6 +1623,13 @@ void Overlay::draw(const FrameInfo& f) {
         ImGui::GetStyle() = saved;
     }
     if (cheats_mini_on) cheats::ui::draw_mini();
+    if (menu_pins_on) {   // in the menus' theme, drawn last before the prompts so they stay over the game
+        ImGuiStyle saved = ImGui::GetStyle();
+        cheats::ui::init_look();
+        cheats::ui::apply_theme(false);
+        play::perf::draw_board();
+        ImGui::GetStyle() = saved;
+    }
     if (kb_on) s.draw_keyboard(now_s);
     if (quit_on) s.draw_quit_prompt();
     if (touch_on) s.draw_touch_button(s.visible);
@@ -1480,7 +1651,8 @@ void Overlay::draw(const FrameInfo& f) {
     if (glass_ok) {
         int rect[4];
         float strength = 0.f;
-        if (cheats::ui::backdrop_rect(rect, &strength)) s.blur.record(f.cmd, f.image, f.extent, rect, strength);
+        if (s.menu_glass) s.blur.record(f.cmd, f.image, f.extent, s.menu_glass_rect, s.menu_glass_blur);
+        else if (!menu_on && cheats::ui::backdrop_rect(rect, &strength)) s.blur.record(f.cmd, f.image, f.extent, rect, strength);
     }
 
     // one dynamic-rendering pass that draws the ImGui draw data into view

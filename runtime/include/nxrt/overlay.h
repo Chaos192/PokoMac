@@ -15,6 +15,10 @@
 #include "nxrt/gfx.h"
 #include "nxrt/input.h"
 
+namespace nxrt::play {
+struct MenuFrame;   // play/play_ui.h
+}
+
 namespace nxrt::gfx {
 
 // Background shader work (S24). The threads that compile pipeline parts publish how many jobs are waiting or running; while there are some
@@ -83,6 +87,13 @@ public:
 
     // Extra panels for later streams (settings, dev menu): fn runs inside an ImGui window titled `title` while visible.
     void add_panel(const std::string& title, std::function<void()> fn);
+    // The F1 settings menu (play/play_ui.h draw_menu): drawn instead of the panels, in the overlay's theme (the cheats menu's themes and
+    // glass), with the overlay's diagnostics on its About page. fn fills in what only its owner knows (the controller toggle, the pins' key,
+    // conflicts) and draws the menu.
+    void set_menu(std::function<void(play::MenuFrame&)> fn);
+    // The menu's toggle key in force ([menu] key, or the older [gfx] overlay_key; F1 by default), as text ("F1", "Ctrl+F1").
+    std::string menu_key_text() const;
+    std::string cheats_key_text() const;     // empty when the cheats are off
 
     // Applies menu choices that cannot be made in the middle of a frame. Call before Renderer::begin_frame().
     void apply_pending();

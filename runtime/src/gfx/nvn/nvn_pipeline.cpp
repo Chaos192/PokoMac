@@ -769,6 +769,9 @@ VkPipelineCache pipeline_cache_handle() {
 }
 
 void note_pipeline_created(double ms, const char* what) {
+    // after the first present: a compile in play (the F1 menu's pins; ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch).
+    // A preparation (--prepare-pipelines, no present) counts none.
+    if (counters().presents.load(std::memory_order_relaxed) != 0) counters().pipelines_in_play.fetch_add(1, std::memory_order_relaxed);
     counters().pipelines_created.fetch_add(1);
     g_pipes_created.add(1);
     g_cache_dirty.store(true, std::memory_order_relaxed);

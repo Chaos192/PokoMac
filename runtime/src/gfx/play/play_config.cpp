@@ -152,7 +152,7 @@ Settings builtin_settings() {
     return s;
 }
 
-enum class Sec { None, Unknown, Meta, Mouse, Pad, PadMap, Timing, Display, Audio, Hdr, Upscale, Latency, Picture, Prompts, Fps, Quit, Overlay, Switch, Aim, Camera, Tweaks, Bindings };
+enum class Sec { None, Unknown, Meta, Mouse, Pad, PadMap, Timing, Display, Audio, Hdr, Upscale, Latency, Picture, Prompts, Fps, Quit, Overlay, Hud, Switch, Aim, Camera, Tweaks, Bindings };
 
 // The factory-defaults revision this build writes ([meta] defaults_rev) and the factory bindings an older controls.ini does not have: the
 // game's (play_types.h GameDefaults).
@@ -178,6 +178,7 @@ const char* sec_label(Sec s) {
         case Sec::Fps: return "[fps]";
         case Sec::Quit: return "[quit]";
         case Sec::Overlay: return "[overlay]";
+        case Sec::Hud: return "[hud]";
         case Sec::Switch: return "[switch]";
         case Sec::Aim: return "[aim]";
         case Sec::Camera: return "[camera]";
@@ -402,6 +403,25 @@ bool apply_fixed(Sec sec, const std::string& k, const std::string& v, Settings* 
                     return false;
                 }
                 s->quit.key = id;
+                return true;
+            }
+            break;
+        case Sec::Hud:
+            s->hud.in_file = true;
+            if (k == "shown") return set_bool(&s->hud.all_shown);
+            if (k == "group") {
+                pins::Group g;
+                std::string why;
+                if (!pins::parse_group(v, &g, &why)) {
+                    *msg = "group: " + why;
+                    return false;
+                }
+                for (pins::Group& o : s->hud.groups)
+                    if (o.id == g.id) {
+                        o = g;   // the same id twice: the last one wins
+                        return true;
+                    }
+                s->hud.groups.push_back(g);
                 return true;
             }
             break;
@@ -640,6 +660,7 @@ Sec fixed_sec(const std::string& key) {
     if (key == "fps") return Sec::Fps;
     if (key == "quit") return Sec::Quit;
     if (key == "overlay") return Sec::Overlay;
+    if (key == "hud") return Sec::Hud;
     if (key == "aim") return Sec::Aim;
     if (key == "camera") return Sec::Camera;
     if (key == "tweaks") return Sec::Tweaks;
@@ -1044,6 +1065,12 @@ std::string format_settings(const Settings& s) {
 
     o += "\n[overlay]\n";
     kv("pad", pad_combo_text(s.overlay.pad));
+
+    if (s.hud.in_file) {   // the player's pins for this game (without the section the configuration's default groups are used)
+        o += "\n[hud]\n";
+        kv("shown", flag(s.hud.all_shown));
+        for (const pins::Group& g : s.hud.groups) kv("group", pins::format_group(g));
+    }
 
     o += "\n[switch]\n";
     for (int a = 1; a < kActCount; ++a) {   // every action except none

@@ -240,6 +240,175 @@ const WRITE = {
   accent: (f, v) => [edit(f.at, String(v))],
 };
 
+// ---- in-game shortcuts: the menus' toggles and the pins (ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch) ------------
+// The F1 settings menu ([menu] key / pad), the cheats menu's pins ([cheats] hud_key) and the F1 menu's pins ([hud] key / pad / default),
+// in the game's pkp.ini (the cheats menu's own key and chord are on the Cheats page). Keys: SDL's names, with Ctrl+ / Shift+ (runtime
+// play/hotkeys.h). Pad chords: play_types.cpp parse_pad_combo. docs/MENU.md.
+
+const KEY_BASE = ['F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12'];
+const SHORTCUT_KEYS = [...KEY_BASE, 'Insert', 'Home', 'End', 'PageUp', 'PageDown', 'Pause', ...KEY_BASE.map((k) => `Ctrl+${k}`), ...KEY_BASE.map((k) => `Shift+${k}`)];
+const keyLabel = (k) => k.replace('PageUp', 'Page Up').replace('PageDown', 'Page Down');
+/** The keys' SDL names by the lower-cased word a select reads (wordOf). */
+const SHORTCUT_KEY_ALIASES = Object.fromEntries(SHORTCUT_KEYS.map((k) => [k.toLowerCase(), k]));
+const keyOptions = (none) => [...(none ? [{ value: '', label: none }] : []), ...SHORTCUT_KEYS.map((k) => ({ value: k, label: keyLabel(k) }))];
+
+// Chords of game buttons for the menus (held together, never Minus + Plus: the quit chord), and for the pins chords with a button that
+// presses nothing in the game (a rear grip or a trackpad click, held first: hotkeys.h PadToggle), so a pin's chord never reaches the game.
+const MENU_PADS = [
+  { value: 'minus+rstick', label: 'Minus + right stick press' }, { value: 'minus+lstick', label: 'Minus + left stick press' },
+  { value: 'plus+rstick', label: 'Plus + right stick press' }, { value: 'l+r+minus', label: 'L + R + Minus' }, { value: 'zl+zr+minus', label: 'ZL + ZR + Minus' },
+  { value: 'left_paddle1+right_paddle1', label: 'Both upper rear grips (L4 + R4)' },
+];
+const PIN_PADS = [
+  { value: 'left_paddle1+right_paddle1', label: 'Both upper rear grips (L4 + R4)' }, { value: 'left_paddle1+dpad_up', label: 'Rear grip L4, then D-pad up' },
+  { value: 'left_paddle1+dpad_down', label: 'Rear grip L4, then D-pad down' }, { value: 'right_paddle1+dpad_up', label: 'Rear grip R4, then D-pad up' },
+  { value: 'touchpad+left_shoulder', label: 'Touchpad click, then L' }, { value: 'touchpad+right_shoulder', label: 'Touchpad click, then R' },
+];
+const padLabel = (v) => [...MENU_PADS, ...PIN_PADS].find((o) => o.value === v)?.label ?? v;
+
+/** The defaults the runtime uses when nothing is set. */
+export const SHORTCUT_DEFAULTS = { menu_key: 'F1', menu_pad: '', cheats_key: 'F3', cheats_pad: '', cheats_hud_key: '', hud_key: 'F7', hud_pad: '' };
+const AT_SHORTCUT = {
+  menu_key: pkp('menu', 'key'), menu_pad: pkp('menu', 'pad'), cheats_key: pkp('cheats', 'key'), cheats_pad: pkp('cheats', 'pad'),
+  cheats_hud_key: pkp('cheats', 'hud_key'), hud_key: pkp('hud', 'key'), hud_pad: pkp('hud', 'pad'),
+};
+/** What the game uses: its pkp.ini, else the runtime's default. */
+export const shortcutOf = (src, k) => (has(src, AT_SHORTCUT[k]) ? String(rawOf(src, AT_SHORTCUT[k])).trim() : SHORTCUT_DEFAULTS[k]);
+
+const shortcutRow = (k, label, kind, desc) => {
+  const pads = k === 'hud_pad' ? PIN_PADS : MENU_PADS;
+  const options = kind === 'key'
+    ? keyOptions(k === 'cheats_hud_key' ? 'None' : null)
+    : [{ value: '', label: k === 'hud_pad' ? 'None (keyboard only)' : 'None' }, ...pads];
+  return {
+    id: `shortcut_${k}`, label, type: 'select', at: AT_SHORTCUT[k], def: SHORTCUT_DEFAULTS[k], desc,
+    ...(kind === 'key' ? { aliases: SHORTCUT_KEY_ALIASES } : {}), options,
+  };
+};
+
+/** The input names the game's keyboard bindings use (controls.ini [bindings.*]), lower-cased. */
+const gameKeysOf = (src) => new Set(Object.keys(src?.controls ?? {}).filter((k) => k.startsWith('bindings.')).map((k) => k.slice(k.indexOf('.', 9) + 1).toLowerCase()));
+
+/** Conflicts between the shortcuts in force (and with the game's keys and the quit chord), as sentences. */
+export function shortcutConflicts(src) {
+  const s = (k) => shortcutOf(src, k);
+  const keys = [['The settings menu', s('menu_key')], ['The cheats menu', s('cheats_key')], ['The cheats pins', s('cheats_hud_key')], ['Hide all pins', s('hud_key')]];
+  const pads = [['The settings menu', s('menu_pad')], ['The cheats menu', s('cheats_pad')], ['Hide all pins', s('hud_pad')]];
+  const out = [];
+  keys.forEach(([a, ka], i) => keys.slice(i + 1).forEach(([b, kb]) => {
+    if (ka && kb && ka.toLowerCase() === kb.toLowerCase()) out.push(`${a} and ${b.toLowerCase()} both use ${keyLabel(ka)}.`);
+  }));
+  const bits = (v) => new Set(String(v).toLowerCase().split('+').filter(Boolean));
+  const holds = (big, small) => small.size > 0 && [...small].every((b) => big.has(b));
+  pads.forEach(([a, pa], i) => pads.slice(i + 1).forEach(([b, pb]) => {
+    if (!pa || !pb) return;
+    if (pa === pb) out.push(`${a} and ${b.toLowerCase()} use the same controller chord (${padLabel(pa)}).`);
+    else if (holds(bits(pa), bits(pb)) || holds(bits(pb), bits(pa))) out.push(`${a}'s controller chord holds ${b.toLowerCase()}'s.`);
+  }));
+  const quit = bits(has(src, controls('quit', 'pad')) ? rawOf(src, controls('quit', 'pad')) : 'back+start');
+  const quitAlias = new Set([...quit].map((b) => ({ back: 'minus', start: 'plus' }[b] ?? b)));
+  for (const [a, p] of pads) if (p && (holds(bits(p), quit) || holds(bits(p), quitAlias))) out.push(`${a}'s controller chord holds the quit chord.`);
+  const game = gameKeysOf(src);
+  for (const [a, k] of keys) if (k && !k.includes('+') && game.has(k.toLowerCase())) out.push(`${a}: the game's controls also use ${keyLabel(k)} (the menu takes it).`);
+  return out;
+}
+const conflictNote = {
+  id: 'shortcut_conflicts', type: 'note',
+  note: (env, values, src) => {
+    const c = src ? shortcutConflicts(src) : [];
+    return c.length ? { kind: 'danger', text: c.join(' ') } : { kind: 'ok', text: 'No two shortcuts clash.' };
+  },
+};
+
+// ---- the F1 menu's default pins: one group, "perf" (perf_pins.h; the runtime's text form, pin_board.h) ---------------------------------
+export const PIN_ITEMS = [
+  { id: 'fps', label: 'Frame rate' }, { id: 'frametime', label: 'Frame time, with a graph' }, { id: 'low1', label: '1% low' },
+  { id: 'gpu', label: 'GPU time' }, { id: 'cpu', label: 'Render thread time' },
+  { id: 'upscaler', label: 'Upscaler (when on)' }, { id: 'shaders', label: 'Shaders compiled in play' }, { id: 'memory', label: 'Memory' },
+  { id: 'vram', label: 'Video memory' }, { id: 'resolution', label: 'Resolution' },
+];
+const PIN_LAYOUTS = [{ value: 'vertical', label: 'Vertical' }, { value: 'horizontal', label: 'Horizontal' }, { value: 'compact', label: 'Compact' }];
+const AT_PINS = pkp('hud', 'default');
+const DEFAULT_GROUP = { items: [], layout: 'vertical', key: 'F8' };
+
+/** The default group of a [hud] default text: its items, layout and key (the other groups are kept as they are by pinsText). */
+export function pinGroupOf(text) {
+  const part = String(text ?? '').split('|').map((p) => p.trim()).find((p) => p.startsWith('perf:'));
+  if (!part) return { ...DEFAULT_GROUP };
+  const [items, ...fields] = part.slice(5).split(';');
+  const g = { ...DEFAULT_GROUP, items: items && items !== 'none' ? items.split('+').map((i) => i.trim()).filter(Boolean) : [] };
+  for (const f of fields) {
+    const [k, v] = f.split('=').map((x) => x.trim());
+    if (k === 'layout') g.layout = v;
+    if (k === 'key') g.key = v;
+  }
+  return g;
+}
+/** The text with the default group replaced by `g` (dropped when it has no items). */
+export function pinsText(text, g) {
+  const others = String(text ?? '').split('|').map((p) => p.trim()).filter((p) => p && !p.startsWith('perf:'));
+  const items = PIN_ITEMS.map((i) => i.id).filter((id) => g.items.includes(id));
+  const own = items.length ? [`perf:${items.join('+')};name=Performance;layout=${g.layout};key=${g.key || 'none'}`] : [];
+  return [...own, ...others].join('|');
+}
+const pinsRaw = (src) => (has(src, AT_PINS) ? String(rawOf(src, AT_PINS)) : '');
+const pinShown = (v) => PIN_ITEMS.some((it) => v[`pin_${it.id}`]);
+const pinRows = [
+  ...PIN_ITEMS.map((it) => ({
+    id: `pin_${it.id}`, label: it.label, type: 'toggle', at: AT_PINS, def: false,
+    read: (src) => pinGroupOf(pinsRaw(src)).items.includes(it.id),
+    write: (on, src) => {
+      const g = pinGroupOf(pinsRaw(src));
+      g.items = on ? [...g.items, it.id] : g.items.filter((i) => i !== it.id);
+      return [edit(AT_PINS, pinsText(pinsRaw(src), g))];
+    },
+  })),
+  {
+    id: 'pins_layout', label: 'Layout', type: 'segmented', at: AT_PINS, def: 'vertical', options: PIN_LAYOUTS, when: pinShown,
+    read: (src) => pinGroupOf(pinsRaw(src)).layout,
+    write: (layout, src) => {
+      const g = pinGroupOf(pinsRaw(src));
+      g.layout = layout;
+      return [edit(AT_PINS, pinsText(pinsRaw(src), g))];
+    },
+  },
+  {
+    id: 'pins_key', label: 'Its own key', type: 'select', at: AT_PINS, def: 'F8', aliases: SHORTCUT_KEY_ALIASES, options: keyOptions('None'), when: pinShown,
+    read: (src) => pinGroupOf(pinsRaw(src)).key,
+    write: (key, src) => {
+      const g = pinGroupOf(pinsRaw(src));
+      g.key = key;
+      return [edit(AT_PINS, pinsText(pinsRaw(src), g))];
+    },
+    desc: 'Shows or hides these pins in the game. Arrange more pins and groups in the game: F1, Performance HUD.',
+  },
+];
+
+const SHORTCUTS_SECTION = {
+  id: 'shortcuts',
+  label: 'In-game shortcuts',
+  groups: [
+    {
+      title: 'Settings menu',
+      rows: [
+        { id: 'shortcuts_note', type: 'note', note: () => ({ text: 'A shortcut never reaches the game. The cheats menu\u2019s own key and controller combo are on the Cheats page.' }) },
+        shortcutRow('menu_key', 'Open and close the settings menu', 'key', 'The in-game settings menu (frame rate, upscaler, controls, pins).'),
+        shortcutRow('menu_pad', 'From a controller', 'pad', 'Buttons held together.'),
+      ],
+    },
+    {
+      title: 'Pins over the game',
+      rows: [
+        shortcutRow('hud_key', 'Hide or show every pin', 'key', 'Pins only show readouts: the game gets every key, click and button.'),
+        shortcutRow('hud_pad', 'From a controller (optional)', 'pad', 'A rear grip or trackpad click held first: the game never sees it.'),
+        shortcutRow('cheats_hud_key', 'Show or hide the cheats pins', 'key'),
+        conflictNote,
+      ],
+    },
+    { title: 'Pinned by default', rows: pinRows },
+  ],
+};
+
 // ---- the page ---------------------------------------------------------------------------------------------------------------------
 
 const REPO_URL = 'https://github.com/Chaos192/PokoMac';
@@ -410,6 +579,7 @@ export const SECTIONS = [
       },
     ],
   },
+  SHORTCUTS_SECTION,
   {
     // docs/CHEATS.md: the runtime's cheats overlay ([cheats] of pkp.ini). Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
     id: 'cheats',

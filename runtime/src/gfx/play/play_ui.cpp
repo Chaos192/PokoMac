@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Play mode settings page: the "Controls" window of the F1 overlay. The contract is play_ui.h. The page edits a working copy of the
-// settings: Apply and save hands it to the host, Revert and Factory defaults replace the copy, and nothing else reaches the game.
+// Play mode settings: the F1 menu of the overlay. The contract is play_ui.h. The menu edits a working copy of the settings: changes are
+// handed to the host as they are made (Apply and save does it at once), Revert and Factory defaults replace the copy, and nothing else
+// reaches the game. Its look is the overlay's theme (cheats_theme.h); its rows and cards are play_ui_widgets.h.
 #include "play_ui.h"
+
+#include <SDL3/SDL_scancode.h>
 
 #include <algorithm>
 #include <cfloat>
+#include <cstdarg>
+#include <cstring>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -13,7 +18,12 @@
 #include <vector>
 
 #include "imgui.h"
+#include "imgui_internal.h"
+#include "cheats_theme.h"
+#include "cheats_ui.h"
+#include "hotkeys.h"
 #include "nxrt/audio_sink.h"
+#include "nxrt/game.h"
 #include "nxrt/extras.h"
 #include "extras/temporal.h"
 #include "nxrt/frame_limiter.h"
@@ -23,19 +33,27 @@
 #include "nxrt/lowlat.h"
 #include "nxrt/overlay.h"
 #include "nxrt/platform.h"
+#include "perf_pins.h"
+#include "pin_board.h"
 #include "play_game.h"
+#include "play_ui_widgets.h"
+
+namespace nxrt::cheats::ui {
+ImTextureData* game_icon();   // cheats_icon.cpp: the title folder's icon, also the F1 menu's
+}
 
 namespace nxrt::play {
+
+namespace th = nxrt::cheats::ui::theme;
+
+namespace widgets {
+const std::string& take_tip();
+}
 
 namespace {
 
 namespace hid = nxrt::hid;
 
-const ImVec4 kRed(1.0f, 0.35f, 0.35f, 1.0f);
-const ImVec4 kYellow(1.0f, 0.85f, 0.3f, 1.0f);
-const ImVec4 kOrange(1.0f, 0.65f, 0.25f, 1.0f);
-const ImVec4 kPressed(0.20f, 0.60f, 0.30f, 1.0f);
-const ImVec4 kReleased(0.25f, 0.25f, 0.28f, 1.0f);
 
 constexpr int kWindowModeCount = 3;
 constexpr const char* kWindowModeNames[kWindowModeCount] = {"Windowed", "Borderless fullscreen", "Exclusive fullscreen"};
@@ -92,6 +110,16 @@ struct Page {
     double monitors_at = -1e9;
     std::vector<std::string> audio_devices;   // Audio page: output device names, read when the page opens and by its Refresh button
     bool audio_loaded = false;
+    // the menu (draw_menu)
+    int page = 0;                          // MenuPage
+    bool page_changed = false;             // scroll the page to the top
+    int controls_part = 0;                 // the Controls page's part: mouse, bindings, controller, Switch layout, status
+    int pin_capture = -1;                  // the pin group whose toggle key waits for a key (-1: none)
+    int dock = 1;                          // 0 left, 1 centre, 2 right
+    bool focus_rail = true;                // put the controller's focus on the page's entry of the rail (when the menu opens)
+    double shown_at = 0.0, synced_at = 0.0;
+    int last_frame = -10;                  // ImGui frame of the last draw: a gap means the menu was opened again
+    float scroll_to = -1.f;                // tests: scroll the page to this many UI units down (menu_scroll)
 };
 
 void mark(Page& p) { p.dirty = true; }
@@ -102,9 +130,10 @@ const char* act_label(Act a) { return a == Act::None ? "none (input off)" : act_
 
 // Stops our rebind (a binding row or the quit key). The host's capture is cancelled only when it is ours.
 void stop_rebind(UiHost& host, Page& p) {
-    if ((p.rebind >= 0 || p.quit_capture) && host.capturing()) host.cancel_capture();
+    if ((p.rebind >= 0 || p.quit_capture || p.pin_capture >= 0) && host.capturing()) host.cancel_capture();
     p.rebind = -1;
     p.quit_capture = false;
+    p.pin_capture = -1;
 }
 
 // Ends the frame rate counter's hotkey capture. The host's capture is cancelled only when it is ours.
@@ -138,6 +167,28 @@ void poll_capture(UiHost& host, Page& p) {
     if (host.capture_result(&id)) {
         const std::string name = input_name(id);
         const bool reserved = host.reserved_key(id);
+        if (p.pin_capture >= 0) {
+            // A pin's toggle key: keyboard keys only, never one the menu, the counter, the quit key or the game's bindings use.
+            const Settings cur = host.settings();
+            bool bound = false;
+            for (const Binding& b : p.edit.bindings) bound = bound || b.in == id;
+            const bool taken = id.kind == InKind::Key && (id == cur.fps.key || id == p.edit.quit.key);
+            if (reserved || taken || bound) {
+                set_notice(p, name + (reserved ? " is one of the overlay's own keys" : taken ? " is the counter's or the quit key" : " is bound in the game") +
+                                  " and cannot toggle a pin. Press another key, Escape cancels.", true);
+                host.begin_capture();
+                return;
+            }
+            const int gi = p.pin_capture;
+            p.pin_capture = -1;
+            if (id.kind == InKind::Key && gi < static_cast<int>(p.edit.hud.groups.size())) {
+                p.edit.hud.groups[static_cast<std::size_t>(gi)].key = {id.code, 0};
+                p.edit.hud.in_file = true;
+                mark(p);
+                set_notice(p, name + " shows or hides the pin.", false);
+            }
+            return;
+        }
         if (p.fps_capture) {
             // The frame rate hotkey takes keyboard keys only; a mouse button or a wheel notch is dropped and the capture ends.
             if (reserved) {
@@ -187,10 +238,11 @@ void poll_capture(UiHost& host, Page& p) {
             }
         }
         p.rebind = -1;
-    } else if ((p.rebind >= 0 || p.fps_capture || p.quit_capture) && !host.capturing()) {
+    } else if ((p.rebind >= 0 || p.fps_capture || p.quit_capture || p.pin_capture >= 0) && !host.capturing()) {
         p.rebind = -1;   // Escape, or the host ended the capture without a result
         p.fps_capture = false;
         p.quit_capture = false;
+        p.pin_capture = -1;
         set_notice(p, "Rebinding cancelled.", false);
     }
 }
@@ -254,17 +306,197 @@ void load_factory(UiHost& host, Page& p) {
     mark(p);
 }
 
+}  // namespace
+
+// ---- rows and cards (play_ui_widgets.h) ------------------------------------------------------------------------------------------------
+
+namespace widgets {
+namespace {
+bool g_card_open = false;
+float g_control_x = 0.f;
+std::string g_row_id;
+std::string g_tip;          // the description of the focused / hovered row this frame (the footer shows it)
+std::string g_tip_shown;    // last frame's, drawn by the footer
+}  // namespace
+
+ImVec4 col_warn() { return th::v4(th::pal().warn); }
+ImVec4 col_danger() { return th::v4(th::pal().danger); }
+ImVec4 col_ok() { return th::v4(th::pal().ok); }
+ImVec4 col_accent() { return th::v4(th::pal().accent); }
+ImVec4 col_off() { return th::v4(th::pal().control_off); }
+ImVec4 col_warn_tint() { return th::v4(th::pal().warn_tint); }
+
+void end_card() {
+    if (!g_card_open) return;
+    g_card_open = false;
+    ImGui::EndChild();
+    ImGui::Dummy(ImVec2(0.f, th::sp(th::S3)));
+}
+
+void card(const char* title) {
+    end_card();
+    const th::Palette& p = th::pal();
+    if (title && *title && ImGui::FindRenderedTextEnd(title) != title) {
+        th::push(th::Type::Strong);
+        ImGui::PushStyleColor(ImGuiCol_Text, p.text2);
+        ImGui::TextUnformatted(title, ImGui::FindRenderedTextEnd(title));
+        ImGui::PopStyleColor();
+        th::pop();
+    }
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, p.card);
+    ImGui::PushStyleColor(ImGuiCol_Border, p.line);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, th::px(th::kRadiusMd));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(th::sp(th::S4), th::sp(th::S3)));
+    ImGui::BeginChild(title && *title ? title : "##card", ImVec2(0.f, 0.f),
+                      ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleVar(3);
+    ImGui::PopStyleColor(2);
+    g_card_open = true;
+}
+
+const char* row(const char* label) {
+    const char* hash = std::strstr(label, "##");
+    const size_t vis = hash ? static_cast<size_t>(hash - label) : std::strlen(label);
+    if (vis == 0) return label;
+    g_row_id = std::string("##") + (hash ? hash + 2 : label);
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float x0 = ImGui::GetCursorPosX();
+    const float lw = std::round(std::clamp(avail * 0.46f, std::min(avail * 0.5f, th::px(150.f)), th::px(360.f)));
+    ImGui::AlignTextToFramePadding();
+    ImGui::PushTextWrapPos(x0 + lw - th::sp(th::S3));
+    ImGui::TextUnformatted(label, label + vis);
+    ImGui::PopTextWrapPos();
+    ImGui::SameLine(x0 + lw);
+    g_control_x = x0 + lw;
+    ImGui::SetNextItemWidth(std::max(th::px(80.f), avail - lw));
+    return g_row_id.c_str();
+}
+
+float control_x() { return g_control_x; }
+
+bool check(const char* label, bool* v) {
+    const char* id = row(label);
+    if (id == label) return th::toggle(label, v);   // no text: a bare switch
+    return th::toggle(id, v);
+}
+
+bool combo(const char* label, const char* preview, ImGuiComboFlags flags) { return ImGui::BeginCombo(row(label), preview, flags); }
+bool slider_int(const char* label, int* v, int lo, int hi, const char* format, ImGuiSliderFlags flags) {
+    return ImGui::SliderInt(row(label), v, lo, hi, format, flags);
+}
+bool slider_float(const char* label, float* v, float lo, float hi, const char* format, ImGuiSliderFlags flags) {
+    return ImGui::SliderFloat(row(label), v, lo, hi, format, flags);
+}
+bool input_int(const char* label, int* v, int step, int step_fast, ImGuiInputTextFlags flags) {
+    return ImGui::InputInt(row(label), v, step, step_fast, flags);
+}
+
+bool segmented(const char* label, const char* const* names, int n, int* cur) {
+    const char* id = row(label);
+    ImGui::PushID(id);
+    const th::Palette& p = th::pal();
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float h = ImGui::GetFrameHeight();
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float r = std::min(h * 0.5f, ImGui::GetStyle().FrameRounding + th::px(2.f));
+    dl->AddRectFilled(pos, ImVec2(pos.x + avail, pos.y + h), ImGui::GetColorU32(p.sunken), r);
+    bool changed = false;
+    const float w = avail / static_cast<float>(n);
+    for (int i = 0; i < n; ++i) {
+        ImGui::PushID(i);
+        const ImRect bb(ImVec2(pos.x + w * static_cast<float>(i), pos.y), ImVec2(pos.x + w * static_cast<float>(i + 1), pos.y + h));
+        ImGui::SetCursorScreenPos(bb.Min);
+        const ImGuiID iid = ImGui::GetID("##seg");
+        ImGui::ItemSize(bb);
+        if (ImGui::ItemAdd(bb, iid)) {
+            bool hov = false, held = false;
+            if (ImGui::ButtonBehavior(bb, iid, &hov, &held) && *cur != i) {
+                *cur = i;
+                changed = true;
+            }
+            const bool sel = *cur == i;
+            const ImVec2 a(bb.Min.x + th::px(2.f), bb.Min.y + th::px(2.f)), b(bb.Max.x - th::px(2.f), bb.Max.y - th::px(2.f));
+            if (sel) dl->AddRectFilled(a, b, ImGui::GetColorU32(p.accent), std::max(0.f, r - th::px(2.f)));
+            else if (hov) dl->AddRectFilled(a, b, ImGui::GetColorU32(p.surface2), std::max(0.f, r - th::px(2.f)));
+            const ImVec2 ts = ImGui::CalcTextSize(names[i]);
+            dl->PushClipRect(a, b, true);
+            dl->AddText(ImVec2(bb.Min.x + std::max(th::px(4.f), (w - ts.x) * 0.5f), bb.Min.y + (h - ts.y) * 0.5f),
+                        ImGui::GetColorU32(sel ? p.on_accent : hov ? p.text : p.text2), names[i]);
+            dl->PopClipRect();
+            ImGui::RenderNavCursor(bb, iid, ImGuiNavRenderCursorFlags_None, r);
+        }
+        ImGui::PopID();
+        if (i + 1 < n) ImGui::SameLine(0.f, 0.f);
+    }
+    ImGui::PopID();
+    return changed;
+}
+
+void tip(const char* text) {
+    if (!text) return;
+    if (ImGui::IsItemFocused() || ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) g_tip = text;
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal | ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetItemTooltip("%s", text);
+}
+
+void restart_badge() {
+    // a note under the control; the last item stays the control's, so a tip() after it still describes the control
+    const ImGuiLastItemData last = GImGui->LastItemData;
+    ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), g_control_x));
+    th::push(th::Type::Small);
+    ImGui::PushStyleColor(ImGuiCol_Text, th::pal().warn);
+    ImGui::TextUnformatted("Applies at the next start");
+    ImGui::PopStyleColor();
+    th::pop();
+    GImGui->LastItemData = last;
+}
+
+void note(const char* fmt, ...) {
+    va_list a;
+    va_start(a, fmt);
+    ImGui::PushStyleColor(ImGuiCol_Text, th::pal().text2);
+    ImGui::PushTextWrapPos(0.f);
+    ImGui::TextV(fmt, a);
+    ImGui::PopTextWrapPos();
+    ImGui::PopStyleColor();
+    va_end(a);
+}
+
+void warn(const char* fmt, ...) {
+    va_list a;
+    va_start(a, fmt);
+    ImGui::PushStyleColor(ImGuiCol_Text, th::pal().warn);
+    ImGui::PushTextWrapPos(0.f);
+    ImGui::TextV(fmt, a);
+    ImGui::PopTextWrapPos();
+    ImGui::PopStyleColor();
+    va_end(a);
+}
+
+// The footer's description: what tip() saw this frame (the footer is drawn after the page).
+const std::string& take_tip() {
+    g_tip_shown = g_tip;
+    g_tip.clear();
+    return g_tip_shown;
+}
+}  // namespace widgets
+
+namespace {
+using namespace widgets;
+
 // A slider on a double; true when the user changed it.
 bool slider(const char* label, double* v, double lo, double hi, const char* format, ImGuiSliderFlags flags = 0) {
     float f = static_cast<float>(*v);
-    if (!ImGui::SliderFloat(label, &f, static_cast<float>(lo), static_cast<float>(hi), format, flags)) return false;
+    if (!slider_float(label, &f, static_cast<float>(lo), static_cast<float>(hi), format, flags)) return false;
     *v = f;
     return true;
 }
 
 // An int field. The value is clamped when the field is left, not while typing (typing "1280" must not turn into "320" on the way).
 bool int_field(const char* label, int* v, int lo, int hi, int step, int step_fast) {
-    bool changed = ImGui::InputInt(label, v, step, step_fast);
+    bool changed = input_int(label, v, step, step_fast);
     if (ImGui::IsItemDeactivated()) {
         const int c = std::clamp(*v, lo, hi);
         changed = changed || c != *v;
@@ -286,18 +518,6 @@ bool render_size_field(const char* label, int* v) {
 
 // Sizes are in units of the 16 px reference font, so the page follows the overlay's UI scale (overlay.cpp).
 float px(float v) { return v * ImGui::GetFontSize() / 16.0f; }
-
-// A hover tooltip for the item drawn last.
-void tip(const char* text) {
-    if (ImGui::IsItemHovered()) ImGui::SetItemTooltip("%s", text);
-}
-
-// Marks the item drawn last as one that only takes effect at the next start.
-void restart_badge() {
-    ImGui::SameLine();
-    ImGui::TextColored(kOrange, "restart");
-    if (ImGui::IsItemHovered()) ImGui::SetItemTooltip("%s", "Applies on restart: the game reads this once, when it starts.");
-}
 
 // ---- Mouse --------------------------------------------------------------------------------------------------------------------------
 
@@ -331,14 +551,14 @@ void mouse_tab(Page& p) {
         mark(p);
     }
     sensitivity_help(m.pitch_rad);
-    ImGui::Checkbox("Link vertical to horizontal", &p.link_pitch);
+    check("Link vertical to horizontal", &p.link_pitch);
     game_mouse_section(0, p);
 
     ImGui::Spacing();
-    if (ImGui::Checkbox("Invert vertical", &m.invert_y)) mark(p);
-    if (ImGui::Checkbox("Invert horizontal", &m.invert_x)) mark(p);
+    if (check("Invert vertical", &m.invert_y)) mark(p);
+    if (check("Invert horizontal", &m.invert_x)) mark(p);
     game_mouse_section(1, p);
-    if (ImGui::Checkbox("Mouse pointer in menus (cursor, hover, click)", &m.menu_cursor)) mark(p);
+    if (check("Mouse pointer in menus (cursor, hover, click)", &m.menu_cursor)) mark(p);
     game_mouse_section(2, p);
 }
 
@@ -380,7 +600,7 @@ int pad_choice_of(uint64_t v) {
 }
 
 void pad_buttons_group(Page& p) {
-    ImGui::SeparatorText("Pad buttons");
+    card("Pad buttons");
     ImGui::TextWrapped("What each controller button presses on the Switch pad. Default keeps the built-in layout.");
     if (ImGui::BeginTable("pad_buttons", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
         ImGui::TableSetupColumn("Controller button");
@@ -397,7 +617,7 @@ void pad_buttons_group(Page& p) {
 
             ImGui::TableSetColumnIndex(1);
             ImGui::SetNextItemWidth(-FLT_MIN);
-            if (ImGui::BeginCombo("##remap", sel >= 0 ? kPadChoiceNames[sel] : kPadCustomLabel)) {
+            if (combo("##remap", sel >= 0 ? kPadChoiceNames[sel] : kPadCustomLabel)) {
                 if (sel < 0) {   // a mask no choice holds: shown as the current entry, not offered
                     ImGui::BeginDisabled();
                     ImGui::Selectable(kPadCustomLabel, true);
@@ -430,7 +650,7 @@ void pad_buttons_group(Page& p) {
 // The quit combination ([quit] pad): two controller buttons held together open the "Close the game?" prompt; both none = off. A file may
 // name more buttons: the combos then show the first two, and changing either keeps only what they show.
 void quit_pad_group(Page& p) {
-    ImGui::SeparatorText("Quit shortcut");
+    card("Quit shortcut");
     uint32_t& bits = p.edit.quit.pad;
     int sel[2] = {-1, -1}, n = 0;
     for (int i = 0; i < kPadSrcCount; ++i) {
@@ -440,7 +660,7 @@ void quit_pad_group(Page& p) {
     }
     for (int k = 0; k < 2; ++k) {
         ImGui::PushID(k);
-        if (ImGui::BeginCombo(k == 0 ? "Quit: button 1" : "Quit: button 2", sel[k] < 0 ? "none" : kPadSrcLabels[sel[k]])) {
+        if (combo(k == 0 ? "Quit: button 1" : "Quit: button 2", sel[k] < 0 ? "none" : kPadSrcLabels[sel[k]])) {
             for (int c = -1; c < kPadSrcCount; ++c) {
                 if (ImGui::Selectable(c < 0 ? "none" : kPadSrcLabels[c], c == sel[k]) && c != sel[k]) {
                     int next[2] = {sel[0], sel[1]};
@@ -457,14 +677,14 @@ void quit_pad_group(Page& p) {
     }
     tip("Holding these controller buttons together asks \"Close the game?\" (A quits, B cancels). They are the physical buttons, whatever they "
         "press on the Switch pad. Both none turns the shortcut off.");
-    if (n > 2) ImGui::TextColored(kOrange, "controls.ini names %d buttons (%s); changing one here keeps only the two shown.", n, pad_combo_text(bits).c_str());
+    if (n > 2) ImGui::TextColored(col_warn(), "controls.ini names %d buttons (%s); changing one here keeps only the two shown.", n, pad_combo_text(bits).c_str());
 }
 
 // The button prompt style: which icons the game shows (Auto follows the last device used). Shared by the keyboard and the pad.
 void prompts_row(const LiveStatus& live, Page& p) {
     PromptSettings& prompts = p.edit.prompts;
     const int prompt_sel = static_cast<int>(prompts.style);
-    if (ImGui::BeginCombo("Button prompts", kPromptLabels[prompt_sel])) {
+    if (combo("Button prompts", kPromptLabels[prompt_sel])) {
         for (int i = 0; i < kPromptStyleCount; ++i) {
             if (ImGui::Selectable(kPromptLabels[i], i == prompt_sel) && i != prompt_sel) {
                 prompts.style = static_cast<PromptStyle>(i);
@@ -475,26 +695,23 @@ void prompts_row(const LiveStatus& live, Page& p) {
     }
     tip("The button icons in the game's prompts: the game's own Switch icons, Xbox, PlayStation, Steam Controller, Steam Deck, keyboard and mouse, or Auto to follow the device you used last.");
     if (prompts.style == PromptStyle::Auto) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("showing %s", cstr(live.prompt_now));
+        ImGui::SetCursorPosX(control_x());
+        ImGui::TextDisabled("Showing %s now", cstr(live.prompt_now));
     }
 }
 
 void pad_tab(const LiveStatus& live, Page& p) {   // the Gamepad tab of the Controls page
     PadSettings& pad = p.edit.pad;
-    const bool by_label = pad.label_abxy;
-    if (ImGui::RadioButton("Switch layout (right = A, bottom = B)", !by_label) && by_label) {
-        pad.label_abxy = false;
+    static const char* const kLayouts[] = {"Switch (right = A)", "Xbox (A = A)"};
+    int by_label = pad.label_abxy ? 1 : 0;
+    if (segmented("Face buttons##pad_layout", kLayouts, 2, &by_label)) {
+        pad.label_abxy = by_label == 1;
         mark(p);
     }
-    tip("Face buttons by position, as on a Switch pad: the right button confirms (Switch A), the bottom one goes back (Switch B).");
-    if (ImGui::RadioButton("Xbox layout (A = A, B = B)", by_label) && !by_label) {
-        pad.label_abxy = true;
-        mark(p);
-    }
-    tip("Face buttons by the letter printed on them: the pad's A is Switch A wherever it sits (on an Xbox pad, the bottom button confirms).");
+    tip("Switch: face buttons by position, as on a Switch pad: the right button confirms (Switch A), the bottom one goes back (Switch B). "
+        "Xbox: by the letter printed on them: the pad's A is Switch A wherever it sits (on an Xbox pad, the bottom button confirms).");
 
-    ImGui::SeparatorText("Sticks and triggers");
+    card("Sticks and triggers");
     if (slider("Left stick dead zone", &pad.stick_deadzone, 0.0, 0.5, "%.2f")) mark(p);
     tip("The stick must move this far from the centre before it counts (a fraction of its travel). Applies before the game's own dead zone.");
     if (slider("Right stick dead zone", &pad.right_deadzone, 0.0, 0.5, "%.2f")) mark(p);
@@ -503,20 +720,20 @@ void pad_tab(const LiveStatus& live, Page& p) {   // the Gamepad tab of the Cont
     tip("How far the left stick must be pushed to count as fully pushed (a fraction of its travel). Lower it if your stick never reaches full speed (for example it tops out around 0.95). 1.00 turns it off.");
     if (slider("Right stick max", &pad.right_stick_max, 0.5, 1.0, "%.2f")) mark(p);
     tip("The same for the right stick (looking): lower it if the camera never turns at full speed.");
-    if (ImGui::Checkbox("Invert look (right stick up looks down)", &pad.invert_y)) mark(p);
+    if (check("Invert look (right stick up looks down)", &pad.invert_y)) mark(p);
     if (ImGui::IsItemHovered()) ImGui::SetItemTooltip("%s", "Applies in play only; adds to the game's own invert option.");
     if (slider("Look sensitivity", &pad.look_sens, 0.25, 3.0, "%.2f", ImGuiSliderFlags_Logarithmic)) mark(p);
     if (ImGui::IsItemHovered()) ImGui::SetItemTooltip("%s", "Multiplies the right stick while playing. Below 1 the top turning speed is lower; above 1 you reach it with less stick.");
     if (slider("Trigger threshold", &pad.trigger_threshold, 0.05, 1.0, "%.2f")) mark(p);
-    if (ImGui::Checkbox("Gyro (six-axis sensor)", &pad.gyro)) mark(p);
+    if (check("Gyro (six-axis sensor)", &pad.gyro)) mark(p);
     if (slider("Gyro scale", &pad.gyro_scale, 0.1, 4.0, "%.2f", ImGuiSliderFlags_Logarithmic)) mark(p);
-    if (ImGui::Checkbox("Rumble", &pad.rumble)) mark(p);
+    if (check("Rumble", &pad.rumble)) mark(p);
     if (slider("Rumble scale", &pad.rumble_scale, 0.0, 2.0, "%.2f")) mark(p);
 
     pad_buttons_group(p);
     quit_pad_group(p);
 
-    ImGui::SeparatorText("Gamepad");
+    card("Gamepad");
     if (live.pads == 0) ImGui::TextUnformatted("No gamepad open.");
     else ImGui::Text("%d open: %s", live.pads, live.pad_name.c_str());
     ImGui::Text("Gyro available: %s    Rumble available: %s", yes_no(live.pad_gyro), yes_no(live.pad_rumble));
@@ -560,17 +777,17 @@ void set_fps_live(UiHost& host, const FpsSettings& f) {
 
 void fps_group(UiHost& host, Page& p) {
     const FpsSettings fps = host.settings().fps;
-    ImGui::SeparatorText("Frame rate counter");
+    card("Frame rate counter");
 
     bool show = fps.show;
-    if (ImGui::Checkbox("Show frame rate counter", &show)) {
+    if (check("Show frame rate counter", &show)) {
         FpsSettings f = fps;
         f.show = show;
         set_fps_live(host, f);
     }
 
     const int corner = static_cast<int>(fps.corner);
-    if (ImGui::BeginCombo("Corner##fps_corner", kCornerNames[corner])) {
+    if (combo("Corner##fps_corner", kCornerNames[corner])) {
         for (int i = 0; i < kCornerCount; ++i) {
             if (ImGui::Selectable(kCornerNames[i], i == corner) && i != corner) {
                 FpsSettings f = fps;
@@ -582,7 +799,7 @@ void fps_group(UiHost& host, Page& p) {
     }
 
     const int detail = std::clamp(fps.detail, 0, kFpsDetailCount - 1);
-    if (ImGui::BeginCombo("Detail##fps_detail", kFpsDetailNames[detail])) {
+    if (combo("Detail##fps_detail", kFpsDetailNames[detail])) {
         for (int i = 0; i < kFpsDetailCount; ++i) {
             if (ImGui::Selectable(kFpsDetailNames[i], i == detail) && i != detail) {
                 FpsSettings f = fps;
@@ -594,24 +811,21 @@ void fps_group(UiHost& host, Page& p) {
     }
 
     bool shots = fps.in_screenshots;
-    if (ImGui::Checkbox("Also draw it in screenshots", &shots)) {
+    if (check("Also draw it in screenshots", &shots)) {
         FpsSettings f = fps;
         f.in_screenshots = shots;
         set_fps_live(host, f);
     }
 
     const std::string key = input_name(fps.key);
-    ImGui::Text("Hotkey: %s", key.empty() ? "?" : key.c_str());
-    ImGui::SameLine();
-    if (ImGui::Button("Change##fps_key")) {
+    row("Hotkey##fps_key_row");
+    const std::string label = (p.fps_capture ? std::string("Press a key...") : (key.empty() ? std::string("?") : key) + "   Change") + "##fps_key";
+    if (ImGui::Button(label.c_str())) {
         stop_rebind(host, p);
         p.fps_capture = true;
         host.begin_capture();
     }
-    if (p.fps_capture) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("press a keyboard key...");
-    }
+    tip("A keyboard key that shows or hides the counter in the game. It never reaches the game.");
 }
 
 // ---- Display page groups (HDR, upscaling, low latency) ----------------------------------------------------------------------------------
@@ -668,7 +882,7 @@ const char* temporal_why(extras::UpscaleMode m) {
 // dragged through the gap below lo while it is held.
 bool auto_nits_slider(const char* label, double* v, int lo, int hi) {
     int x = static_cast<int>(std::lround(*v));
-    bool changed = ImGui::SliderInt(label, &x, 0, hi, x <= 0 ? "auto" : "%d nits");
+    bool changed = slider_int(label, &x, 0, hi, x <= 0 ? "auto" : "%d nits");
     if (ImGui::IsItemDeactivated()) {
         const int c = x <= 0 ? 0 : std::clamp(x, lo, hi);
         changed = changed || c != x;
@@ -680,10 +894,10 @@ bool auto_nits_slider(const char* label, double* v, int lo, int hi) {
 
 void hdr_group(Page& p) {
     extras::HdrSettings& h = p.edit.extras.hdr;
-    ImGui::SeparatorText("HDR output");
+    card("HDR output");
 
     const int mode = static_cast<int>(h.mode);
-    const bool mode_open = ImGui::BeginCombo("Mode##hdr_mode", kHdrModeNames[mode]);
+    const bool mode_open = combo("Mode##hdr_mode", kHdrModeNames[mode]);
     tip("Off keeps the SDR picture, Auto uses HDR when the display and Windows offer it, On runs the HDR pipeline even without an HDR display. "
         "Native is On with the levels the game declares for an HDR TV on Switch 2.");
     if (mode_open) {
@@ -698,7 +912,7 @@ void hdr_group(Page& p) {
     restart_badge();
 
     const int format = static_cast<int>(h.format);
-    const bool format_open = ImGui::BeginCombo("Format##hdr_format", kHdrFormatNames[format]);
+    const bool format_open = combo("Format##hdr_format", kHdrFormatNames[format]);
     tip("The signal sent to the display: HDR10, or scRGB; Auto picks HDR10 when the display offers it and scRGB otherwise.");
     if (format_open) {
         for (int i = 0; i < 3; ++i) {
@@ -726,13 +940,13 @@ void hdr_group(Page& p) {
 
 void upscale_group(Page& p) {
     extras::UpscaleSettings& u = p.edit.extras.upscale;
-    ImGui::SeparatorText("Upscaling");
+    card("Upscaling");
 
     // Only the modes that work are offered. A file that holds another one shows it as the current entry, marked, until the player picks.
     const int mode = static_cast<int>(u.mode);
     std::string preview = kUpscaleNames[mode];
     if (!upscale_available(u.mode)) preview += " (not available)";
-    const bool open = ImGui::BeginCombo("Upscaler##upscale_mode", preview.c_str());
+    const bool open = combo("Upscaler##upscale_mode", preview.c_str());
 #if defined(__APPLE__)
     tip("How the game's 3D scene is anti-aliased and enlarged. MetalFX (Apple): temporal anti-aliasing and upscaling from the quality preset's scene size, "
         "the sharpest and steadiest picture. MetalFX AA: the same at the full scene size, anti-aliasing only. FSR 1 (AMD): filtered and sharpened, "
@@ -763,7 +977,7 @@ void upscale_group(Page& p) {
 
     if (u.mode == extras::UpscaleMode::Fsr3 || u.mode == extras::UpscaleMode::Dlss || u.mode == extras::UpscaleMode::MetalFx) {
         const int q = static_cast<int>(u.quality);
-        if (ImGui::BeginCombo("Quality##upscale_quality", kUpscaleQualityNames[q])) {
+        if (combo("Quality##upscale_quality", kUpscaleQualityNames[q])) {
             for (int i = 0; i < 6; ++i) {
                 if (ImGui::Selectable(kUpscaleQualityNames[i], i == q) && i != q) {
                     u.quality = static_cast<extras::UpscaleQuality>(i);
@@ -778,7 +992,7 @@ void upscale_group(Page& p) {
 
     if (slider("Sharpness", &u.sharpness, 0.0, 1.0, "%.2f")) mark(p);
     tip("How much FSR 1, NIS or FSR 3 sharpens the upscaled picture; 1 is the sharpest (DLSS has no sharpening).");
-    if (ImGui::SliderInt("Scene resolution##upscale_scene", &u.scene_scale, 25, 100, "%d%%")) mark(p);
+    if (slider_int("Scene resolution##upscale_scene", &u.scene_scale, 25, 100, "%d%%")) mark(p);
     tip("Renders the 3D scene at this percent of the output size per side; the game scales it up and keeps the HUD and the post effects at full size. 100 turns it off. "
         "FSR 3, DLSS and MetalFX use their quality preset's percent instead, unless it is Custom. Applies live.");
     {   // what is in force now (#116): the percent the game module applies and who enlarges the scene
@@ -803,10 +1017,10 @@ void upscale_group(Page& p) {
 
 void latency_group(Page& p) {
     extras::LatencySettings& l = p.edit.extras.latency;
-    ImGui::SeparatorText("Low latency");   // NVIDIA Reflex or AMD Anti-Lag 2 (nxrt/lowlat.h)
+    card("Low latency");   // NVIDIA Reflex or AMD Anti-Lag 2 (nxrt/lowlat.h)
 
     const int mode = static_cast<int>(l.mode);
-    const bool open = ImGui::BeginCombo("Mode##latency_mode", kLatencyModeNames[mode]);
+    const bool open = combo("Mode##latency_mode", kLatencyModeNames[mode]);
     tip("Lowers the delay from input to picture with NVIDIA Reflex or AMD Anti-Lag 2, whichever the GPU has; Boost asks Reflex for its boost mode.");
     if (open) {
         for (int i = 0; i < 4; ++i) {
@@ -819,10 +1033,10 @@ void latency_group(Page& p) {
     }
     restart_badge();
 
-    if (ImGui::SliderInt("Frames ahead##latency_ahead", &l.frames_ahead, -1, 3, l.frames_ahead < 0 ? "no limit" : "%d")) mark(p);
+    if (slider_int("Frames ahead##latency_ahead", &l.frames_ahead, -1, 3, l.frames_ahead < 0 ? "no limit" : "%d")) mark(p);
     tip("With the mode on, the game starts simulating a frame only when at most this many earlier frames are still on their way to the screen. 1 keeps the game's frame queue short; 0 is the shortest delay and costs frame rate.");
     restart_badge();
-    if (ImGui::Checkbox("Log timings##latency_log", &l.log_timings)) mark(p);
+    if (check("Log timings##latency_log", &l.log_timings)) mark(p);
     tip("Writes one line of latency timings to the log every second.");
     restart_badge();
 
@@ -850,9 +1064,9 @@ void refresh_monitors(Page& p) {
 
 void window_group(const LiveStatus& live, Page& p) {
     DisplaySettings& d = p.edit.display;
-    ImGui::SeparatorText("Window");
+    card("Window");
     const int mode = window_mode_index(d.window_mode);
-    if (ImGui::BeginCombo("Window mode", kWindowModeNames[mode])) {
+    if (combo("Window mode", kWindowModeNames[mode])) {
         for (int i = 0; i < kWindowModeCount; ++i) {
             if (ImGui::Selectable(kWindowModeNames[i], i == mode) && i != mode) {
                 d.window_mode = kWindowModeKeys[i];
@@ -875,7 +1089,7 @@ void window_group(const LiveStatus& live, Page& p) {
                 preview = fallback;
             }
         }
-        if (ImGui::BeginCombo("Monitor", preview)) {
+        if (combo("Monitor", preview)) {
             if (ImGui::Selectable("Automatic (where the window is)", d.monitor <= 0) && d.monitor > 0) {
                 d.monitor = 0;
                 mark(p);
@@ -900,7 +1114,7 @@ void window_group(const LiveStatus& live, Page& p) {
     // Only the windowed mode's size; the picture's own size is under Resolution. Greyed out in the fullscreen modes (#117).
     const bool windowed = window_mode_index(d.window_mode) == window_mode_index("windowed");
     ImGui::BeginDisabled(!windowed);
-    if (ImGui::BeginCombo("Windowed size", size_label)) {
+    if (combo("Windowed size", size_label)) {
         for (int i = 0; i < kSizePresetCount; ++i) {
             char name[32];
             std::snprintf(name, sizeof name, "%d x %d", kSizePresets[i][0], kSizePresets[i][1]);
@@ -928,18 +1142,18 @@ void window_group(const LiveStatus& live, Page& p) {
         ImGui::TextDisabled("now %d x %d", live.width, live.height);
     }
     ImGui::EndDisabled();
-    if (ImGui::Checkbox("Keep the 16:9 picture, letterbox the rest", &d.keep_aspect)) mark(p);
+    if (check("Keep the 16:9 picture, letterbox the rest", &d.keep_aspect)) mark(p);
 }
 
 void framerate_group(UiHost& host, const LiveStatus& live, Page& p) {
     DisplaySettings& d = p.edit.display;
-    ImGui::SeparatorText("Frame rate");
-    if (ImGui::Checkbox("Vsync", &d.vsync)) mark(p);
+    card("Frame rate");
+    if (check("Vsync", &d.vsync)) mark(p);
     tip("Off: no forced vsync, lowest latency, works well with G-Sync / FreeSync together with a frame limit. On: the display paces the game.");
 
     char cap[32];
     fps_label(d.fps_cap, cap, sizeof cap);
-    if (ImGui::BeginCombo("Frame limit", cap)) {
+    if (combo("Frame limit", cap)) {
         for (int fps : kFpsChoices) {
             char name[32];
             fps_label(fps, name, sizeof name);
@@ -955,8 +1169,8 @@ void framerate_group(UiHost& host, const LiveStatus& live, Page& p) {
     {   // [display] fps_snap: on by default on a detected Steam Deck only (auto); this box writes true / false
         const bool deck = nxrt::host_is_steam_deck();
         bool snap = d.fps_snap == "true" || (d.fps_snap == "auto" && deck);
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.85f, 1.0f, 1.0f));
-        if (ImGui::Checkbox("Cap FPS to 30 for Steam Deck", &snap)) {
+        ImGui::PushStyleColor(ImGuiCol_Text, col_ok());
+        if (check("Cap FPS to 30 for Steam Deck", &snap)) {
             d.fps_snap = snap ? "true" : "false";
             mark(p);
         }
@@ -964,10 +1178,10 @@ void framerate_group(UiHost& host, const LiveStatus& live, Page& p) {
         tip("The Steam Deck's screen refreshes at a fixed 90 Hz (OLED) or 60 Hz (LCD) and cannot follow the game. At 40 fps, frames stay on "
             "screen for uneven times, which feels like stutter; at 30 every frame stays for the same time. Needs vsync on. With a higher limit "
             "it takes the next even step instead (60 becomes 45 at 90 Hz). Off: your frame limit stays exactly as set.");
-        ImGui::TextColored(ImVec4(0.45f, 0.85f, 1.0f, 1.0f), "THIS ACTUALLY MAKES THE GAME SMOOTHER on a Steam Deck.");
+        ImGui::TextColored(col_ok(), "THIS ACTUALLY MAKES THE GAME SMOOTHER on a Steam Deck.");
         ImGui::TextDisabled(deck ? "On by default on this Steam Deck. Untick it to keep your frame limit exactly as set."
                                  : "Off by default here: this is not a Steam Deck. Tick it only on a screen without G-Sync / FreeSync.");
-        if (snap && !d.vsync) ImGui::TextColored(kOrange, "Turn vsync on for this to work.");
+        if (snap && !d.vsync) ImGui::TextColored(col_warn(), "Turn vsync on for this to work.");
     }
     if (live.snap_k >= 2 && d.fps_cap > 0) {
         ImGui::TextDisabled("%d (runs at %g on this %g Hz screen%s)", d.fps_cap, live.snap_cap, static_cast<double>(live.refresh_hz),
@@ -1019,10 +1233,10 @@ void render_size_line() {
 
 void resolution_group(Page& p) {
     DisplaySettings& d = p.edit.display;
-    ImGui::SeparatorText("Resolution");
+    card("Resolution");
     render_size_line();
     bool autos = d.render_scale <= 0;
-    if (ImGui::Checkbox("Automatic render scale", &autos)) {
+    if (check("Automatic render scale", &autos)) {
         d.render_scale = autos ? 0 : 100;
         quality_preset_edited(d, QualityField::RenderScale);
         mark(p);
@@ -1030,7 +1244,7 @@ void resolution_group(Page& p) {
     tip("Auto renders at the size of the window (never below the game's own 1080p). Turn it off to pick a percentage.");
     restart_badge();
     if (!autos) {
-        if (ImGui::SliderInt("Render scale", &d.render_scale, 25, 400, "%d%%")) {
+        if (slider_int("Render scale", &d.render_scale, 25, 400, "%d%%")) {
             quality_preset_edited(d, QualityField::RenderScale);
             mark(p);
         }
@@ -1087,7 +1301,7 @@ void quality_preset_combo(Page& p, const GamePlay* gp) {
     int sel = count - 1;   // custom
     for (int i = 0; i < count; ++i)
         if (d.quality_preset == qs[i].id) sel = i;
-    if (ImGui::BeginCombo("Quality preset", qs[sel].name)) {
+    if (combo("Quality preset", qs[sel].name)) {
         for (int i = 0; i < count - 1; ++i) {
             if (ImGui::Selectable(qs[i].name, i == sel) && i != sel && gp->quality_preset && gp->quality_preset(qs[i].id, d)) mark(p);
             if (ImGui::IsItemHovered()) {
@@ -1105,11 +1319,11 @@ void picture_group(Page& p) {
     DisplaySettings& d = p.edit.display;
     const GamePlay* gp = game_play();
     const unsigned opts = gp ? gp->display_options : 0u;
-    ImGui::SeparatorText("Picture");
+    card("Picture");
 
     if (opts & kDisplayOptAspect) {
         const int aspect_sel = aspect_index(d.aspect, p.aspect_custom);
-        if (ImGui::BeginCombo("Aspect ratio", kAspectNames[aspect_sel])) {
+        if (combo("Aspect ratio", kAspectNames[aspect_sel])) {
             for (int i = 0; i < kAspectNameCount; ++i) {
                 if (ImGui::Selectable(kAspectNames[i], i == aspect_sel) && i != aspect_sel) {
                     if (i == kAspectCustom) {
@@ -1128,14 +1342,17 @@ void picture_group(Page& p) {
         if (aspect_sel == kAspectCustom && slider("Custom aspect ratio", &d.aspect, 1.0, 5.0, "%.2f")) mark(p);
     }
 
-    ImGui::TextUnformatted("Fixed render size (0 = follow the window)");
-    ImGui::SetNextItemWidth(px(120.0f));
-    if (render_size_field("##render_w", &d.render_width)) mark(p);
-    ImGui::SameLine();
-    ImGui::TextUnformatted("x");
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(px(120.0f));
-    if (render_size_field("##render_h", &d.render_height)) mark(p);
+    row("Fixed render size (0 = follow the window)##render_size");
+    {
+        const float half = std::max(px(60.0f), (ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize("x").x - 2.f * ImGui::GetStyle().ItemSpacing.x) * 0.5f);
+        ImGui::SetNextItemWidth(half);
+        if (render_size_field("##render_w", &d.render_width)) mark(p);
+        ImGui::SameLine();
+        ImGui::TextUnformatted("x");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(half);
+        if (render_size_field("##render_h", &d.render_height)) mark(p);
+    }
     restart_badge();
     tip("Renders at exactly this size instead of the window size times the render scale (Display page).");
 
@@ -1143,7 +1360,7 @@ void picture_group(Page& p) {
         if (slider("Field of view offset (degrees)", &d.fov_offset, -30.0, 40.0, "%.1f")) mark(p);
         tip("Degrees added to the vertical field of view of every game camera. 0 is the game's own.");
     }
-    if (ImGui::Checkbox("Dynamic resolution", &d.dynamic_resolution)) mark(p);
+    if (check("Dynamic resolution", &d.dynamic_resolution)) mark(p);
     tip("The game's own dynamic resolution: it lowers the render size when the GPU is late. Off keeps the full size.");
 
     const bool quality = (opts & kDisplayOptQuality) != 0;
@@ -1155,7 +1372,7 @@ void picture_group(Page& p) {
     int aniso_sel = 0;
     for (int i = 0; i < kAnisoCount; ++i)
         if (kAnisoValues[i] == d.anisotropy) aniso_sel = i;
-    if (ImGui::BeginCombo("Texture anisotropy", kAnisoNames[aniso_sel])) {
+    if (combo("Texture anisotropy", kAnisoNames[aniso_sel])) {
         for (int i = 0; i < kAnisoCount; ++i) {
             if (ImGui::Selectable(kAnisoNames[i], i == aniso_sel) && i != aniso_sel) {
                 d.anisotropy = kAnisoValues[i];
@@ -1168,20 +1385,20 @@ void picture_group(Page& p) {
     if (slider("Texture LOD bias", &d.lod_bias, -2.0, 2.0, "%.2f")) custom(QualityField::LodBias);
     tip("Negative values pick sharper texture levels, positive values softer ones.");
     if (opts & kDisplayOptBloom) {
-        if (ImGui::Checkbox("Bloom", &d.bloom)) mark(p);
+        if (check("Bloom", &d.bloom)) mark(p);
     }
     if (opts & kDisplayOptChromatic) {
-        if (ImGui::Checkbox("Chromatic aberration", &d.chromatic_aberration)) mark(p);
+        if (check("Chromatic aberration", &d.chromatic_aberration)) mark(p);
     }
 }
 
 void gpu_group(Page& p) {
     DisplaySettings& d = p.edit.display;
-    ImGui::SeparatorText("GPU and shaders");
+    card("GPU and shaders");
     int astc_sel = 1;
     for (int i = 0; i < kAstcCount; ++i)
         if (d.astc_quality == kAstcValues[i]) astc_sel = i;
-    if (ImGui::BeginCombo("Texture compression quality", kAstcNames[astc_sel])) {
+    if (combo("Texture compression quality", kAstcNames[astc_sel])) {
         for (int i = 0; i < kAstcCount; ++i) {
             if (ImGui::Selectable(kAstcNames[i], i == astc_sel) && i != astc_sel) {
                 d.astc_quality = kAstcValues[i];
@@ -1195,14 +1412,14 @@ void gpu_group(Page& p) {
         "re-encodes each texture slowly into the texture cache, so later runs are sharper (more disk space, no frame cost). Uncompressed: RGBA8, sharpest, 4 times the video memory "
         "of BC7. [gfx] astc_quality in the ini wins over this.");
 #ifndef __APPLE__   // Apple silicon has unified memory: there is nothing faster to copy to (play.cpp keeps pool_mirror off)
-    if (ImGui::Checkbox("Faster GPU memory (uses more video memory)", &d.fast_gpu_memory)) mark(p);
+    if (check("Faster GPU memory (uses more video memory)", &d.fast_gpu_memory)) mark(p);
     tip("Keeps device-local copies of the memory the draws read: faster, costs up to 2 GiB of video memory. [nvn] pool_mirror in the ini wins over this.");
     restart_badge();
 #endif
-    if (ImGui::Checkbox("Fewer GPU pipeline waits", &d.fewer_gpu_waits)) mark(p);
+    if (check("Fewer GPU pipeline waits", &d.fewer_gpu_waits)) mark(p);
     tip("No full barrier after render passes that only wrote their own targets. [nvn] pass_barriers in the ini wins over this.");
     restart_badge();
-    if (ImGui::Checkbox("Prepare shaders ahead (pipeline prewarm)", &d.shader_prewarm)) mark(p);
+    if (check("Prepare shaders ahead (pipeline prewarm)", &d.shader_prewarm)) mark(p);
     tip("Builds the pipelines that earlier runs recorded when the game loads a program, on background threads, so draws do not stall on a first compile. [nvn] prewarm in the ini wins over this.");
     restart_badge();
     if (const int left = gfx::shader_backlog(); left > 0) ImGui::TextDisabled("Preparing shaders: %d left", left);
@@ -1212,8 +1429,9 @@ void gpu_group(Page& p) {
 // Colour controls of the present step (nxrt/extras.h PictureSettings). They show live while dragged; Apply and save keeps them.
 void color_group(Page& p) {
     extras::PictureSettings& c = p.edit.extras.picture;
-    ImGui::SeparatorText("Colour");
+    card("Colour");
     bool changed = false;
+    row("Preset##pic_preset");
     if (ImGui::Button("Neutral##pic_neutral")) changed = extras::picture_preset("neutral", &c);
     tip("The game's own picture, untouched.");
     ImGui::SameLine();
@@ -1252,20 +1470,20 @@ void load_audio_devices(Page& p) {
 
 void audio_page(Page& p) {
     AudioSettings& a = p.edit.audio;
-    ImGui::SeparatorText("Volume");
+    card("Volume");
     float pct = static_cast<float>(a.volume * 100.0);
-    if (ImGui::SliderFloat("Master volume", &pct, 0.0f, 100.0f, "%.0f%%")) {
+    if (slider_float("Master volume", &pct, 0.0f, 100.0f, "%.0f%%")) {
         a.volume = std::clamp(static_cast<double>(pct), 0.0, 100.0) / 100.0;
         mark(p);
     }
     tip("The volume of everything the game plays, applied as a gain in the audio output. [audio] volume in the ini or NXRT_AUDIO_VOLUME wins at the start.");
-    if (ImGui::Checkbox("Mute when the window is not in focus", &a.mute_unfocused)) mark(p);
+    if (check("Mute when the window is not in focus", &a.mute_unfocused)) mark(p);
 
-    ImGui::SeparatorText("Output");
+    card("Output");
     if (!p.audio_loaded) load_audio_devices(p);
     const bool is_default = a.device.empty() || a.device == "default";
     const char* preview = is_default ? "System default" : a.device.c_str();
-    if (ImGui::BeginCombo("Output device", preview)) {
+    if (combo("Output device", preview)) {
         if (ImGui::Selectable("System default", is_default) && !is_default) {
             a.device = "default";
             mark(p);
@@ -1284,19 +1502,7 @@ void audio_page(Page& p) {
     ImGui::SameLine();
     ImGui::TextDisabled("%d devices", static_cast<int>(p.audio_devices.size()));
     if (!is_default && std::find(p.audio_devices.begin(), p.audio_devices.end(), a.device) == p.audio_devices.end())
-        ImGui::TextColored(kOrange, "'%s' is not connected: the system default is used.", a.device.c_str());
-}
-
-void display_page(UiHost& host, const LiveStatus& live, Page& p) {
-    window_group(live, p);
-    framerate_group(host, live, p);
-    resolution_group(p);
-    upscale_group(p);
-    latency_group(p);
-
-    ImGui::SeparatorText("Live");
-    ImGui::Text("Window: %s, present mode: %s", cstr(live.window_mode), cstr(live.present_mode));
-    ImGui::Text("Display %.2f Hz, window %d x %d, %.1f fps", live.refresh_hz, live.width, live.height, live.fps);
+        ImGui::TextColored(col_warn(), "'%s' is not connected: the system default is used.", a.device.c_str());
 }
 
 // ---- Bindings -----------------------------------------------------------------------------------------------------------------------
@@ -1310,11 +1516,11 @@ std::string input_button_text(const Binding& b, bool waiting) {
 
 // The quit key ([quit] key): opens the "Close the game?" prompt and never reaches the game. Part of the working copy.
 void quit_key_group(UiHost& host, Page& p) {
-    ImGui::SeparatorText("Quit shortcut");
+    card("Quit shortcut");
     const std::string key = p.edit.quit.key.kind == InKind::Key ? input_name(p.edit.quit.key) : std::string();
-    ImGui::Text("Quit key: %s", key.empty() ? "none" : key.c_str());
-    ImGui::SameLine();
-    if (ImGui::Button("Change##quit_key")) {
+    row("Quit key##quit_key_row");
+    const std::string label = (p.quit_capture ? std::string("Press a key...") : (key.empty() ? std::string("none") : key) + "   Change") + "##quit_key";
+    if (ImGui::Button(label.c_str())) {
         stop_rebind(host, p);
         stop_fps_capture(host, p);
         set_notice(p, "", false);
@@ -1329,15 +1535,11 @@ void quit_key_group(UiHost& host, Page& p) {
         mark(p);
     }
     ImGui::EndDisabled();
-    if (p.quit_capture) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("press a keyboard key...");
-    }
     tip("A keyboard key that asks \"Close the game?\". The key never reaches the game. The gamepad's combination is on the Gamepad tab.");
 }
 
 void bindings_tab(UiHost& host, Page& p) {
-    if (ImGui::BeginCombo("Context", ctx_name(p.ctx))) {
+    if (combo("Context", ctx_name(p.ctx))) {
         for (int c = 0; c < kCtxCount; ++c) {
             const Ctx ctx = static_cast<Ctx>(c);
             if (ImGui::Selectable(ctx_name(ctx), ctx == p.ctx) && ctx != p.ctx) {
@@ -1370,8 +1572,8 @@ void bindings_tab(UiHost& host, Page& p) {
             const bool waiting = p.rebind == row;
             const std::vector<int> clash = conflicts_of(p, row);
             const std::string label = input_button_text(b, waiting) + "##in";
-            if (waiting) ImGui::PushStyleColor(ImGuiCol_Button, kPressed);
-            else if (!clash.empty()) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.65f, 0.38f, 0.10f, 1.0f));
+            if (waiting) ImGui::PushStyleColor(ImGuiCol_Button, col_accent());
+            else if (!clash.empty()) ImGui::PushStyleColor(ImGuiCol_Button, col_warn_tint());
             const bool clicked = ImGui::Button(label.c_str(), ImVec2(-FLT_MIN, 0.0f));
             if (waiting || !clash.empty()) ImGui::PopStyleColor();
             if (!clash.empty() && ImGui::IsItemHovered()) {
@@ -1389,7 +1591,7 @@ void bindings_tab(UiHost& host, Page& p) {
 
             ImGui::TableSetColumnIndex(1);
             ImGui::SetNextItemWidth(-FLT_MIN);
-            if (ImGui::BeginCombo("##act", act_label(b.act))) {
+            if (combo("##act", act_label(b.act))) {
                 for (int a = 0; a < kActCount; ++a) {
                     const Act act = static_cast<Act>(a);
                     if (ImGui::Selectable(act_label(act), act == b.act) && act != b.act) {
@@ -1402,7 +1604,7 @@ void bindings_tab(UiHost& host, Page& p) {
 
             ImGui::TableSetColumnIndex(2);
             ImGui::SetNextItemWidth(-FLT_MIN);
-            if (ImGui::BeginCombo("##trig", trig_name(b.trig))) {
+            if (combo("##trig", trig_name(b.trig))) {
                 for (Trig t : kTrigChoices) {
                     if (ImGui::Selectable(trig_name(t), t == b.trig) && t != b.trig) {
                         b.trig = t;
@@ -1455,7 +1657,7 @@ void bindings_tab(UiHost& host, Page& p) {
         if (b.ctx != p.ctx) continue;
         for (int c : conflicts_of(p, static_cast<int>(i))) {
             if (c < static_cast<int>(i)) continue;   // each pair once
-            ImGui::TextColored(kOrange, "%s is bound to %s and to %s", input_name(b.in).c_str(), act_label(b.act),
+            ImGui::TextColored(col_warn(), "%s is bound to %s and to %s", input_name(b.in).c_str(), act_label(b.act),
                                act_label(p.edit.bindings[static_cast<std::size_t>(c)].act));
             if (++shown >= 6) break;
         }
@@ -1488,7 +1690,7 @@ void switch_tab(Page& p) {
             ImGui::TableSetColumnIndex(1);
             ImGui::SetNextItemWidth(-FLT_MIN);
             if (bad) {
-                ImGui::PushStyleColor(ImGuiCol_Border, kRed);
+                ImGui::PushStyleColor(ImGuiCol_Border, col_danger());
                 ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
             }
             if (ImGui::InputText("##out", p.out_text[a], sizeof p.out_text[a])) {
@@ -1506,7 +1708,7 @@ void switch_tab(Page& p) {
                 ImGui::PopStyleVar();
                 ImGui::PopStyleColor();
             }
-            if (!p.out_err[a].empty()) ImGui::TextColored(kRed, "%s", p.out_err[a].c_str());
+            if (!p.out_err[a].empty()) ImGui::TextColored(col_danger(), "%s", p.out_err[a].c_str());
             ImGui::PopID();
         }
         ImGui::EndTable();
@@ -1532,11 +1734,11 @@ void status_tab(const LiveStatus& live) {
     if (live.input_calls == 0) ImGui::TextDisabled("ProcessInput calls: 0 (the game has not reached gameplay yet)");
     else ImGui::Text("ProcessInput calls: %llu", static_cast<unsigned long long>(live.input_calls));
 
-    ImGui::SeparatorText("Switch pad output");
+    card("Switch pad output");
     for (int i = 0; i < kSwitchButtonCount; ++i) {
         const bool on = (live.out.buttons & hid::btn(kSwitchButtons[i].bit)) != 0;
         ImGui::PushID(i);
-        ImGui::PushStyleColor(ImGuiCol_Button, on ? kPressed : kReleased);
+        ImGui::PushStyleColor(ImGuiCol_Button, on ? col_accent() : col_off());
         ImGui::Button(kSwitchButtons[i].name, ImVec2(px(56.0f), 0.0f));
         ImGui::PopStyleColor();
         ImGui::PopID();
@@ -1544,7 +1746,7 @@ void status_tab(const LiveStatus& live) {
     }
     ImGui::Text("LS (%5.2f, %5.2f)   RS (%5.2f, %5.2f)", live.out.lx, live.out.ly, live.out.rx, live.out.ry);
 
-    ImGui::SeparatorText("Gamepad");
+    card("Gamepad");
     if (live.pads == 0) ImGui::TextUnformatted("No gamepad open.");
     else ImGui::Text("%d open: %s", live.pads, live.pad_name.c_str());
     ImGui::Text("Gyro: %s    Rumble: %s", yes_no(live.pad_gyro), yes_no(live.pad_rumble));
@@ -1552,44 +1754,524 @@ void status_tab(const LiveStatus& live) {
 
 // ---- Controls and Game --------------------------------------------------------------------------------------------------------------
 
+// A row of pills that picks one of several views (the Controls page's parts); true when another one was picked.
+bool pills(const char* id, const char* const* names, int n, int* cur) {
+    const th::Palette& pal = th::pal();
+    ImGui::PushID(id);
+    bool changed = false;
+    const float h = std::round(th::px(th::kControlSm));
+    const float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
+    for (int i = 0; i < n; ++i) {
+        ImGui::PushID(i);
+        th::push(th::Type::Strong);
+        const ImVec2 ts = ImGui::CalcTextSize(names[i]);
+        const float w = ts.x + 2.f * th::sp(th::S4);
+        if (i) {
+            ImGui::SameLine(0.f, th::sp(th::S1));
+            if (ImGui::GetCursorScreenPos().x + w > right) ImGui::NewLine();
+        }
+        const ImVec2 pos = ImGui::GetCursorScreenPos();
+        const ImRect bb(pos, ImVec2(pos.x + w, pos.y + h));
+        const ImGuiID iid = ImGui::GetID("##pill");
+        ImGui::ItemSize(bb);
+        if (ImGui::ItemAdd(bb, iid)) {
+            bool hov = false, held = false;
+            if (ImGui::ButtonBehavior(bb, iid, &hov, &held) && *cur != i) {
+                *cur = i;
+                changed = true;
+            }
+            const bool sel = *cur == i;
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            if (sel || hov) dl->AddRectFilled(bb.Min, bb.Max, ImGui::GetColorU32(sel ? pal.accent_tint : pal.surface2), h * 0.5f);
+            dl->AddText(ImVec2(bb.Min.x + th::sp(th::S4), bb.Min.y + (h - ts.y) * 0.5f), ImGui::GetColorU32(sel ? pal.accent : hov ? pal.text : pal.text2), names[i]);
+            ImGui::RenderNavCursor(bb, iid, ImGuiNavRenderCursorFlags_None, h * 0.5f);
+        }
+        th::pop();
+        ImGui::PopID();
+    }
+    ImGui::PopID();
+    ImGui::Dummy(ImVec2(0.f, th::sp(th::S2)));
+    return changed;
+}
+
 // The Controls page: the button prompt style on top, then mouse, keyboard bindings, gamepad, the Switch layout and the live status.
 void controls_page(UiHost& host, const LiveStatus& live, Page& p) {
+    card("##prompts");
     prompts_row(live, p);
-    ImGui::Spacing();
-    if (ImGui::BeginTabBar("controls_tabs")) {
-        if (ImGui::BeginTabItem("Mouse")) {
+    end_card();
+    static const char* const kParts[] = {"Mouse", "Keys and buttons", "Controller", "Switch layout", "Status"};
+    if (pills("controls_parts", kParts, 5, &p.controls_part)) stop_rebind(host, p);
+    switch (p.controls_part) {
+        case 0:
+            card("Mouse");
             mouse_tab(p);
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Keyboard and mouse buttons")) {
+            break;
+        case 1:
+            card("Keyboard and mouse bindings");
             bindings_tab(host, p);
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Gamepad")) {
+            break;
+        case 2:
+            card("Controller");
             pad_tab(live, p);
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Switch layout")) {
+            break;
+        case 3:
             if (!p.out_tab_open) refresh_out_text(p);
-            p.out_tab_open = true;
+            card("What each action presses");
             switch_tab(p);
-            ImGui::EndTabItem();
-        } else {
-            p.out_tab_open = false;
-        }
-        if (ImGui::BeginTabItem("Status")) {
+            break;
+        default:
+            card("Live");
             status_tab(live);
-            ImGui::EndTabItem();
+            break;
+    }
+    p.out_tab_open = p.controls_part == 3;
+    end_card();
+}
+
+// ---- Frame generation -----------------------------------------------------------------------------------------------------------------
+
+constexpr const char* kFgModeNames[] = {"Off", "2x", "3x", "4x", "Display"};
+constexpr const char* kFgBackendNames[] = {"Auto", "DLSS frame generation", "FSR 3 frame generation", "MetalFX frame interpolation"};
+
+// ---- the pins (Performance HUD) ---------------------------------------------------------------------------------------------------------
+
+// Controller chords a pin can use (hotkeys.h: a button that presses nothing in the game, held first).
+constexpr const char* kPinPadChords[] = {"left_paddle1+right_paddle1", "left_paddle1+dpad_up", "left_paddle1+dpad_down", "right_paddle1+dpad_up",
+                                         "right_paddle1+dpad_down", "touchpad+left_shoulder", "touchpad+right_shoulder", "touchpad+dpad_up"};
+
+void hud_edited(Page& p) {
+    p.edit.hud.in_file = true;
+    mark(p);
+}
+
+pins::Group* group_with(perf::HudSettings& h, const std::string& item) {
+    for (pins::Group& g : h.groups)
+        if (std::find(g.items.begin(), g.items.end(), item) != g.items.end()) return &g;
+    return nullptr;
+}
+
+// The first of F8 F9 F10 F11 no other toggle uses, for a new group (none when all are taken).
+KeyChord free_pin_key(const perf::HudSettings& h, const MenuFrame& f) {
+    for (int sc : {SDL_SCANCODE_F8, SDL_SCANCODE_F9, SDL_SCANCODE_F10, SDL_SCANCODE_F11}) {
+        bool used = h.key.sc == sc;
+        for (const pins::Group& g : h.groups) used = used || g.key.sc == sc;
+        for (const std::string& k : {f.menu_key, f.cheats_key, f.pins_key}) {
+            KeyChord c;
+            used = used || (parse_key_chord(k, &c) && c.sc == sc && c.mods == 0);
         }
-        ImGui::EndTabBar();
+        if (!used) return {sc, 0};
+    }
+    return {};
+}
+
+void pins_page(UiHost& host, Page& p, const MenuFrame& f) {
+    perf::HudSettings& h = p.edit.hud;
+    const th::Palette& pal = th::pal();
+    card("Pins over the game");
+    note("Pinned readouts stay on screen while this menu is closed. They only show: every key, click and button still goes to the game.");
+    if (check("Show pins##pins_all", &h.all_shown)) hud_edited(p);
+    tip("Hides or shows every pin at once (the hide-all key does the same in the game).");
+    row("Hide or show every pin##pins_all_key");
+    ImGui::Text("%s", f.pins_key.empty() ? "no key" : f.pins_key.c_str());
+    tip("The hide-all key is set in the app's Settings (In-game shortcuts), for every game or for this one.");
+
+    // quick pins: each readout on its own, in the Performance group
+    for (int pass = 0; pass < 2; ++pass) {
+        card(pass == 0 ? "Performance readouts" : "Settings as readouts");
+        for (const perf::ItemInfo& it : perf::catalogue()) {
+            if (it.setting != (pass == 1)) continue;
+            bool on = group_with(h, it.id) != nullptr;
+            const std::string label = std::string(it.name) + "##pin_" + it.id;
+            if (check(label.c_str(), &on)) {
+                if (on) {
+                    pins::Group* g = nullptr;
+                    for (pins::Group& o : h.groups)
+                        if (o.id == "perf") g = &o;
+                    if (!g) {
+                        pins::Group ng;
+                        ng.id = "perf";
+                        ng.name = "Performance";
+                        ng.key = free_pin_key(h, f);
+                        h.groups.insert(h.groups.begin(), ng);
+                        g = &h.groups.front();
+                    }
+                    g->items.push_back(it.id);
+                    g->shown = true;
+                } else {
+                    for (pins::Group& g : h.groups) g.items.erase(std::remove(g.items.begin(), g.items.end(), std::string(it.id)), g.items.end());
+                }
+                hud_edited(p);
+            }
+            tip(it.desc);
+        }
+    }
+
+    // the groups: each a pinned panel of its own, with its own toggle
+    const uint32_t free_bits = free_pad_buttons(p.edit.pad.remap);
+    int remove = -1;
+    for (size_t gi = 0; gi < h.groups.size(); ++gi) {
+        pins::Group& g = h.groups[gi];
+        const std::string title = "Pin: " + (g.name.empty() ? g.id : g.name) + "##pin_card_" + g.id;
+        card(title.c_str());
+        ImGui::PushID(g.id.c_str());
+        char name[48];
+        std::snprintf(name, sizeof name, "%s", g.name.c_str());
+        if (ImGui::InputText(row("Name##pin_name"), name, sizeof name)) {
+            g.name = name;
+            hud_edited(p);
+        }
+        if (check("Shown##pin_shown", &g.shown)) hud_edited(p);
+        tip("This pin's own toggle (its key does the same in the game).");
+        static const char* const kLayouts[] = {"Vertical", "Horizontal", "Compact"};
+        int layout = static_cast<int>(g.layout);
+        if (segmented("Layout##pin_layout", kLayouts, 3, &layout)) {
+            g.layout = static_cast<pins::Layout>(layout);
+            hud_edited(p);
+        }
+        if (slider_int("Size##pin_size", &g.size, 50, 200, "%d%%")) hud_edited(p);
+        if (slider_int("Opacity##pin_opacity", &g.opacity, 20, 100, "%d%%")) hud_edited(p);
+        // its key: captured like a binding (the key never reaches the game)
+        row("Toggle key##pin_key");
+        const bool waiting = p.pin_capture == static_cast<int>(gi);
+        const std::string kt = (waiting ? std::string("Press a key...") : g.key.empty() ? std::string("none") : key_chord_text(g.key)) + "##pin_key_btn";
+        if (ImGui::Button(kt.c_str(), ImVec2(th::px(150.f), 0.f))) {
+            stop_rebind(host, p);
+            set_notice(p, "", false);
+            p.pin_capture = static_cast<int>(gi);
+            host.begin_capture();
+        }
+        tip("A key that shows or hides this pin in the game. It never reaches the game.");
+        ImGui::SameLine();
+        if (ImGui::Button("Clear##pin_key_clear")) {
+            g.key = {};
+            hud_edited(p);
+        }
+        // its controller chord: opt-in, off by default
+        const std::string pad_now = g.pad ? pad_combo_text(g.pad) : std::string("None (keyboard only)");
+        if (combo("Controller chord##pin_pad", pad_now.c_str())) {
+            if (ImGui::Selectable("None (keyboard only)", g.pad == 0) && g.pad) {
+                g.pad = 0;
+                hud_edited(p);
+            }
+            for (const char* c : kPinPadChords) {
+                uint32_t bits = 0;
+                parse_pad_combo(c, &bits);
+                const bool usable = pin_pad_problem(bits, free_bits).empty();
+                ImGui::BeginDisabled(!usable);
+                if (ImGui::Selectable(c, g.pad == bits) && g.pad != bits) {
+                    g.pad = bits;
+                    hud_edited(p);
+                }
+                ImGui::EndDisabled();
+            }
+            ImGui::EndCombo();
+        }
+        tip("Optional. Hold the rear grip (or trackpad click) first, then the other button: the game sees neither, so it never presses anything in the game.");
+        if (g.pad) {
+            const std::string why = pin_pad_problem(g.pad, free_bits);
+            if (!why.empty()) warn("This chord is not used: %s.", why.c_str());
+        }
+        // its items, in order
+        row("Readouts##pin_items");
+        ImGui::BeginGroup();
+        int up = -1, down = -1, drop = -1;
+        for (size_t ii = 0; ii < g.items.size(); ++ii) {
+            ImGui::PushID(static_cast<int>(ii));
+            const perf::ItemInfo* in = perf::item_info(g.items[ii]);
+            if (th::icon_button("##up", th::Icon::Up, "Move up", th::Btn::Quiet, th::kControlSm)) up = static_cast<int>(ii);
+            ImGui::SameLine(0.f, th::sp(th::S1));
+            if (th::icon_button("##down", th::Icon::Down, "Move down", th::Btn::Quiet, th::kControlSm)) down = static_cast<int>(ii);
+            ImGui::SameLine(0.f, th::sp(th::S1));
+            if (th::icon_button("##drop", th::Icon::Close, "Remove from this pin", th::Btn::Quiet, th::kControlSm)) drop = static_cast<int>(ii);
+            ImGui::SameLine(0.f, th::sp(th::S2));
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(in ? in->name : g.items[ii].c_str());
+            ImGui::PopID();
+        }
+        if (up > 0) std::swap(g.items[static_cast<size_t>(up)], g.items[static_cast<size_t>(up - 1)]);
+        if (down >= 0 && down + 1 < static_cast<int>(g.items.size())) std::swap(g.items[static_cast<size_t>(down)], g.items[static_cast<size_t>(down + 1)]);
+        if (drop >= 0) g.items.erase(g.items.begin() + drop);
+        if (up > 0 || (down >= 0 && down + 1 <= static_cast<int>(g.items.size())) || drop >= 0) hud_edited(p);
+        if (g.items.empty()) ImGui::TextDisabled("Nothing yet");
+        ImGui::SetNextItemWidth(th::px(260.f));
+        if (ImGui::BeginCombo("##pin_add", "Add a readout...")) {
+            for (const perf::ItemInfo& it : perf::catalogue()) {
+                if (std::find(g.items.begin(), g.items.end(), std::string(it.id)) != g.items.end()) continue;
+                if (ImGui::Selectable(it.name)) {
+                    g.items.push_back(it.id);
+                    hud_edited(p);
+                }
+                tip(it.desc);
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::EndGroup();
+        if (th::button("Put it back in the corner##pin_reset", th::Icon::Undo, th::Btn::Quiet)) {
+            g.x = g.y = -1.f;
+            hud_edited(p);
+        }
+        ImGui::SameLine();
+        if (th::button("Delete this pin##pin_delete", th::Icon::Trash, th::Btn::Quiet)) remove = static_cast<int>(gi);
+        ImGui::PopID();
+    }
+    if (remove >= 0) {
+        h.groups.erase(h.groups.begin() + remove);
+        hud_edited(p);
+    }
+    end_card();
+    if (th::button("New pin group", th::Icon::Plus, th::Btn::Secondary)) {
+        pins::Board b;
+        b.groups = h.groups;
+        pins::Group g;
+        g.id = pins::new_group_id(b);
+        g.name = "Group " + std::to_string(h.groups.size() + 1);
+        g.key = free_pin_key(h, f);
+        h.groups.push_back(g);
+        hud_edited(p);
+    }
+    tip("A pin that shows several readouts together: add them from its Readouts list.");
+    ImGui::SameLine();
+    th::text(th::Type::Small, pal.text3, "Drag a pin to move it while this menu is open.");
+}
+
+// ---- the menu --------------------------------------------------------------------------------------------------------------------------
+
+enum MenuPage : int { PgDisplay = 0, PgFrameGen, PgUpscaler, PgGraphics, PgAudio, PgControls, PgPins, PgGame, PgAbout, PgCount };
+constexpr const char* kPageNames[PgCount] = {"Display & FPS", "Frame generation", "Upscaler", "Graphics", "Audio", "Controls", "Performance HUD", "Game", "About"};
+constexpr th::Icon kPageIcons[PgCount] = {th::Icon::Monitor, th::Icon::Layers, th::Icon::Expand, th::Icon::Camera, th::Icon::Volume,
+                                          th::Icon::Pad, th::Icon::Pin, th::Icon::Star, th::Icon::Info};
+
+bool page_shown(int i) {
+    if (i == PgFrameGen) return false;   // PokoMac has no frame generation: the page stays in the list, hidden
+    if (i != PgGame) return true;
+    const GamePlay* gp = game_play();
+    return gp && gp->tweaks_tab;
+}
+
+void step_page(Page& p, int d) {
+    for (int n = 0; n < PgCount; ++n) {
+        p.page = (p.page + d + PgCount) % PgCount;
+        if (page_shown(p.page)) break;
+    }
+    p.page_changed = true;
+}
+
+void upscaler_page(Page& p) {
+    upscale_group(p);
+    card("Picture size");
+    render_size_line();
+    end_card();
+}
+
+void display_fps_page(UiHost& host, const LiveStatus& live, Page& p) {
+    framerate_group(host, live, p);
+    window_group(live, p);
+    resolution_group(p);
+    latency_group(p);
+    card("Now");
+    ImGui::Text("Window: %s, present mode: %s", cstr(live.window_mode), cstr(live.present_mode));
+    ImGui::Text("Display %.2f Hz, window %d x %d, %.1f fps", live.refresh_hz, live.width, live.height, live.fps);
+    end_card();
+}
+
+void about_page(UiHost& host, Page& p, const MenuFrame& f) {
+    card("Settings file");
+    ImGui::PushStyleColor(ImGuiCol_Text, th::pal().text2);
+    ImGui::TextWrapped("%s", host.settings_path().c_str());
+    ImGui::PopStyleColor();
+    note("Changes apply and save on their own as you make them.");
+    if (th::button("Apply and save", th::Icon::Check, th::Btn::Primary)) apply_now(host, p);
+    tip("Changes apply and save on their own as you make them; this does it now. Items marked 'Applies at the next start' take effect then.");
+    ImGui::SameLine();
+    if (th::button("Revert", th::Icon::Undo)) revert_to_saved(host, p);
+    tip("Drops the changes made since the last Apply and save.");
+    ImGui::SameLine();
+    if (th::button("Factory defaults", th::Icon::Refresh)) load_factory(host, p);
+    tip("Puts every setting back to the factory default (applied and saved at once).");
+    end_card();
+    draw_about_page(host.settings_path());
+    end_card();
+    if (f.diagnostics) {
+        card("Diagnostics");
+        f.diagnostics();
+        end_card();
     }
 }
 
-}  // namespace
+// The panel's head: the game's icon and name, what runs now, and the menu's buttons. True: close.
+bool menu_header(UiHost& host, Page& p, const LiveStatus& live) {
+    const th::Palette& pal = th::pal();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float disc = std::round(th::px(40.f));
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
+    const float right = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x;
+    if (ImTextureData* icon = cheats::ui::game_icon()) {
+        dl->AddImageRounded(icon->GetTexRef(), pos, ImVec2(pos.x + disc, pos.y + disc), ImVec2(0, 0), ImVec2(1, 1), ImGui::GetColorU32(IM_COL32_WHITE),
+                            th::px(th::kRadiusSm));
+        dl->AddRect(pos, ImVec2(pos.x + disc, pos.y + disc), ImGui::GetColorU32(pal.line_strong), th::px(th::kRadiusSm));
+        const float b = std::round(th::px(18.f));
+        const ImVec2 bc(pos.x + disc - b * 0.3f, pos.y + disc - b * 0.3f);
+        dl->AddCircleFilled(bc, b * 0.5f + th::px(2.f), ImGui::GetColorU32(pal.panel | IM_COL32_A_MASK));
+        dl->AddCircleFilled(bc, b * 0.5f, ImGui::GetColorU32(pal.accent));
+        th::icon(dl, th::Icon::Gear, bc, b * 0.62f, ImGui::GetColorU32(pal.on_accent));
+    } else {
+        dl->AddCircleFilled(ImVec2(pos.x + disc * 0.5f, pos.y + disc * 0.5f), disc * 0.5f, ImGui::GetColorU32(pal.accent));
+        th::icon(dl, th::Icon::Gear, ImVec2(pos.x + disc * 0.5f, pos.y + disc * 0.5f), th::px(22.f), ImGui::GetColorU32(pal.on_accent));
+    }
+    ImGui::Dummy(ImVec2(disc, disc));
+    ImGui::SameLine(0, th::sp(th::S3));
+    ImGui::BeginGroup();
+    const char* title = game::info().title;
+    const bool named = title && *title;
+    th::push(th::Type::Title);
+    ImGui::TextUnformatted(named ? title : "Settings");
+    th::pop();
+    char sub[160];
+    if (live.fps > 0) std::snprintf(sub, sizeof sub, "%sSettings  \xC2\xB7  %.0f fps  \xC2\xB7  %d x %d", named ? "" : "AnySwitch ", live.fps, live.width, live.height);
+    else std::snprintf(sub, sizeof sub, "%s", named ? "Settings" : "AnySwitch");
+    th::text(th::Type::Small, pal.text2, "%s", sub);
+    ImGui::EndGroup();
+    // right side: the state chip, dock, quit and close
+    const float bh = th::px(th::kControlH);
+    th::push(th::Type::Body);
+    const float quit_w = ImGui::CalcTextSize("Quit game").x + th::sp(th::S4) * 2.f + bh * 0.6f;
+    th::pop();
+    const char* chip = host.capturing() ? "Press a key" : p.dirty ? "Saving" : nullptr;
+    th::push(th::Type::Small);
+    const float chip_w = chip ? ImGui::CalcTextSize(chip).x + th::px(44.f) : 0.f;
+    th::pop();
+    const float buttons_w = bh * 4.f + th::sp(th::S1) * 4.f + quit_w + th::sp(th::S3) * 2.f + chip_w;
+    ImGui::SameLine(std::max(ImGui::GetCursorPosX(), right - buttons_w));
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (disc - bh) * 0.5f);
+    if (chip) {
+        th::chip(chip, pal.warn_tint, pal.warn, th::Icon::Keyboard);
+        ImGui::SameLine(0, th::sp(th::S2));
+    }
+    static const th::Icon dock_icons[] = {th::Icon::DockLeft, th::Icon::DockCentre, th::Icon::DockRight};
+    static const char* dock_tips[] = {"Dock on the left", "In the centre", "Dock on the right"};
+    for (int d = 0; d < 3; ++d) {
+        ImGui::PushID(d);
+        if (th::icon_button("##dock", dock_icons[d], dock_tips[d], p.dock == d ? th::Btn::Secondary : th::Btn::Quiet)) p.dock = d;
+        ImGui::PopID();
+        ImGui::SameLine(0, th::sp(th::S1));
+    }
+    ImGui::SameLine(0, th::sp(th::S2));
+    if (th::button("Quit game", th::Icon::Close, th::Btn::Secondary)) host.request_quit_prompt();
+    tip("Asks before closing the game. The game's own save is not touched: save in the game first.");
+    ImGui::SameLine(0, th::sp(th::S1));
+    const bool close = th::icon_button("##close", th::Icon::Close, "Close the menu");
+    ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY(), pos.y - ImGui::GetWindowPos().y + disc + th::sp(th::S3)));
+    return close;
+}
 
-void draw_settings_page(UiHost& host) {
+// The pages down the left: an icon and a name each (only icons when the panel is narrow).
+void menu_rail(Page& p, float w, bool compact) {
+    const th::Palette& pal = th::pal();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    for (int i = 0; i < PgCount; ++i) {
+        if (!page_shown(i)) continue;
+        ImGui::PushID(i);
+        th::push(th::Type::Strong);
+        const float h = std::round(th::px(th::kControlH));
+        const float isz = std::round(ImGui::GetFontSize() * 1.15f);
+        const ImVec2 pos = ImGui::GetCursorScreenPos();
+        const ImRect bb(pos, ImVec2(pos.x + w, pos.y + h));
+        const ImGuiID id = ImGui::GetID("##rail");
+        ImGui::ItemSize(bb);
+        if (ImGui::ItemAdd(bb, id)) {
+            bool hov = false, held = false;
+            if (ImGui::ButtonBehavior(bb, id, &hov, &held) && p.page != i) {
+                p.page = i;
+                p.page_changed = true;
+            }
+            const bool sel = p.page == i;
+            if (sel || hov) dl->AddRectFilled(bb.Min, bb.Max, ImGui::GetColorU32(sel ? pal.accent_tint : pal.surface2), th::px(th::kRadiusSm));
+            const ImU32 fg = ImGui::GetColorU32(sel ? pal.accent : hov ? pal.text : pal.text2);
+            const float ix = compact ? bb.Min.x + w * 0.5f : bb.Min.x + th::sp(th::S3) + isz * 0.5f;
+            th::icon(dl, kPageIcons[i], ImVec2(ix, bb.Min.y + h * 0.5f), isz, fg);
+            if (!compact) {
+                dl->PushClipRect(bb.Min, bb.Max, true);
+                dl->AddText(ImVec2(bb.Min.x + th::sp(th::S3) + isz + th::sp(th::S2), bb.Min.y + (h - ImGui::GetFontSize()) * 0.5f), fg, kPageNames[i]);
+                dl->PopClipRect();
+            } else if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                ImGui::SetTooltip("%s", kPageNames[i]);
+            }
+            if (sel && p.focus_rail) {
+                ImGui::SetItemDefaultFocus();
+                p.focus_rail = false;
+            }
+            ImGui::RenderNavCursor(bb, id, ImGuiNavRenderCursorFlags_None, th::px(th::kRadiusSm));
+        }
+        th::pop();
+        ImGui::PopID();
+    }
+}
+
+// The foot of the panel: the description of the focused row, then the controls of the device in use and the menu's own toggles.
+void menu_footer(const MenuFrame& f, Page& p, const std::string& desc) {
+    const th::Palette& pal = th::pal();
+    const ImVec2 lp = ImGui::GetCursorScreenPos();
+    const float avail = ImGui::GetContentRegionAvail().x;
+    ImGui::GetWindowDrawList()->AddLine(ImVec2(lp.x, lp.y + th::sp(th::S1)), ImVec2(lp.x + avail, lp.y + th::sp(th::S1)), ImGui::GetColorU32(pal.line));
+    ImGui::SetCursorScreenPos(ImVec2(lp.x, lp.y + th::sp(th::S2)));
+    // one line of description (the notice of a binding wins)
+    th::push(th::Type::Small);
+    const float line_h = ImGui::GetFontSize() * 2.4f;
+    const ImVec2 dp = ImGui::GetCursorScreenPos();
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + avail);
+    if (!p.notice.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, p.notice_warn ? pal.warn : pal.ok);
+        ImGui::TextWrapped("%s", p.notice.c_str());
+        ImGui::PopStyleColor();
+    } else if (!f.conflicts.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, pal.warn);
+        ImGui::TextWrapped("Shortcut conflict: %s", f.conflicts.front().c_str());
+        ImGui::PopStyleColor();
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Text, desc.empty() ? pal.text3 : pal.text2);
+        ImGui::TextWrapped("%s", desc.empty() ? "Changes apply and save as you make them. Point at a setting to read what it does." : desc.c_str());
+        ImGui::PopStyleColor();
+    }
+    ImGui::PopTextWrapPos();
+    th::pop();
+    ImGui::SetCursorScreenPos(ImVec2(dp.x, dp.y + line_h));
+    // hints on the left, toggles on the right
+    struct H { const char* key; const char* label; };
+    std::vector<H> hs;
+    if (f.pad) hs = {{"A", "Select"}, {"B", "Back"}, {"L R", "Pages"}, {"+", "Close"}};
+    else hs = {{"Enter", "Select"}, {"Esc", "Back"}, {"Ctrl+PgUp/PgDn", "Pages"}};
+    std::string toggles = "Menu " + (f.menu_key.empty() ? std::string("none") : f.menu_key);
+    if (!f.menu_pad.empty()) toggles += " / " + f.menu_pad;
+    if (!f.cheats_key.empty()) toggles += "   \xC2\xB7   Cheats menu " + f.cheats_key;
+    if (!f.pins_key.empty()) toggles += "   \xC2\xB7   Pins " + f.pins_key;
+    th::push(th::Type::Small);
+    const float tw = ImGui::CalcTextSize(toggles.c_str()).x;
+    th::pop();
+    const float gap = th::sp(th::S5);
+    auto total = [&] {
+        float t = 0.f;
+        for (const H& h : hs) t += th::hint_width(h.key, h.label, f.pad) + gap;
+        return t;
+    };
+    while (hs.size() > 2 && total() + tw > avail) hs.erase(hs.begin() + static_cast<long>(hs.size() - 2));
+    const float y0 = ImGui::GetCursorPosY();
+    for (size_t i = 0; i < hs.size(); ++i) {
+        if (i) ImGui::SameLine(0, gap);
+        th::hint(hs[i].key, hs[i].label, f.pad);
+    }
+    if (total() + tw <= avail + gap) {
+        ImGui::SameLine(ImGui::GetCursorPosX() + 0.f);
+        ImGui::SetCursorPos(ImVec2(ImGui::GetWindowContentRegionMax().x - tw, y0 + (ImGui::GetFrameHeight() - ImGui::GetFontSize() * 0.84f) * 0.5f));
+        th::text(th::Type::Small, pal.text3, "%s", toggles.c_str());
+    }
+}
+
+Page& the_page() {
     static Page page;
-    Page& p = page;
+    return page;
+}
+
+void load_page(UiHost& host, Page& p) {
     static uint64_t seen_game_edits = 0;
     if (const uint64_t n = game_menu_edits(); n != seen_game_edits && !p.dirty) {   // changed in the game's own menu: F1's Apply must not put the old values back
         seen_game_edits = n;
@@ -1600,61 +2282,167 @@ void draw_settings_page(UiHost& host) {
         p.edit.fps = host.settings().fps;
         refresh_out_text(p);
         p.loaded = true;
+    } else if (!p.dirty && ImGui::GetTime() - p.synced_at > 0.25) {
+        // the pins' toggles and the counter's hotkey change these in the game while the menu is open: follow them
+        const Settings cur = host.settings();
+        p.edit.hud = cur.hud;
+        p.edit.fps = cur.fps;
+        p.synced_at = ImGui::GetTime();
     }
+}
+
+}  // namespace
+
+void draw_settings_page(UiHost& host) {
+    MenuFrame f;
+    draw_menu(host, f);
+}
+
+int menu_page() { return the_page().page; }
+void menu_scroll(float units) { the_page().scroll_to = units; }
+
+void menu_show(int page, int controls_part, int dock) {
+    Page& p = the_page();
+    if (page >= 0 && page < PgCount) {
+        p.page = page;
+        p.page_changed = true;
+    }
+    if (controls_part >= 0) p.controls_part = controls_part;
+    if (dock >= 0) p.dock = dock;
+}
+
+void draw_menu(UiHost& host, MenuFrame& f) {
+    Page& p = the_page();
+    load_page(host, p);
     poll_capture(host, p);
     const LiveStatus live = host.status();
-
-    if (host.capturing()) ImGui::TextColored(kYellow, "Press the key or mouse button for the binding, Escape cancels");
-    else if (!p.notice.empty()) ImGui::TextColored(p.notice_warn ? kOrange : ImVec4(0.6f, 0.9f, 0.6f, 1.0f), "%s", p.notice.c_str());
-    ImGui::TextDisabled("Settings file: %s", host.settings_path().c_str());
-    if (p.dirty) {
-        ImGui::SameLine();
-        ImGui::TextColored(kOrange, "unsaved changes");
+    const th::Palette& pal = th::pal();
+    if (ImGui::GetFrameCount() > p.last_frame + 1) {   // opened again: the fade starts, the controller's focus goes to the rail
+        p.focus_rail = true;
+        p.shown_at = ImGui::GetTime();
     }
-    if (ImGui::Button("Apply and save")) apply_now(host, p);
-    tip("Changes apply and save on their own as you make them; this does it now. Items marked 'restart' take effect at the next start.");
-    ImGui::SameLine();
-    if (ImGui::Button("Revert")) revert_to_saved(host, p);
-    tip("Drops the changes made since the last Apply and save.");
-    ImGui::SameLine();
-    if (ImGui::Button("Factory defaults")) load_factory(host, p);
-    tip("Puts every setting back to the factory default (applied and saved at once).");
-    ImGui::SameLine();
-    if (ImGui::Button("Quit game")) host.request_quit_prompt();
-    tip("Asks before closing the game. Unsaved settings changes are lost; the game's own save is not touched - save in the game first.");
-    ImGui::TextDisabled("Controller: D-pad or left stick move, A choose, B back, + close.");
-    ImGui::Separator();
-
-    ImGui::PushItemWidth(std::max(px(200.0f), ImGui::GetContentRegionAvail().x * 0.42f));
-    if (ImGui::BeginTabBar("settings_pages")) {
-        if (ImGui::BeginTabItem("Display")) {
-            display_page(host, live, p);
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Graphics")) {
-            graphics_page(p);
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Controls")) {
-            controls_page(host, live, p);
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Audio")) {
-            audio_page(p);
-            ImGui::EndTabItem();
-        }
-        if (const GamePlay* gp = game_play(); gp && gp->tweaks_tab && ImGui::BeginTabItem("Game")) {   // the game's optional looks and start-up tweaks
-            if (gp->tweaks_tab(p.edit)) mark(p);
-            if (fastboot_ui(p.edit.fastboot)) mark(p);   // start-up and menu tweaks (play_ui_fastboot.cpp)
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("About")) {
-            draw_about_page(host.settings_path());
-            ImGui::EndTabItem();
-        }
-        ImGui::EndTabBar();
+    p.last_frame = ImGui::GetFrameCount();
+    // L / R (or Ctrl+PgUp / PgDn) step through the pages; ZL / ZR scroll the page
+    const bool typing = ImGui::GetIO().WantTextInput || host.capturing() || ImGui::GetTopMostPopupModal() != nullptr;
+    if (!typing) {
+        if (ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_PageUp)) step_page(p, -1);
+        if (ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_PageDown)) step_page(p, 1);
     }
-    ImGui::PopItemWidth();
+    if (!page_shown(p.page)) p.page = PgDisplay;
+    th::push(th::Type::Body);
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    if (cheats::ui::animations()) ImGui::GetStyle().Alpha = static_cast<float>(std::clamp((ImGui::GetTime() - p.shown_at) / 0.15, 0.15, 1.0));
+    ImGui::GetBackgroundDrawList()->AddRectFilledMultiColor(vp->Pos, ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y), pal.scrim_top, pal.scrim_top,
+                                                            pal.scrim_bottom, pal.scrim_bottom);
+    // the panel: docked left or right (full height, about 44 % of the width) or in the centre
+    const float W = vp->WorkSize.x, H = vp->WorkSize.y;
+    const float margin = th::sp(th::S6);
+    if (p.dock != 1) {
+        const float pw = std::min(W - 2.f * margin, std::clamp(W * 0.44f, th::px(600.f), th::px(820.f)));
+        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + (p.dock == 0 ? margin : W - margin - pw), vp->WorkPos.y + margin), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(pw, H - 2.f * margin), ImGuiCond_Always);
+    } else {
+        const float pw = std::min(W - 2.f * margin, std::max(th::px(900.f), W * 0.66f));
+        const float ph = std::min(H - 2.f * margin, std::max(th::px(560.f), H * 0.86f));
+        ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(pw, ph), ImGuiCond_Always);
+    }
+    const bool glass = th::glass() && (f.backdrop.GetTexID() != ImTextureID_Invalid || f.backdrop._TexData != nullptr);
+    f.glass = false;
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, glass ? IM_COL32(0, 0, 0, 0) : pal.panel);
+    ImGui::PushStyleColor(ImGuiCol_Border, glass ? IM_COL32(0, 0, 0, 0) : pal.line_strong);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(th::sp(th::S6), th::sp(th::S5)));
+    const ImGuiWindowFlags mfl = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+                                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize;
+    if (ImGui::Begin("AnySwitch settings###menu_main", nullptr, mfl)) {
+        ImGui::PopStyleVar();
+        ImGuiWindow* mw = ImGui::GetCurrentWindow();
+        if (glass) {
+            const ImRect r = mw->Rect();
+            const ImVec2 disp = ImGui::GetIO().DisplaySize;
+            const float rr = ImGui::GetStyle().WindowRounding;
+            mw->DrawList->AddImageRounded(f.backdrop, r.Min, r.Max, ImVec2(r.Min.x / disp.x, r.Min.y / disp.y), ImVec2(r.Max.x / disp.x, r.Max.y / disp.y),
+                                          ImGui::GetColorU32(IM_COL32_WHITE), rr);
+            mw->DrawList->AddRectFilled(r.Min, r.Max, ImGui::GetColorU32(pal.panel), rr);
+            mw->DrawList->AddRect(r.Min, r.Max, ImGui::GetColorU32(pal.line_strong), rr, 0, std::max(1.f, th::px(1.f)));
+            f.glass = true;
+            f.glass_rect[0] = static_cast<int>(r.Min.x);
+            f.glass_rect[1] = static_cast<int>(r.Min.y);
+            f.glass_rect[2] = static_cast<int>(r.GetWidth() + 0.5f);
+            f.glass_rect[3] = static_cast<int>(r.GetHeight() + 0.5f);
+            f.glass_blur = th::glass_blur();
+        }
+        if (menu_header(host, p, live)) f.close = true;
+        th::push(th::Type::Small);
+        const float footer_h = ImGui::GetFontSize() * 2.4f + ImGui::GetFrameHeight() + th::sp(th::S4);
+        th::pop();
+        const float body_h = std::max(th::px(120.f), ImGui::GetContentRegionAvail().y - footer_h);
+        const bool compact = ImGui::GetContentRegionAvail().x < th::px(760.f);
+        const float rail_w = compact ? std::round(th::px(th::kControlH) + th::sp(th::S2)) : std::round(th::px(206.f));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, th::sp(th::S1)));
+        ImGui::BeginChild("##menu_rail", ImVec2(rail_w, body_h), ImGuiChildFlags_NavFlattened, ImGuiWindowFlags_NoScrollbar);
+        menu_rail(p, rail_w, compact);
+        ImGui::EndChild();
+        ImGui::PopStyleVar();
+        ImGui::SameLine(0.f, th::sp(th::S4));
+        ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, th::px(8.f));
+        ImGui::BeginChild("##menu_page", ImVec2(0.f, body_h), ImGuiChildFlags_NavFlattened);
+        if (p.page_changed) {
+            ImGui::SetScrollY(0.f);
+            p.page_changed = false;
+        } else if (p.scroll_to >= 0.f) {
+            ImGui::SetScrollY(p.scroll_to * th::k());
+            p.scroll_to = -1.f;
+        }
+        if (!typing) {   // ZL / ZR: a page up or down
+            if (ImGui::IsKeyPressed(ImGuiKey_GamepadL2, true)) ImGui::SetScrollY(std::max(0.f, ImGui::GetScrollY() - body_h * 0.8f));
+            if (ImGui::IsKeyPressed(ImGuiKey_GamepadR2, true)) ImGui::SetScrollY(std::min(ImGui::GetScrollMaxY(), ImGui::GetScrollY() + body_h * 0.8f));
+        }
+        th::push(th::Type::Title);
+        ImGui::TextUnformatted(kPageNames[p.page]);
+        th::pop();
+        ImGui::Dummy(ImVec2(0.f, th::sp(th::S1)));
+        ImGui::PushItemWidth(std::max(th::px(200.0f), ImGui::GetContentRegionAvail().x * 0.42f));
+        switch (p.page) {
+            case PgDisplay: display_fps_page(host, live, p); break;
+            case PgFrameGen: break;
+            case PgUpscaler: upscaler_page(p); break;
+            case PgGraphics: graphics_page(p); break;
+            case PgAudio: audio_page(p); break;
+            case PgControls: controls_page(host, live, p); break;
+            case PgPins: pins_page(host, p, f); break;
+            case PgGame:
+                if (const GamePlay* gp = game_play(); gp && gp->tweaks_tab) {   // the game's optional looks and start-up tweaks
+                    card("This game");
+                    if (gp->tweaks_tab(p.edit)) mark(p);
+                    end_card();
+                    card("Start-up and menus");
+                    if (fastboot_ui(p.edit.fastboot)) mark(p);   // play_ui_fastboot.cpp
+                }
+                break;
+            default: about_page(host, p, f); break;
+        }
+        end_card();
+        ImGui::PopItemWidth();
+        ImGui::EndChild();
+        ImGui::PopStyleVar();
+        menu_footer(f, p, take_tip());
+    } else {
+        ImGui::PopStyleVar();
+    }
+    ImGui::End();
+    ImGui::PopStyleColor(2);
+    th::pop();
+    // the pins over the game: movable while the menu is open (the working copy's, so a move is saved like any change)
+    pins::Board b;
+    b.groups = p.edit.hud.groups;
+    b.all_shown = p.edit.hud.all_shown;
+    bool moved = false;
+    pins::draw(b, perf::item_lines, true, "menu", &moved);
+    if (moved) {
+        p.edit.hud.groups = b.groups;
+        hud_edited(p);
+    }
     // Changes apply and save as they are made: once the edit is finished (no slider held, no text field being typed in) and no binding is
     // being captured. A player changed the frame limit and the upscaler, closed F1 without pressing Apply and save, and the changes were
     // lost ("settings aren't saving"). Items marked 'restart' are saved now and take effect at the next start.

@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "nxrt/extras.h"
+#include "perf_pins.h"
 #include "play_fastboot.h"
 #include "play_tweaks.h"
 
@@ -298,6 +299,7 @@ struct Settings {
     QuitSettings quit;
     OverlaySettings overlay;
     FastbootSettings fastboot;     // [tweaks] skip_intro skip_boot_logos fast_menus menu_speed (play_fastboot.h, S46)
+    perf::HudSettings hud;         // [hud] shown, group lines: the F1 menu's pins (perf_pins.h); written only once the player arranged them
     Output out[kActCount];         // the [switch] table; defaulted from ActInfo::default_out
     std::vector<Binding> bindings;
     // [meta] defaults_rev: the factory-defaults revision the file was written with (0 when the file has no [meta]). When a file with
@@ -403,6 +405,8 @@ const char* key_alt_sens();
 //   [fps]      show (1/0) key (a keyboard key, F2) corner (top_left top_right bottom_left bottom_right) detail (0..2) in_screenshots (1/0)
 //   [quit]     pad (pad buttons held together, e.g. back+start; none = off) key (a keyboard key; none = off)   (open the "Close the game?" prompt)
 //   [overlay]  pad (pad buttons held together; none = off, the default; not the [quit] pad)   (open and close the F1 menu)
+//   [hud]      shown (1/0: every pin) group = <pin_board.h text form>, one line per group   (the F1 menu's pins; the section is written once
+//              the player has pinned, moved or toggled something; without it the configuration's [hud] default is used)
 //   [padmap]   <south east west north left_shoulder right_shoulder left_trigger right_trigger start back left_stick right_stick dpad_up dpad_down
 //              dpad_left dpad_right> = default | none | <Switch buttons joined by '+', e.g. A or ZL+L>   (the pad button presses those Switch buttons)
 //   [switch]   <action> = <output>      e.g.  fire = ZR    beam_1 = X+UP    (missing actions keep the default)

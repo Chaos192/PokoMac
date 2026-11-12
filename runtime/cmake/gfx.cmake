@@ -150,3 +150,24 @@ if(NXRT_CHEATS_UI_TEST_SOURCES)
         add_custom_command(TARGET nxrt_cheats_ui_test POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different "${dll}" "$<TARGET_FILE_DIR:nxrt_cheats_ui_test>")
     endforeach()
 endif()
+
+# The F1 menu's screenshot and input test (tests/menu_ui; ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch): its pages, pins
+# and groups drawn on the CPU (no window, no GPU, the cheats test's rasterizer) at two UI scales and compared with tests/menu_ui/ref, plus
+# the toggle, pin and input checks. Not part of a game build.
+file(GLOB NXRT_MENU_UI_TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/menu_ui/*.cpp")
+if(NXRT_MENU_UI_TEST_SOURCES)
+    add_executable(nxrt_menu_ui_test EXCLUDE_FROM_ALL ${NXRT_MENU_UI_TEST_SOURCES} "${CMAKE_CURRENT_SOURCE_DIR}/tests/cheats_ui/soft_raster.cpp"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/tests/cheats_ui/blur_ref.cpp")
+    target_link_libraries(nxrt_menu_ui_test PRIVATE nxrt_gfx)
+    target_include_directories(nxrt_menu_ui_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/gfx")
+    target_compile_definitions(nxrt_menu_ui_test PRIVATE NXRT_MENU_UI_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/menu_ui"
+                               NXRT_CHEATS_UI_TEST_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/cheats_ui")
+    if(WIN32)
+        target_link_options(nxrt_menu_ui_test PRIVATE /HIGHENTROPYVA:NO /STACK:16777216)
+    elseif(APPLE)
+        target_link_options(nxrt_menu_ui_test PRIVATE "-Wl,-platform_version,macos,12.0,12.0")
+    endif()
+    foreach(dll ${NXRT_A2B_DLLS})
+        add_custom_command(TARGET nxrt_menu_ui_test POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different "${dll}" "$<TARGET_FILE_DIR:nxrt_menu_ui_test>")
+    endforeach()
+endif()

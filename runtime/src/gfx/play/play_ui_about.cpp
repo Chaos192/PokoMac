@@ -18,6 +18,7 @@
 #include "nxrt/game.h"
 #include "nxrt/services.h"
 #include "play_ui.h"
+#include "play_ui_widgets.h"
 
 namespace nxrt::play {
 
@@ -85,7 +86,7 @@ void path_row(const char* label, const std::string& value, const char* note = ""
 
 void draw_about_page(const std::string& settings_path) {
     const game::Info& info = game::info();
-    ImGui::SeparatorText("Build");
+    widgets::card("Build");
     ImGui::Text("%s", info.product && *info.product ? info.product : (info.title ? info.title : "nxrt"));
     ImGui::Text("Game version %s", info.version ? info.version : "?");
 #ifdef NXRT_BUILD_COMMIT
@@ -95,11 +96,11 @@ void draw_about_page(const std::string& settings_path) {
 #endif
     ImGui::Text("Built %s %s", __DATE__, __TIME__);
 
-    ImGui::SeparatorText("Credits");
+    widgets::card("Credits");
     ImGui::TextWrapped("Built on AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).");
     ImGui::TextWrapped("Based on Recompia by Dittobyte (github.com/Dittobyte/Recompia).");
 
-    ImGui::SeparatorText("Folders and files in use");
+    widgets::card("Folders and files in use");
     path_row("Working folder", absolute("."));
     path_row("Settings (controls)", absolute(settings_path), "Written by Apply and save.");
     if (info.game_ini && *info.game_ini) path_row("Game ini", absolute(info.game_ini), "Runtime options ([fs], [nvn], [audio] ...); docs/CONFIG.md lists the keys.");

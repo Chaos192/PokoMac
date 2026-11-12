@@ -38,6 +38,7 @@ VkDevice vkdev();
 struct Counters {
     std::atomic<uint64_t> submits{0}, lists_replayed{0}, draws{0}, draws_skipped{0}, dispatches{0}, clears{0}, copies{0}, presents{0};
     std::atomic<uint64_t> passes{0}, pass_breaks{0}, pipelines_created{0}, pipeline_cache_hits{0}, descriptor_sets{0};
+    std::atomic<uint64_t> pipelines_in_play{0};   // made after the first present, prewarm included (the F1 menu's pins)
     std::atomic<uint64_t> textures_created{0}, texture_uploads{0}, texture_upload_bytes{0}, bc7_transcodes{0}, textures_failed{0};
     std::atomic<uint64_t> pools_imported{0}, unresolved_addresses{0}, unsupported_ops{0}, submit_replay_ns{0};
 };

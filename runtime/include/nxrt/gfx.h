@@ -167,6 +167,13 @@ public:
     uint32_t queue_family() const { return queue_family_; }
     std::mutex& queue_mutex() { return queue_mutex_; }              // hold while calling vkQueueSubmit / vkQueuePresentKHR
     VmaAllocator allocator() const { return vma_; }
+    // Video memory of the device-local heap with the most memory (the F1 menu's pins; ported from AnySwitch by Chaos192,
+    // github.com/Chaos192/AnySwitch): the allocator's usage and budget (the driver's with VK_EXT_memory_budget, else its estimate).
+    struct VideoMemory {
+        uint64_t usage = 0, budget = 0, heap = 0;
+        uint64_t block_bytes = 0, allocation_bytes = 0;
+    };
+    bool video_memory(VideoMemory* out) const;
     VkSurfaceKHR surface() const { return surface_; }              // null when headless
     bool headless() const { return surface_ == VK_NULL_HANDLE; }
     const VkPhysicalDeviceProperties& properties() const { return props_; }
