@@ -110,9 +110,31 @@ public:
     size_t caves_waiting() const;                      // cave words whose return waits for their code to settle
 
 private:
-    // mu_ held: the words go back (code unpatched now; cave words once the code reverted with them has settled), records dropped
+    // mu_ held: the words go back (code unpatched by the queued work; cave words once the code reverted with them has settled: after the
+    // unpatch, or at a later pass while its function compiles), records dropped
     void restore_locked(const std::vector<uint64_t>& words);
-    void settle_caves_locked();                        // the waiting cave words whose code has settled go back
+    void settle_caves_locked();                        // the waiting cave words whose code has settled go back (queued work)
+
+    // The sink work is decided under mu_ and done after it is let go, one caller at a time (work_mu_): a sink call can wait for the on-demand
+    // compiler (cave_written drops the units of the old bytes under missed's make lock, which a compile holds for a second or more), and the
+    // cheats overlay reads this router every frame (applying, held, counters) and turns cheats on and off from the render thread: with mu_
+    // held through that wait, the frame waited too (Pokopia: 217-293 ms frames when a cheat's cave was written while another
+    // cheat's code was compiling).
+    struct Op {
+        enum class K : uint8_t { Write, Cave, Unpatch, Patch } k = K::Write;
+        uint64_t a = 0, b = 0, c = 0, d = 0;           // Write: a = word; Cave: cave_written(a, b, c, d)
+        uint32_t v = 0;                                // Write: the word's value
+        std::vector<uint64_t> words;                   // Unpatch
+        std::vector<std::pair<uint64_t, uint32_t>> patch;   // Patch
+    };
+    void run_ops_held();                               // work_mu_ held: the queued work, in order, and the caves it lets settle
+    void run_ops(std::vector<Op>& ops, bool* unpatched);
+    void run_ops_now_or_later();                       // a toggle's work: now when no pass holds work_mu_, else by that pass
+    void end_pass_locked();                            // mu_ held: end_pass's decisions, its sink work queued
+    static Op write_op(uint64_t w, uint32_t v);
+    static Op cave_op(uint64_t cave_lo, uint64_t cave_hi, uint64_t lo, uint64_t hi);
+    std::vector<Op> ops_;                              // under mu_
+    std::mutex work_mu_;
 
     struct CaveBack {
         Held word;

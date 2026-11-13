@@ -24,8 +24,9 @@ struct CaveRuns {
         if (!runs.empty() && runs.back().cave_lo == pl.lo && runs.back().hi == w) runs.back().hi = w + 4;
         else runs.push_back({pl.lo, pl.hi, w, w + 4});
     }
-    void flush(Sink& s) {
-        for (const Run& r : runs) s.cave_written(r.cave_lo, r.cave_hi, r.lo, r.hi);
+    template <class F>
+    void flush(F&& f) {
+        for (const Run& r : runs) f(r);
         runs.clear();
     }
 };
@@ -83,7 +84,16 @@ bool Router::read(uint64_t addr, void* dst, size_t n) {
 }
 
 void Router::end_pass() {
-    std::lock_guard<std::mutex> lk(mu_);
+    std::lock_guard<std::mutex> work(work_mu_);
+    run_ops_held();                                     // work queued by a toggle that found a pass doing its own
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        end_pass_locked();
+    }
+    run_ops_held();
+}
+
+void Router::end_pass_locked() {
     if (!caves_back_.empty()) settle_caves_locked();
     if (pend_words_.empty() || pass_gen_ != gen_) {   // nothing written to code, or the file was reloaded while the pass ran
         pend_.clear();
@@ -138,7 +148,7 @@ void Router::end_pass() {
             if (h != held_.end()) {                         // written back to its original bytes: the cheats' change goes
                 if (pl.kind == Kind::Code && !h->second.plain) to_unpatch.push_back(w);
                 else if (pl.kind == Kind::Cave) caves_written_back.push_back(h->second);   // once the code reverted with it settles
-                else if (cur != want) sink_.write(w, &want, 4);
+                else if (cur != want) ops_.push_back(write_op(w, want));
                 held_.erase(h);
             }
             continue;
@@ -155,37 +165,32 @@ void Router::end_pass() {
         if (pl.kind == Kind::Code) {
             to_patch.push_back({w, want});
         } else {
-            sink_.write(w, &want, 4);
+            ops_.push_back(write_op(w, want));
             caves.add(pl, w);
             c_.cave_words_written++;
         }
     }
-    caves.flush(sink_);                                     // the cave first: the branches into it go live later
+    // the cave first: the branches into it go live later
+    caves.flush([this](const CaveRuns::Run& r) { ops_.push_back(cave_op(r.cave_lo, r.cave_hi, r.lo, r.hi)); });
     if (!to_unpatch.empty()) {
-        sink_.unpatch(to_unpatch);
+        Op u;
+        u.k = Op::K::Unpatch;
+        u.words = to_unpatch;
+        ops_.push_back(std::move(u));
         c_.words_reverted += to_unpatch.size();
     }
+    // the cave words written back wait for the code reverted with them: settled once the unpatch above has been done (run_ops_held)
     for (const Held& c : caves_written_back) {
         CaveBack& b = caves_back_[c.addr];
         b.word = c;
         b.wait_for = to_unpatch;
     }
-    if (!caves_written_back.empty()) settle_caves_locked();
+    if (!caves_written_back.empty() && to_unpatch.empty()) settle_caves_locked();
     if (!to_patch.empty()) {
-        std::vector<std::string> errs;
-        sink_.patch(to_patch, &errs);
-        for (size_t i = 0; i < to_patch.size(); ++i) {
-            if (i < errs.size() && !errs[i].empty()) {
-                // the patcher refused it (no on-demand compiler, a function too large ...): the bytes as before the router, said once
-                c_.patch_failures++;
-                sink_.write(to_patch[i].first, &to_patch[i].second, 4);
-                if (auto it = held_.find(to_patch[i].first); it != held_.end()) it->second.plain = true;
-                sink_.log("a cheat's code write at " + hex(to_patch[i].first) + " is not a live patch (" + errs[i] +
-                          "): written as plain bytes, which the compiled game does not run");
-            } else {
-                c_.words_patched++;
-            }
-        }
+        Op p;
+        p.k = Op::K::Patch;
+        p.patch = to_patch;
+        ops_.push_back(std::move(p));
     }
     pend_.clear();
     pend_words_.clear();
@@ -201,7 +206,7 @@ void Router::restore_locked(const std::vector<uint64_t>& words) {
         if (h->second.place.kind == Kind::Code) {
             if (h->second.plain) {
                 uint32_t cur = 0;
-                if (sink_.read(w, &cur, 4) && cur == h->second.now) sink_.write(w, &h->second.original, 4);
+                if (sink_.read(w, &cur, 4) && cur == h->second.now) ops_.push_back(write_op(w, h->second.original));
             } else {
                 code.push_back(w);
             }
@@ -211,7 +216,10 @@ void Router::restore_locked(const std::vector<uint64_t>& words) {
         held_.erase(h);
     }
     if (!code.empty()) {
-        sink_.unpatch(code);
+        Op u;
+        u.k = Op::K::Unpatch;
+        u.words = code;
+        ops_.push_back(std::move(u));
         c_.words_reverted += code.size();
     }
     for (Held& c : cave) {
@@ -219,7 +227,8 @@ void Router::restore_locked(const std::vector<uint64_t>& words) {
         b.word = c;
         b.wait_for.insert(b.wait_for.end(), code.begin(), code.end());
     }
-    if (!cave.empty()) settle_caves_locked();
+    // with no code to wait for, the cave words go back with this work; else once the unpatch has been done (run_ops_held)
+    if (!cave.empty() && code.empty()) settle_caves_locked();
 }
 
 void Router::settle_caves_locked() {
@@ -232,22 +241,100 @@ void Router::settle_caves_locked() {
         const Held& c = it->second.word;
         uint32_t cur = 0;
         if (sink_.read(c.addr, &cur, 4) && cur == c.now) {   // still the cheats' bytes (nothing else wrote there since)
-            sink_.write(c.addr, &c.original, 4);
+            ops_.push_back(write_op(c.addr, c.original));
             runs.add(c.place, c.addr);
             c_.cave_words_restored++;
         }
         it = caves_back_.erase(it);
     }
-    runs.flush(sink_);
+    runs.flush([this](const CaveRuns::Run& r) { ops_.push_back(cave_op(r.cave_lo, r.cave_hi, r.lo, r.hi)); });
+}
+
+Router::Op Router::write_op(uint64_t w, uint32_t v) {
+    Op o;
+    o.k = Op::K::Write;
+    o.a = w;
+    o.v = v;
+    return o;
+}
+
+Router::Op Router::cave_op(uint64_t cave_lo, uint64_t cave_hi, uint64_t lo, uint64_t hi) {
+    Op o;
+    o.k = Op::K::Cave;
+    o.a = cave_lo;
+    o.b = cave_hi;
+    o.c = lo;
+    o.d = hi;
+    return o;
+}
+
+void Router::run_ops_held() {
+    for (bool unpatched = false;; unpatched = false) {
+        std::vector<Op> ops;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            ops.swap(ops_);
+        }
+        if (ops.empty()) return;                        // (and what a toggle queued meanwhile is done too, before it returns)
+        run_ops(ops, &unpatched);
+        if (!unpatched) continue;
+        // code went back: the cave words that waited for it go back now when it has settled (with no compile to wait for, at once)
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!caves_back_.empty()) settle_caves_locked();
+    }
+}
+
+void Router::run_ops(std::vector<Op>& ops, bool* unpatched) {
+    for (Op& o : ops) {
+        switch (o.k) {
+            case Op::K::Write: sink_.write(o.a, &o.v, 4); break;
+            case Op::K::Cave: sink_.cave_written(o.a, o.b, o.c, o.d); break;
+            case Op::K::Unpatch:
+                sink_.unpatch(o.words);
+                *unpatched = true;
+                break;
+            case Op::K::Patch: {
+                std::vector<std::string> errs;
+                sink_.patch(o.patch, &errs);
+                std::vector<size_t> refused;
+                for (size_t i = 0; i < o.patch.size(); ++i)
+                    if (i < errs.size() && !errs[i].empty()) refused.push_back(i);
+                {
+                    std::lock_guard<std::mutex> lk(mu_);
+                    c_.words_patched += o.patch.size() - refused.size();
+                    c_.patch_failures += refused.size();
+                    for (size_t i : refused)
+                        if (auto it = held_.find(o.patch[i].first); it != held_.end()) it->second.plain = true;
+                }
+                // the patcher refused it (no on-demand compiler, a function too large ...): the bytes as before the router, said once
+                for (size_t i : refused) {
+                    sink_.write(o.patch[i].first, &o.patch[i].second, 4);
+                    sink_.log("a cheat's code write at " + hex(o.patch[i].first) + " is not a live patch (" + errs[i] +
+                              "): written as plain bytes, which the compiled game does not run");
+                }
+                break;
+            }
+        }
+    }
+}
+
+void Router::run_ops_now_or_later() {
+    // a toggle's work now when no pass is doing its own, else that pass does it first: the cheats overlay toggles from the render thread,
+    // which must not wait for a compile a pass is waiting on
+    std::unique_lock<std::mutex> work(work_mu_, std::try_to_lock);
+    if (work.owns_lock()) run_ops_held();
 }
 
 void Router::entry_off(int entry) {
-    std::lock_guard<std::mutex> lk(mu_);
-    revoked_.insert(entry);
-    std::vector<uint64_t> orphans;
-    for (auto& [w, h] : held_)
-        if (h.owners.erase(entry) && h.owners.empty()) orphans.push_back(w);
-    restore_locked(orphans);
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        revoked_.insert(entry);
+        std::vector<uint64_t> orphans;
+        for (auto& [w, h] : held_)
+            if (h.owners.erase(entry) && h.owners.empty()) orphans.push_back(w);
+        restore_locked(orphans);
+    }
+    run_ops_now_or_later();
 }
 
 void Router::entry_on(int entry) {
@@ -256,12 +343,15 @@ void Router::entry_on(int entry) {
 }
 
 void Router::reset() {
-    std::lock_guard<std::mutex> lk(mu_);
-    gen_++;
-    std::vector<uint64_t> all;
-    for (const auto& kv : held_) all.push_back(kv.first);
-    restore_locked(all);
-    revoked_.clear();
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        gen_++;
+        std::vector<uint64_t> all;
+        for (const auto& kv : held_) all.push_back(kv.first);
+        restore_locked(all);
+        revoked_.clear();
+    }
+    run_ops_now_or_later();
 }
 
 Counters Router::counters() const {

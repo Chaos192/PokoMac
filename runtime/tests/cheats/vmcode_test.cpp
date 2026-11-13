@@ -20,13 +20,17 @@
 #include "vmcode.cpp"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <map>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace nxrt::cheats;
@@ -107,7 +111,14 @@ struct FakeSink : Sink {
     bool settled(uint64_t) override { return settled_all; }
     std::set<uint64_t> making;                       // words whose patch is not swapped in yet
     bool applying(uint64_t w) override { return making.count(w) != 0; }
+    std::atomic<bool> cave_blocks{false}, in_cave{false}, release{false};   // a cave write waits (the live sink: an on-demand compile)
     void cave_written(uint64_t clo, uint64_t chi, uint64_t lo, uint64_t hi) override {
+        if (cave_blocks) {
+            in_cave = true;
+            const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(800);
+            while (!release && std::chrono::steady_clock::now() < until) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            in_cave = false;
+        }
         char b[96];
         std::snprintf(b, sizeof b, "cave %llx..%llx in %llx..%llx", (unsigned long long)(lo - base), (unsigned long long)(hi - base),
                       (unsigned long long)(clo - base), (unsigned long long)(chi - base));
@@ -344,6 +355,41 @@ static void test_revoked_in_pass_and_reset() {
     CHECK(g.at(0x1400) == 0xD503201F);
 }
 
+// The cheats overlay reads the router every frame (applying, held, counters) and toggles cheats from the render thread. A pass's sink work
+// can wait (the live sink's cave_written waits for the on-demand compiler's make lock, held through a compile of a second or more):
+// Pokopia had frames of 217-293 ms when a cheat's cave was written while another cheat's code was compiling. With the cave write
+// held for up to 800 ms, every reader and a toggle must answer at once, and a cheat turned off meanwhile must still put everything back.
+static double ms_of(const std::function<void()>& f) {
+    const auto t0 = std::chrono::steady_clock::now();
+    f();
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+}
+
+static void test_readers_never_wait_for_the_sink() {
+    Game g(hook_cheat("Hook", 0x1010, 0x2500));
+    g.set(1, true);
+    g.s.cave_blocks = true;
+    std::thread pass([&] { g.pass(); });
+    for (int i = 0; i < 2000 && !g.s.in_cave; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    CHECK(g.s.in_cave);
+    double worst = 0;
+    worst = std::max(worst, ms_of([&] { (void)g.r.applying(1); }));
+    worst = std::max(worst, ms_of([&] { (void)g.r.held(); }));
+    worst = std::max(worst, ms_of([&] { (void)g.r.counters(); }));
+    worst = std::max(worst, ms_of([&] { (void)g.r.caves_waiting(); }));
+    worst = std::max(worst, ms_of([&] { g.set(1, false); }));     // turned off while its cave write waits: the pass does the work
+    std::printf("readers and a toggle during a waiting cave write: worst %.1f ms\n", worst);
+    CHECK(worst < 100.0);
+    g.s.release = true;
+    pass.join();
+    g.s.cave_blocks = false;
+    g.pass();                                        // the toggle's unpatch, then the cave once its code has settled
+    g.pass();
+    CHECK(g.at(0x1010) == g.orig(0x1010));
+    for (uint64_t a = 0x2500; a < 0x2510; a += 4) CHECK(g.at(a) == 0);
+    CHECK(g.r.held().empty() && g.r.caves_waiting() == 0);
+}
+
 static void test_read_overlay_and_bytes() {
     // the cheat writes a code word, then reads it back and marks data when it sees its own write
     // (5: register 1 = main+0x1500 as u32; C0: register 1 == D503201F)
@@ -464,6 +510,7 @@ int main(int argc, char** argv) {
     test_revoked_in_pass_and_reset();
     test_read_overlay_and_bytes();
     test_za_shapes();
+    test_readers_never_wait_for_the_sink();
     if (g_fail == 0) std::printf("ALL VMCODE TESTS PASSED\n");
     else std::printf("%d CHECK(s) FAILED\n", g_fail);
     return g_fail ? 1 : 0;
