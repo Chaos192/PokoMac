@@ -297,9 +297,10 @@ bool editor(const char* id, std::string* s, ImVec2 size);
 void osk_draw();                                              // draws the keyboard when one is open (once per frame, last)
 bool osk_open();
 void osk_show(std::string* s, Keys keys, const char* title);   // the keyboard for a string (the screenshot test)
-// The game's icon (the title folder's icon.png / icon.jpg) as a texture of the current ImGui context, or null when there is none
-// (cheats_icon.cpp).
+// The game's icon (the title folder's icon.png / icon.jpg) as a texture of the current ImGui context, or null when there is none or it is
+// still being decoded (on a thread of its own: the caller draws a placeholder meanwhile) (cheats_icon.cpp).
 ImTextureData* game_icon();
+bool game_icon_wait(int ms);        // starts the decode (game_icon_prefetch, cheats_ui.h) and waits up to ms for it (tests); true: an icon
 
 // ---- pages and windows -------------------------------------------------------------------------------------------------------------
 void page_cheats();                                           // Cheats: the game's cheat codes and mods' (cheats_ui_tools.cpp)

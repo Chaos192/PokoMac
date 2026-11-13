@@ -1500,6 +1500,7 @@ void Overlay::draw(const FrameInfo& f) {
     const bool kb_on = !quit_on && s.kb_poll();
     const bool save_on = s.save_notice_visible(now_s);
     const bool touch_on = s.touch_btn.load(std::memory_order_relaxed) && !kb_on && !quit_on;   // the corner button (menu closed: "Menu", open: "Close")
+    cheats::ui::game_icon_prefetch();                   // the headers' game icon, decoded off this thread before a menu first shows (once)
     if (s.cheats_enabled && !s.cheats_inited) {          // the cheat table, its hotkeys and the frame callbacks start with the first frame
         s.cheats_inited = true;
         cheats::ui::init();

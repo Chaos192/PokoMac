@@ -515,6 +515,7 @@ int main(int argc, char** argv) {
     game::set_current(&info);
     cheats::ui::init_look();
     cheats::ui::st().animations = false;
+    cheats::ui::game_icon_wait(5000);   // the header's icon, decoded on a thread of its own: in every shot
     fill_sample();
 
     toggle_checks(out_dir);

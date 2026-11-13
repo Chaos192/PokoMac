@@ -5,18 +5,27 @@
 // library keeps beside each title: icon.jpg from the catalogue or the control data, icon.png from some), decoded once, made smaller with a
 // box filter (the header shows it at 40 UI units: a 256-pixel icon sampled down without mipmaps would shimmer), and registered as an
 // ImGui user texture (the renderer backend uploads it like the font atlas).
+// The decode runs on a thread of its own, started with the overlay's first frame (game_icon_prefetch) or at the first request: on the
+// render thread it took 5-17 ms of the first show's frame (Pokopia's 1000x1000 icon.png). Until it is ready game_icon() gives null, and
+// the header draws its placeholder (the accent disc with the overlay's mark).
 // JPEG through stb_image (Sean Barrett, public domain or MIT: runtime/third_party/stb, v2.30, THIRD_PARTY_NOTICES.md), JPEG only, from
 // memory; PNG through the runtime's own loader (gfx::load_png_rgba, SDL).
 #define _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING 1
 #include <imgui.h>
 #include <imgui_internal.h>
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include "cheats_ui.h"
 #include "cheats_ui_internal.h"
 #include "nxrt/config.h"
 #include "nxrt/gfx.h"
@@ -54,11 +63,17 @@ namespace fs = std::filesystem;
 namespace {
 
 struct Icon {
-    bool tried = false;
-    std::vector<uint8_t> rgba;          // decoded (and made smaller) once
+    std::atomic<int> state{0};          // 0: not asked for; 1: being decoded (worker); 2: decoded, or there is none
+    std::vector<uint8_t> rgba;          // decoded (and made smaller) once: written by the worker before state 2, read after it
     int w = 0, h = 0;
-    ImGuiContext* ctx = nullptr;        // the context the texture is registered in (a new context gets its own)
+    std::thread worker;
+    std::mutex mu;                      // with cv: game_icon_wait
+    std::condition_variable cv;
+    ImGuiContext* ctx = nullptr;        // the context the texture is registered in (a new context gets its own); render thread only
     ImTextureData* tex = nullptr;
+    ~Icon() {
+        if (worker.joinable()) worker.join();   // (a process that ends while it decodes waits for it: a fraction of a second)
+    }
 };
 Icon g_icon;
 
@@ -86,16 +101,16 @@ void shrink(std::vector<uint8_t>& px, int& w, int& h, int keep) {
     }
 }
 
-void load() {
+// On the worker: the first of the title folder's icon files that reads, decoded and made smaller.
+void load(const std::vector<std::string>& paths) {
     Icon& ic = g_icon;
-    ic.tried = true;
-    for (const char* name : {"icon.png", "icon.jpg", "icon.jpeg"}) {
-        const std::string p = name;   // PokoMac: the game folder is the working directory (AnySwitch: title_path)
+    const auto t0 = std::chrono::steady_clock::now();
+    for (const std::string& p : paths) {
         std::error_code ec;
         if (p.empty() || !fs::is_regular_file(fs::u8path(p), ec)) continue;
         std::vector<uint8_t> px;
         int w = 0, h = 0;
-        if (std::strstr(name, ".png")) {
+        if (p.size() >= 4 && p.compare(p.size() - 4, 4, ".png") == 0) {
             uint32_t pw = 0, ph = 0;
             if (!gfx::load_png_rgba(p, &px, &pw, &ph)) continue;
             w = static_cast<int>(pw);
@@ -117,16 +132,54 @@ void load() {
         ic.rgba = std::move(px);
         ic.w = w;
         ic.h = h;
-        NXLOG_I("cheats", "the game's icon for the overlay: %s (%dx%d)", p.c_str(), w, h);
+        NXLOG_I("cheats", "the game's icon for the overlay: %s (%dx%d), decoded in %.0f ms off the render thread", p.c_str(), w, h,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
         return;
+    }
+}
+
+void start() {
+    Icon& ic = g_icon;
+    int expect = 0;
+    if (ic.state.load(std::memory_order_acquire) != 0 || !ic.state.compare_exchange_strong(expect, 1)) return;
+    std::vector<std::string> paths;                     // the title folder is read here, on the caller's thread
+    for (const char* name : {"icon.png", "icon.jpg", "icon.jpeg"}) {
+        std::string p = name;   // PokoMac: the game folder is the working directory (AnySwitch: title_path)
+        if (!p.empty()) paths.push_back(std::move(p));
+    }
+    try {
+        ic.worker = std::thread([paths] {
+            load(paths);
+            {
+                std::lock_guard<std::mutex> lk(g_icon.mu);
+                g_icon.state.store(2, std::memory_order_release);
+            }
+            g_icon.cv.notify_all();
+        });
+    } catch (const std::exception&) {                   // no thread to be had: the header keeps its placeholder
+        std::lock_guard<std::mutex> lk(ic.mu);
+        ic.state.store(2, std::memory_order_release);
     }
 }
 
 }  // namespace
 
+void game_icon_prefetch() { start(); }
+
+bool game_icon_wait(int ms) {
+    start();
+    Icon& ic = g_icon;
+    std::unique_lock<std::mutex> lk(ic.mu);
+    ic.cv.wait_for(lk, std::chrono::milliseconds(ms), [&] { return ic.state.load(std::memory_order_acquire) == 2; });
+    return ic.state.load(std::memory_order_acquire) == 2 && !ic.rgba.empty();
+}
+
 ImTextureData* game_icon() {
     Icon& ic = g_icon;
-    if (!ic.tried) load();
+    if (ic.state.load(std::memory_order_acquire) != 2) {
+        start();
+        return nullptr;                                 // decoding: the caller draws its placeholder
+    }
     if (ic.rgba.empty()) return nullptr;
     ImGuiContext* ctx = ImGui::GetCurrentContext();
     if (ic.ctx != ctx || !ic.tex) {

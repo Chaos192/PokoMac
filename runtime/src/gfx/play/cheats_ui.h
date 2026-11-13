@@ -56,6 +56,8 @@ void set_key_peek(bool on);
 // One-time setup: reads [cheats] settings, loads the saved cheat table and window layout for the running title, starts the frame
 // callback (hotkeys, Lua, value graphs). Safe to call again; the overlay calls it when [cheats] enable is set, before the first show.
 void init();
+// The game's icon for the overlay's and the menu's header is decoded on a thread of its own from the overlay's first frame on (cheats_icon.cpp)
+void game_icon_prefetch();
 // Saves the cheat table and the window layout for the running title (on hide, and every few seconds when something changed).
 void save();
 

@@ -297,6 +297,18 @@ int main(int argc, char** argv) {
     ui::init();
     ui::st().animations = false;
     {
+        // the game's icon is decoded on a thread of its own (it took 5-17 ms of the render thread at the first show): the first request
+        // answers at once, null while it decodes (the header draws its placeholder), and the icon is there after it
+        const auto t0 = std::chrono::steady_clock::now();
+        const bool first_null = ui::game_icon() == nullptr;
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        const bool ready = ui::game_icon_wait(5000);
+        const bool ok = ms < 20.0 && ready;
+        std::printf("%-6s game icon: the first request took %.2f ms (%s), decoded off the caller's thread: %s\n", ok ? "ok" : "FAILED",
+                    ms, first_null ? "placeholder" : "icon", ready ? "yes" : "no");
+        if (!ok) ++g_failures;
+    }
+    {
         // a player's theme file, as one would share it: a deep green glass-less theme with its own accent and square-ish corners
         g_custom_theme = (fs::path(out_dir) / "forest.json").string();
         FILE* f = std::fopen(g_custom_theme.c_str(), "wb");
