@@ -207,13 +207,19 @@ Engine::LoadResult Engine::reload() {
         return res;
     }
     res.found = true;
+    // Every cheat starts off unless toggles.txt turns it on ([cheats] enabled_by_default = true for dmnt's default, every
+    // cheat on). The master code always runs. pokomac-port's PC run (11-13): a toggles.txt naming only "Coins 9999" left every other ASM
+    // cheat of the file on at start, Water Gun 5x5 among them.
+    if (!config_get_bool("cheats", "enabled_by_default", false))
+        for (size_t k = 1; k < kMaxEntries; ++k) f.entries[k].enabled = false;
+    errors_.clear();
     // apply toggles.txt beside the file (per program id)
     const fs::path tog_path = fs::u8path(path).parent_path() / "toggles.txt";
     const std::string tog_str = tog_path.string();
     if (fs::exists(tog_path, ec)) {
         std::string terr;
         if (!ParseToggles(read_text(tog_str), f, &terr))
-            NXLOG_W(kTag, "toggles.txt was refused (%s): the console would attach no cheats; using the file's defaults", terr.c_str());
+            NXLOG_W(kTag, "toggles.txt was refused (%s): the console would attach no cheats; every cheat stays at its default", terr.c_str());
     }
     file_ = std::move(f);
     program_dirty_ = true;
@@ -231,7 +237,9 @@ std::vector<Engine::CheatRow> Engine::cheats() const {
     for (size_t i = 0; i < kMaxEntries; ++i) {
         const CheatEntry& e = file_.entries[i];
         if (!e.used) continue;
-        out.push_back({static_cast<int>(i), e.name, i == 0, e.enabled, e.words.size(), e.enabled && router_.applying(static_cast<int>(i))});
+        auto err = errors_.find(static_cast<int>(i));
+        out.push_back({static_cast<int>(i), e.name, i == 0, e.enabled, e.words.size(), e.enabled && router_.applying(static_cast<int>(i)),
+                       err != errors_.end() ? err->second : std::string()});
     }
     return out;
 }
@@ -245,6 +253,7 @@ void Engine::set_cheat_enabled(int entry, bool on) {
         if (!e.used) return;
         e.enabled = on;
         program_dirty_ = true;
+        if (on) errors_.erase(entry);                    // tried again: its code is made again
         // persist toggles.txt beside the file
         const std::string path = stats_.file_path;
         if (!path.empty()) {
@@ -366,6 +375,7 @@ PassReport Engine::step_once() {
     if (vm_.loaded() && vm_.program_words()) router_.begin_pass();
     rep = vm_.run(*host_);
     router_.end_pass();   // the pass's code and cave writes settle (nothing to do when it wrote none)
+    turn_off_failed();
     write_frozen();
     aw::rearm();   // re-arm "find what writes/reads" pages unprotected by the last access
     {
@@ -381,6 +391,35 @@ PassReport Engine::step_once() {
         stats_.code = router_.counters();
     }
     return rep;
+}
+
+// A code cheat goes live only when all of its code is ready (codepatch.cpp: the function and what it reaches compiled, else nothing is swapped
+// in). When that cannot be (the on-demand compiler failed, the patcher refused the word), the cheat goes off now: its code words and its cave
+// go back, the cheats list shows why, and the log says it once. toggles.txt keeps the player's choice: the next start tries again.
+// (PokoMac on the PC, 11-13: the Water Gun cheat's cave did not compile, the patch went live anyway, and its first use crashed the game.)
+void Engine::turn_off_failed() {
+    std::vector<int> on;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        for (size_t k = 1; k < kMaxEntries; ++k)
+            if (file_.entries[k].used && file_.entries[k].enabled) on.push_back(static_cast<int>(k));
+    }
+    for (int k : on) {
+        std::string why;
+        if (!router_.failure(k, &why)) continue;
+        std::string name;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            CheatEntry& e = file_.entries[k];
+            if (!e.used || !e.enabled) continue;
+            e.enabled = false;
+            program_dirty_ = true;
+            errors_[k] = why;
+            name = e.name;
+        }
+        NXLOG_W(kTag, "cheat [%s] turned off: its code cannot go live (%s)", name.c_str(), why.c_str());
+        router_.entry_off(k);
+    }
 }
 
 void Engine::thread_main() {

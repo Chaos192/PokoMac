@@ -71,6 +71,29 @@ int main() {
         const auto t = reach::to_prepare({{M + 0x7a5730, 0x147e9134}}, M + 0x7a5040, M + 0x7a5b98, m.src());
         CHECK(t.size() == 3 && t[0] == M + 0x2749c00 && t[1] == M + 0x9ca7b0 && t[2] == M + 0x7a5734);   // its bl and its branch back
     }
+    // make_ready: every address made ready in order, and a compile that fails stops it (the patch must not go live: PokoMac on the PC, the
+    // Water Gun cheat's cave did not compile, the patch went live anyway and its first use crashed the game)
+    {
+        Mem m;
+        m.put(M + 0x2749a00, {0x39460be8, 0x340002e8, 0x79c00309, 0x91012bed, 0x79c005aa, 0x79c00b0b, 0x1280002c, 0x52800008, 0x1280002e, 0x0b0c012f,
+                              0x0b0e0170, 0x528000d1, 0x9bb13511, 0x7900022f, 0x7900062a, 0x79000a30, 0x11000508, 0x110005ce, 0x710009df, 0x54fffecd,
+                              0x1100058c, 0x7100099f, 0x54fffe4d, 0x39060be8, 0x39460be8, 0x17795e49});
+        const std::vector<std::pair<uint64_t, uint32_t>> hook{{M + 0x5a1384, 0x1486a19f}};
+        std::vector<uint64_t> asked;
+        auto ok = reach::make_ready(hook, M + 0x5a1280, M + 0x5a1b18, m.src(), [&](uint64_t a, std::string*) { asked.push_back(a); return true; });
+        CHECK(ok.ok && ok.made == 2 && ok.total == 2 && asked.size() == 2 && asked[0] == M + 0x2749a00);
+        asked.clear();
+        auto bad = reach::make_ready(hook, M + 0x5a1280, M + 0x5a1b18, m.src(), [&](uint64_t a, std::string* why) {
+            asked.push_back(a);
+            if (a == M + 0x2749a00) { *why = "the build's helper failed (exit 1)"; return false; }   // the cave does not compile
+            return true;
+        });
+        CHECK(!bad.ok && bad.made == 0 && bad.total == 2 && bad.failed_at == M + 0x2749a00 && bad.why == "the build's helper failed (exit 1)");
+        CHECK(asked.size() == 1);                       // stopped at the cave: the branch back is not compiled for nothing
+        auto later = reach::make_ready(hook, M + 0x5a1280, M + 0x5a1b18, m.src(), [&](uint64_t a, std::string*) { return a != M + 0x5a1388; });
+        CHECK(!later.ok && later.made == 1 && later.failed_at == M + 0x5a1388 && !later.why.empty());   // the code after the hook too
+        CHECK(reach::make_ready({{M + 0x1000, 0xd503201f}}, M + 0x1000, M + 0x1100, m.src(), [](uint64_t, std::string*) { return false; }).ok);   // nothing reached
+    }
     if (g_fail == 0) std::printf("ALL REACH TESTS PASSED\n");
     else std::printf("%d CHECK(s) FAILED\n", g_fail);
     return g_fail ? 1 : 0;

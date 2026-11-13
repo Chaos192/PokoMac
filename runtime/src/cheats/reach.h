@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -28,5 +29,18 @@ struct Source {
 // it reaches). Code in a region is followed from each entry until four zero words in a row or the region's end; at most `limit` addresses.
 std::vector<uint64_t> to_prepare(const std::vector<std::pair<uint64_t, uint32_t>>& patched, uint64_t fn_lo, uint64_t fn_hi, const Source& src,
                                  size_t limit = 64);
+
+// Makes every address to_prepare names ready with `prepare` (missed::prepare on the patcher's worker), in that order, and stops at the first
+// that cannot be. ok only when all of them are: a patch whose cave, or the code after its hook, could not be compiled must never go live,
+// since its first run would meet code nothing can run (PokoMac on the PC, 11-13: the on-demand helper could not compile the Water Gun
+// cheat's cave, the patch went live anyway, and its first use raised a guest trap that ended the game).
+struct Ready {
+    bool ok = true;
+    size_t made = 0, total = 0;
+    uint64_t failed_at = 0;            // the address that could not be made ready
+    std::string why;                   // and why (the compiler's answer)
+};
+Ready make_ready(const std::vector<std::pair<uint64_t, uint32_t>>& patched, uint64_t fn_lo, uint64_t fn_hi, const Source& src,
+                 const std::function<bool(uint64_t addr, std::string* why)>& prepare);
 
 }  // namespace nxrt::cheats::reach

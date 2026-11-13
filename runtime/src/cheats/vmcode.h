@@ -55,6 +55,9 @@ public:
     virtual bool settled(uint64_t word) { (void)word; return true; }
     // True while the patch of this word is being made (lifted, compiled, what it reaches made ready) and not swapped in yet.
     virtual bool applying(uint64_t word) { (void)word; return false; }
+    // True when the patch of this word could not be made (its function, or what it reaches, did not compile): it never went live, the game
+    // runs the code it had. *why: the reason.
+    virtual bool failed(uint64_t word, std::string* why) { (void)word; (void)why; return false; }
     // [lo, hi) of the cave [cave_lo, cave_hi) holds new bytes: make the cave code and drop what was made from the old bytes.
     virtual void cave_written(uint64_t cave_lo, uint64_t cave_hi, uint64_t lo, uint64_t hi) = 0;
     virtual void log(const std::string& line) { (void)line; }
@@ -78,6 +81,7 @@ struct Held {
     uint32_t original = 0;             // the bytes before the first cheat wrote it
     uint32_t now = 0;                  // what the cheats made it
     bool plain = false;                // code the patcher refused: written as plain bytes (as before the router), put back the same way
+    std::string why;                   // plain: the patcher's reason
     std::set<int> owners;              // the cheat file's entries that wrote it (0 = the master)
 };
 
@@ -107,6 +111,9 @@ public:
     std::vector<Held> held() const;
     // The cheat's code is on its way in (the cheats list says "applying..."): a code word it holds is not swapped in yet.
     bool applying(int entry) const;
+    // The cheat's code cannot go live: a code word it holds could not be made (Sink::failed) or the patcher refused it. *why: the reason.
+    // The engine turns such a cheat off and the cheats list shows why.
+    bool failure(int entry, std::string* why) const;
     size_t caves_waiting() const;                      // cave words whose return waits for their code to settle
 
 private:

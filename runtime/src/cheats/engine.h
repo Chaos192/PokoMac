@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -70,9 +71,10 @@ public:
     LoadResult reload();
 
     // The loaded cheats, for the overlay list.
-    struct CheatRow { int entry; std::string name; bool master; bool enabled; size_t words; bool applying = false; };   // applying: its code is on its way in
+    // applying: its code is on its way in. error: why it was turned off (its code could not go live: a compile failed, the patcher refused it)
+    struct CheatRow { int entry; std::string name; bool master; bool enabled; size_t words; bool applying = false; std::string error; };
     std::vector<CheatRow> cheats() const;
-    void set_cheat_enabled(int entry, bool on);     // persists to toggles.txt
+    void set_cheat_enabled(int entry, bool on);     // persists to toggles.txt (on clears the cheat's error)
     size_t master_entry() const { return 0; }
 
     // Frozen addresses (the address list's locks). add returns the entry id. Thread safe.
@@ -103,6 +105,7 @@ private:
     Engine() = default;
     void thread_main();
     void write_frozen();
+    void turn_off_failed();                   // after a pass: a cheat whose code cannot go live goes off, with the reason (not persisted)
     std::string folder_unlocked() const;      // mu_ held
     size_t add_mod_cheats(CheatFile& f) const;   // [cheats] mod_files: the enabled mods' cheat files (docs/MODS.md)
     std::string file_path_for(const std::string& pid, const std::string& bid) const;
@@ -115,6 +118,7 @@ private:
     CheatFile file_;
     Vm vm_;
     bool program_dirty_ = true;        // reload the VM program (a toggle changed)
+    std::map<int, std::string> errors_;  // entry -> why it was turned off (CheatRow::error); cleared when it is turned on, and by reload
     std::vector<FrozenAddr> frozen_;
     uint64_t next_id_ = 1;
     std::function<void(bool)> pause_fn_;

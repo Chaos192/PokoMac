@@ -56,4 +56,22 @@ std::vector<uint64_t> to_prepare(const std::vector<std::pair<uint64_t, uint32_t>
     return out;
 }
 
+Ready make_ready(const std::vector<std::pair<uint64_t, uint32_t>>& patched, uint64_t fn_lo, uint64_t fn_hi, const Source& src,
+                 const std::function<bool(uint64_t addr, std::string* why)>& prepare) {
+    Ready r;
+    const std::vector<uint64_t> targets = to_prepare(patched, fn_lo, fn_hi, src);
+    r.total = targets.size();
+    for (uint64_t t : targets) {
+        std::string why;
+        if (!prepare(t, &why)) {
+            r.ok = false;
+            r.failed_at = t;
+            r.why = why.empty() ? "it could not be compiled" : why;
+            break;
+        }
+        ++r.made;
+    }
+    return r;
+}
+
 }  // namespace nxrt::cheats::reach

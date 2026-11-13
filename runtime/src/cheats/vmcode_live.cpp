@@ -58,6 +58,15 @@ public:
             if (p.addr == word) return p.state == cp::State::Compiling;
         return false;
     }
+    bool failed(uint64_t word, std::string* why) override {
+        for (const cp::Patch& p : cp::patches())
+            if (p.addr == word) {
+                if (p.state != cp::State::Failed) return false;
+                if (why) *why = p.note;
+                return true;
+            }
+        return false;
+    }
     void cave_written(uint64_t cave_lo, uint64_t cave_hi, uint64_t lo, uint64_t hi) override {
         std::lock_guard<std::mutex> lk(mu_);
         if (!caves_.count(cave_lo)) {

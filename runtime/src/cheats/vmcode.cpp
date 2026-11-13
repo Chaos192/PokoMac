@@ -304,7 +304,10 @@ void Router::run_ops(std::vector<Op>& ops, bool* unpatched) {
                     c_.words_patched += o.patch.size() - refused.size();
                     c_.patch_failures += refused.size();
                     for (size_t i : refused)
-                        if (auto it = held_.find(o.patch[i].first); it != held_.end()) it->second.plain = true;
+                        if (auto it = held_.find(o.patch[i].first); it != held_.end()) {
+                            it->second.plain = true;
+                            it->second.why = errs[i];
+                        }
                 }
                 // the patcher refused it (no on-demand compiler, a function too large ...): the bytes as before the router, said once
                 for (size_t i : refused) {
@@ -364,6 +367,19 @@ std::vector<Held> Router::held() const {
     std::vector<Held> out;
     for (const auto& kv : held_) out.push_back(kv.second);
     return out;
+}
+
+bool Router::failure(int entry, std::string* why) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    for (const auto& [w, h] : held_) {
+        if (h.place.kind != Kind::Code || !h.owners.count(entry)) continue;
+        std::string r;
+        if (h.plain) r = "the code patcher refused the patch at " + hex(w) + (h.why.empty() ? std::string() : " (" + h.why + ")");
+        else if (!sink_.failed(w, &r)) continue;
+        if (why) *why = r.empty() ? "its code could not be made at " + hex(w) : r;
+        return true;
+    }
+    return false;
 }
 
 bool Router::applying(int entry) const {

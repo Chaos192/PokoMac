@@ -22,6 +22,7 @@ The launcher writes these; the runtime reads them. All default to off/empty so a
 | `[cheats]` | `dir` | path | `<exe dir>/cheats` | The cheats folder. Holds `<program id>/cheats/<build id>.txt` (the console tree) or a flat `<build id>.txt`, plus `toggles.txt` and the saved cheat tables `<build id>.cheattable.json`. |
 | `[cheats]` | `key` | SDL scancode name | `F3` | The key that shows/hides the cheats overlay. **Must differ from `[gfx] overlay_key`** (the F1 dev menu); the runtime warns and keeps F3 if they clash. |
 | `[cheats]` | `pad` | pad combo | empty (off) | A controller combo that shows/hides the overlay, e.g. `minus+rstick`. Same combo syntax as `[quit] pad` / `[overlay] pad` (`play_config.cpp`). Ignored if equal to the `[quit]` or `[overlay]` combo (warned). |
+| `[cheats]` | `enabled_by_default` | bool | `false` | A cheat that `toggles.txt` does not name is off (every cheat off until the player turns it on; the master code always runs). `true`: dmnt's default, every cheat on unless `toggles.txt` turns it off. |
 | `[cheats]` | `pass_input` | bool | `false` | While the overlay is open, also let input reach the game (default: the overlay takes input). |
 | `[cheats]` | `pause_game` | bool | `false` | Pause the game while the overlay is open. |
 | `[cheats]` | `mini` | bool | `false` | The HUD over the game (see "An overlay first") also lists every active cheat and hotkey, not only what is pinned. |
@@ -261,6 +262,12 @@ only) runs the glass blur on the GPU against the reference and times it.
   game runs the old code meanwhile and the cheats list says **applying…** until the swap. Before, the first guest thread to enter a
   cheat's cave waited for its compile (pokomac-port's PC run: a 12.7 s frame; Pokopia's Leafage on the Mac: 0.75 s for two cave units).
   `nxrt_reach_test` (Pokopia's real Leafage, Water Gun and crop caves).
+- **Never half on** (`reach::make_ready`, `Engine::turn_off_failed`): a patch is swapped in only when its function and everything it
+  reaches compiled. When one of them does not (the on-demand helper fails, the patcher refuses the word), nothing is swapped in, the
+  cheat goes off at the next pass with its code and cave put back, the cheats list says **could not turn on** (the reason on hover) and
+  the log says why once; toggles.txt keeps the player's choice, so the next start tries again. Before, PokoMac's PC run went live with
+  the Water Gun cheat's cave not compiled and its first use raised a guest trap that ended the game. `nxrt_reach_test`,
+  `nxrt_vmcode_test`, `nxrt_cheat_engine_test` (a forced compile failure).
 - **Breakpoints** use the same unit with an inline site (`nx_site_inline`, hooks.h) before the instruction, and before every other
   instruction of the function when a breakpoint there stops, so a held thread can step. A held thread waits in the site's hook; on the
   presenting thread the pause service keeps the overlay running meanwhile.

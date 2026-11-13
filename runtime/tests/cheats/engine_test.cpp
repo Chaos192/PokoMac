@@ -19,6 +19,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <string>
 
@@ -85,6 +86,13 @@ struct TestSink : Sink {
         }
     }
     void cave_written(uint64_t, uint64_t, uint64_t, uint64_t) override { g_cp_calls.push_back("cave"); }
+    bool failed(uint64_t w, std::string* why) override {   // a forced compile failure (g_failing)
+        auto it = g_failing.find(w);
+        if (it == g_failing.end()) return false;
+        *why = it->second;
+        return true;
+    }
+    static inline std::map<uint64_t, std::string> g_failing;
 };
 Sink& live_sink() { static TestSink s; return s; }
 }  // namespace nxrt::cheats::vmcode
@@ -133,7 +141,12 @@ int main() {
     CHECK(e.program_id_hex() == pid);
     CHECK(e.build_id_hex() == bid);
 
-    // run one pass: both cheats write
+    // every cheat starts off (no toggles.txt): a pass writes nothing; turned on, both write
+    e.step_once();
+    CHECK(g_mem.find(0x7100000000ull + 0x1000) == g_mem.end() && g_mem.find(0x7100000000ull + 0x2000) == g_mem.end());
+    for (const auto& r : e.cheats()) CHECK(!r.enabled && r.error.empty());
+    e.set_cheat_enabled(1, true);
+    e.set_cheat_enabled(2, true);
     e.step_once();
     CHECK(get32(0x7100000000ull + 0x1000) == 999);
     CHECK(get32(0x7100000000ull + 0x2000) == 1);
@@ -168,9 +181,12 @@ int main() {
         g_mem.clear();
         e.step_once();
         CHECK(get32(0x7100000000ull + 0x1000) == 999);
-        CHECK(get32(0x7100000000ull + 0x3000) == 5);
-        CHECK(get32(0x7100000000ull + 0x4000) == 9);
+        CHECK(g_mem.find(0x7100000000ull + 0x3000) == g_mem.end());   // [Mod gems] is not in toggles.txt: off until turned on
+        CHECK(get32(0x7100000000ull + 0x4000) == 9);                  // a master code always runs
         CHECK(g_mem.find(0x7100000000ull + 0x2000) == g_mem.end());   // [Off] stays off (toggles.txt)
+        e.set_cheat_enabled(3, true);                                  // entry 3: the title has 1 and 2
+        e.step_once();
+        CHECK(get32(0x7100000000ull + 0x3000) == 5);
         g_cfg.erase("cheats.mod_files");
         auto r3 = e.reload();
         CHECK(r3.cheats == 2);
@@ -241,6 +257,43 @@ int main() {
         e.reload();
         CHECK(get32(B + 0x104) == 0xAA000041);
         CHECK(e.code_held().empty());
+
+        // pokomac-port's PC run (11-13): a toggles.txt naming only "Coins 999" leaves every other cheat off at start, the ASM one included
+        std::ofstream(dir / "toggles.txt", std::ios::binary) << "[Coins 999]\ntrue\n";
+        e.reload();
+        g_cp_calls.clear();
+        for (int i = 0; i < 4; ++i) g_mem.erase(B + 0x1000 + i);
+        e.step_once();
+        CHECK(get32(B + 0x1000) == 999);
+        CHECK(get32(B + 0x104) == 0xAA000041 && g_cp_calls.empty());
+        for (const auto& row : e.cheats()) if (row.entry == 2) CHECK(!row.enabled);
+
+        // a forced compile failure: the Hook's patch cannot go live (its cave did not compile). The same pass turns the cheat off: its code
+        // and cave back, the cheats list says why; toggles.txt keeps it on (the next start tries again). Never half on.
+        auto& failing = vmcode::TestSink::g_failing;
+        failing[B + 0x104] = "the code it reaches at main+0x900 could not be compiled (the build's helper failed (exit 1)): not swapped in";
+        e.set_cheat_enabled(2, true);
+        e.step_once();
+        CHECK(get32(B + 0x104) == 0xAA000041);
+        CHECK(get32(B + 0x900) == 0 && get32(B + 0x904) == 0);
+        CHECK(e.code_held().empty());
+        auto row2 = [&] { for (const auto& row : e.cheats()) if (row.entry == 2) return row; return Engine::CheatRow{}; };
+        CHECK(!row2().enabled && row2().error.find("could not be compiled") != std::string::npos);
+        {
+            std::ifstream t(dir / "toggles.txt", std::ios::binary);
+            const std::string tog((std::istreambuf_iterator<char>(t)), std::istreambuf_iterator<char>());
+            CHECK(tog.find("[Hook]\ntrue") != std::string::npos);
+        }
+        e.step_once();                                 // it stays off
+        CHECK(get32(B + 0x104) == 0xAA000041 && !row2().enabled);
+        // compiled now: turned on again, it goes live and its error is gone
+        failing.clear();
+        e.set_cheat_enabled(2, true);
+        CHECK(row2().error.empty());
+        e.step_once();
+        CHECK(get32(B + 0x104) == 0x140001FF && row2().enabled);
+        e.set_cheat_enabled(2, false);
+        CHECK(get32(B + 0x104) == 0xAA000041);
     }
 
     fs::remove_all(tmp);

@@ -641,6 +641,11 @@ void page_cheats() {
                 ImGui::SameLine(0, th::sp(th::S3));
                 th::text(th::Type::Small, p.text2, "applying…");
             }
+            if (!r.error.empty()) {   // its code could not go live (a compile failed, the patcher refused it): turned off, never half on
+                ImGui::SameLine(0, th::sp(th::S3));
+                th::text(th::Type::Small, p.warn, "could not turn on");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", ("Turned off: its code could not go live.\n" + r.error).c_str());
+            }
             if (!r.master) {   // pin it to the HUD over the game
                 const bool pinned = s.pinned_cheats.count(r.name) != 0;
                 ImGui::SetCursorScreenPos(ImVec2(o.x + w - th::px(th::kControlH) - th::sp(th::S2), o.y + (row_h - th::px(th::kControlH)) * 0.5f));

@@ -349,20 +349,17 @@ void set_state_locked(uint64_t fn_start, State st, const std::string& note) {
 // Everything the patched words reach that the dispatcher may not have yet (a code cave, the instruction after the hook): made ready here,
 // on the patch's worker thread before the swap, so no guest thread waits for the build's compiler when it first runs the patch (reach.h;
 // a code cheat turned on stalled a frame for 12.7 s on the PC). The game keeps running the old code meanwhile.
-void prepare_reach(uint64_t fn_start, uint64_t fn_end, const std::vector<std::pair<uint64_t, uint32_t>>& patched) {
+reach::Ready prepare_reach(uint64_t fn_start, uint64_t fn_end, const std::vector<std::pair<uint64_t, uint32_t>>& patched) {
     reach::Source src;
     src.read = [](uint64_t a, uint32_t* w) { return gmem::read(a, w, 4); };
     src.region = [](uint64_t a, uint64_t* b, uint64_t* e) { return missed::code_region_of(a, b, e); };
-    const std::vector<uint64_t> targets = reach::to_prepare(patched, fn_start, fn_end, src);
-    size_t made = 0;
-    for (uint64_t t : targets) {
-        std::string e;
-        if (missed::prepare(t, &e)) ++made;
-        else NXLOG_W(kTag, "code the patch in %s reaches at %s could not be made ready (%s): its first call compiles it", where(fn_start).c_str(),
-                     where(t).c_str(), e.c_str());
-    }
-    if (!targets.empty())
-        NXLOG_I(kTag, "code at %s: %zu of the %zu addresses it reaches made ready before the swap", where(fn_start).c_str(), made, targets.size());
+    const reach::Ready r = reach::make_ready(patched, fn_start, fn_end, src, [](uint64_t a, std::string* why) { return missed::prepare(a, why); });
+    if (!r.ok)
+        NXLOG_W(kTag, "code at %s: what the patch reaches at %s could not be compiled (%s): the patch is not swapped in", where(fn_start).c_str(),
+                where(r.failed_at).c_str(), r.why.c_str());
+    else if (r.total)
+        NXLOG_I(kTag, "code at %s: %zu of the %zu addresses it reaches made ready before the swap", where(fn_start).c_str(), r.made, r.total);
+    return r;
 }
 
 // Lifts the function again from its bytes in memory (with every patch in it) and the sites its breakpoints need, then swaps it in at the
@@ -439,7 +436,8 @@ void rebuild_locked(uint64_t fn_start) {
         const auto t0 = std::chrono::steady_clock::now();
         std::string err;
         const GuestFn unit = missed::make_code_unit(name, fn_start, bytes, sites, &err);
-        if (unit) prepare_reach(fn_start, fn_end, patched);
+        // a patch goes live only with all of its code ready: the function, and what it reaches (its cave, the code after its hook)
+        const reach::Ready ready = unit ? prepare_reach(fn_start, fn_end, patched) : reach::Ready{};
         const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         G& s = g();
         std::lock_guard<std::mutex> lk(s.mu);
@@ -449,6 +447,12 @@ void rebuild_locked(uint64_t fn_start) {
             // make_code_unit registers nothing on failure: the old code keeps running
             set_state_locked(fn_start, State::Failed, "cannot recompile it now (" + err + "): the IPS patch takes effect with the next build");
             NXLOG_W(kTag, "code patch at %s: %s", where(fn_start).c_str(), err.c_str());
+            return;
+        }
+        if (!ready.ok) {
+            // nothing is swapped in: the game keeps the code it has (a cheat's engine turns the cheat off and shows why)
+            set_state_locked(fn_start, State::Failed, "the code it reaches at " + where(ready.failed_at) + " could not be compiled (" + ready.why +
+                                                          "): not swapped in");
             return;
         }
         f.unit = unit;

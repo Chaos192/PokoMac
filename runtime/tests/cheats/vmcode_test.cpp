@@ -111,6 +111,13 @@ struct FakeSink : Sink {
     bool settled(uint64_t) override { return settled_all; }
     std::set<uint64_t> making;                       // words whose patch is not swapped in yet
     bool applying(uint64_t w) override { return making.count(w) != 0; }
+    std::map<uint64_t, std::string> failing;         // words whose patch could not be made (a forced compile failure)
+    bool failed(uint64_t w, std::string* why) override {
+        auto it = failing.find(w);
+        if (it == failing.end()) return false;
+        *why = it->second;
+        return true;
+    }
     std::atomic<bool> cave_blocks{false}, in_cave{false}, release{false};   // a cave write waits (the live sink: an on-demand compile)
     void cave_written(uint64_t clo, uint64_t chi, uint64_t lo, uint64_t hi) override {
         if (cave_blocks) {
@@ -258,6 +265,35 @@ static void test_asm_on_off() {
     CHECK(g.r.held().empty());
     c = g.r.counters();
     CHECK(c.words_reverted == 1 && c.cave_words_restored == 4);
+}
+
+// A cheat whose patch cannot go live (its cave did not compile, forced here through Sink::failed; or the patcher refused the word): the
+// router reports it for that cheat only, and turned off its code and cave go back (the engine turns it off at the next pass: engine_test).
+static void test_failure() {
+    Game g(hook_cheat("Hook", 0x1010, 0x2500) + "[Other]\n04000000 00010000 00000001\n");
+    g.set(1, true);
+    g.set(2, true);
+    g.pass();
+    std::string why;
+    CHECK(!g.r.failure(1, &why) && !g.r.failure(2, &why));
+    g.s.failing[kMain + 0x1010] = "the code it reaches at main+0x2500 could not be compiled (the build's helper failed (exit 1)): not swapped in";
+    CHECK(g.r.failure(1, &why) && why.find("could not be compiled") != std::string::npos);
+    CHECK(!g.r.failure(2, &why));                       // the data cheat holds no code
+    g.set(1, false);
+    g.pass();
+    CHECK(g.at(0x1010) == g.orig(0x1010));
+    CHECK(g.at(0x2500) == 0 && g.at(0x2504) == 0 && g.at(0x2508) == 0 && g.at(0x250c) == 0);
+    CHECK(!g.r.failure(1, &why) && g.r.held().empty());
+    CHECK(g.s.get32(kMain + 0x10000) == 1);             // the other cheat runs on
+    // the patcher refuses the hook's word: plain bytes, and the cheat reports why
+    g.s.failing.clear();
+    g.s.refuse.insert(kMain + 0x1010);
+    g.set(1, true);
+    g.pass();
+    CHECK(g.r.failure(1, &why) && why.find("refused") != std::string::npos);
+    g.set(1, false);
+    g.pass();
+    CHECK(g.at(0x1010) == g.orig(0x1010) && g.at(0x2500) == 0 && g.r.held().empty());
 }
 
 static void test_cave_back_on_again() {
@@ -511,6 +547,7 @@ int main(int argc, char** argv) {
     test_read_overlay_and_bytes();
     test_za_shapes();
     test_readers_never_wait_for_the_sink();
+    test_failure();
     if (g_fail == 0) std::printf("ALL VMCODE TESTS PASSED\n");
     else std::printf("%d CHECK(s) FAILED\n", g_fail);
     return g_fail ? 1 : 0;
