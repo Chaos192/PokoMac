@@ -1,0 +1,9 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Mods (pages/mods.js): a mod's name with what it changes under it, the order and on/off on the right. */
+.mods .row-label.mods-label { display: flex; flex-direction: column; gap: 2px; max-width: none; flex: 1 1 auto; min-width: 0; }
+.mods .row-control.cluster { flex: none; gap: var(--space-1); }
+.mods-sub { color: var(--color-text-2); font-size: var(--text-sm); font-weight: var(--weight-regular, 400); overflow-wrap: anywhere; }
+.mods-sub.warn { color: var(--color-warn, var(--color-danger)); }
+.mods-sub.path { font-family: var(--font-mono, monospace); font-size: var(--text-xs); }
+.mods-note { display: flex; align-items: flex-start; gap: var(--space-2); }
+.mods-note.warn .icon { color: var(--color-danger); }

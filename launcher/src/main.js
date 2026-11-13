@@ -12,6 +12,7 @@ import { isFirstRun } from './action.js';
 import { startGamepadNav } from './gamepad-nav.js';
 import * as home from './pages/home.js';
 import * as linkplay from './pages/linkplay.js';
+import * as mods from './pages/mods.js';
 import * as news from './pages/news.js';
 import * as settings from './pages/settings.js';
 import * as setup from './pages/setup.js';
@@ -20,6 +21,7 @@ import * as setup from './pages/setup.js';
 const PAGES = {
   home: { mod: home, nav: 'Home', icon: 'house', art: 'sharp' },
   linkplay: { mod: linkplay, nav: 'Link Play', icon: 'users' },
+  mods: { mod: mods, nav: 'Mods', icon: 'puzzle' },
   news: { mod: news, nav: "What's New", icon: 'newspaper' },
   settings: { mod: settings, nav: 'Settings', icon: 'settings' },
   setup: { mod: setup },

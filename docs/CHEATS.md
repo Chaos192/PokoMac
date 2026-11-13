@@ -488,21 +488,12 @@ whole process checkpointed, which needs the operating system's help that neither
 state lives on host stacks, which is an interpreter (out of the question). **Save states are therefore not built.** The game's own saves,
 the cheat table (values, freezes, pointer paths) and Snapshots (memory diffs) cover what a cheat user needs from them.
 
-## RomFS mods (already implemented)
+## Mods (game files and code patches)
 
-`[fs] romfs_mod` is a folder shaped like the game's RomFS. Its files replace the game's by path; folders merge; files only in the mod are
-served too (`fs_romfs.cpp` `make_layout`, the `mod` layer wins over `host_dir` and `romfs_base`). To replace a texture or a text file, put it
-at the same path the game uses (for example `<mod>/LD_C0_R.BIN` for a top-level file). The runtime logs how many mod files replaced a game
-file and warns if none did.
-
-## Code patches (IPS / IPS32)
-
-Patches live in the `[fs] exefs_patches` folder, named by the module's build id: `<build id>.ips` (24-bit offsets, `PATCH`/`EOF`) or
-`<build id>.ips32` (32-bit offsets, `IPS32`/`EEOF`), exactly as Atmosphère's `exefs_patches`. The offset is into the decompressed NSO file,
-its 0x100 header included (the mapped offset + 0x100), as Atmosphère reads it. `apply_ips.py` (shipped beside `pkp_build.py` in every
-package) applies them; `pkp_build.py --patches <dir>` patches each module whose build id has a file before lifting it, so the patch becomes
-compiled code. The build stamp covers the patch files, so changing a patch rebuilds only the modules it names (the launcher shows the
-title as "Build again").
+Mods have their own page and document: [MODS.md](MODS.md). In short, the Mods page (mods.py) installs a mod in any common layout;
+game file mods are layered over the RomFS through `[fs] romfs_mod` (a folder, or the mod manager's layer list), and code patches
+(IPS / IPS32 / .pchtxt, by build id, Atmosphère's offsets) make the effective ExeFS that the next build (**Build with mods**) lifts and
+compiles natively, so a patch becomes compiled code. A patch made with **Code > Write the IPS patches** goes into a mod's `exefs/`.
 
 ## Cheat tables (our own format)
 

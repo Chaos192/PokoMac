@@ -448,6 +448,8 @@ std::shared_ptr<fs::RomfsImage> rom_image() {
     if (!mod.empty()) {
         NXLOG_I("fs", "RomFS: %u of the %u files come from the mod folder %s ([fs] romfs_mod), %u of them replace a game file", s.mod_files, s.files,
                 mod.c_str(), s.mod_replaced);
+        if (s.mod_layers > 1 || s.mod_deleted > 0)
+            NXLOG_I("fs", "RomFS: %u mod layers, %u game entries removed by mods (.stub)", s.mod_layers, s.mod_deleted);
         if (s.mod_files > 0 && s.mod_replaced == 0)
             NXLOG_W("fs", "none of the %u files in the mod folder replaces a game file. The mod folder must hold the same files and folders as the game's "
                           "RomFS (for example LD_C0_R.BIN at its top level), not the folder around it. Check the folder level in Settings > Game > Mods.",

@@ -854,8 +854,10 @@ export const SECTIONS = [
             placeholder: (env) => env.defaultGameDir, commit: 'blur', reloads: true,
           },
           {
+            // a folder of game files set by hand; once mods are installed on the Mods page, mods.py writes its layer list here instead
+            // (mods/.active/romfs_layers.txt, docs/MODS.md) and keeps a folder set before as its lowest layer
             id: 'romfs_mod', label: 'Mods', type: 'path', at: pkp('fs', 'romfs_mod'), pick: 'Choose the mods folder',
-            placeholder: () => '',
+            placeholder: () => '', when: (v) => !/\.txt$/i.test(v.romfs_mod ?? ''),
           },
           {
             // the game's photos (runtime album.cpp, [album] dir; relative paths are inside the install folder)
@@ -863,8 +865,12 @@ export const SECTIONS = [
             placeholder: (env) => `${env.gameDir}/album`,
           },
           {
-            id: 'romfs_mod_note', type: 'note',
-            note: () => ({ text: "Choose the folder that holds the same files and folders as the game's romfs (for example LD_C0_R.BIN at its top level), not the folder around it. Its files replace the game's files with the same path." }),
+            id: 'romfs_mod_note', type: 'note', when: (v) => !/\.txt$/i.test(v.romfs_mod ?? ''),
+            note: () => ({ text: "Choose the folder that holds the same files and folders as the game's romfs (for example LD_C0_R.BIN at its top level), not the folder around it. Its files replace the game's files with the same path. The Mods page installs and orders downloaded mods for you." }),
+          },
+          {
+            id: 'romfs_mod_managed', type: 'note', when: (v) => /\.txt$/i.test(v.romfs_mod ?? ''),
+            note: () => ({ text: 'Your mods are managed on the Mods page (in the sidebar): install, order and switch them on or off there. A folder you set here before stays as the lowest layer.' }),
           },
           { id: 'minimize_on_play', label: 'Minimise while playing', type: 'toggle', at: config('minimize_on_play'), def: false },
         ],

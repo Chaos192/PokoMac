@@ -89,6 +89,16 @@ if(NXRT_BUILD_GFX)
     include(cmake/gfx.cmake)
 endif()
 
+# The RomFS mod layers (tests/romfs_layers; ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch): a mod layer list, a single mod
+# folder and the base layer on folders the test makes (docs/MODS.md). Not part of a game build's default target.
+add_executable(nxrt_romfs_layers_test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_SOURCE_DIR}/tests/romfs_layers/romfs_layers_test.cpp")
+target_link_libraries(nxrt_romfs_layers_test PRIVATE nxrt)
+if(WIN32)
+    target_link_options(nxrt_romfs_layers_test PRIVATE /HIGHENTROPYVA:NO)
+elseif(APPLE)
+    target_link_options(nxrt_romfs_layers_test PRIVATE "-Wl,-platform_version,macos,12.0,12.0")
+endif()
+
 # Code the lift did not see (tests/missed; ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch): mid-function entries and
 # units recompiled on demand, on a hand-made module that the lifter of this checkout lifts at build time (needs a Python with Capstone).
 # Not part of a game build's default target.

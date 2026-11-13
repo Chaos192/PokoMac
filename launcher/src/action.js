@@ -90,6 +90,7 @@ export function primaryAction(s) {
   if (kind === 'setup') return on(stopped ? 'Continue setup' : 'Set up', 'wrench', 'setup');
   if (kind === 'resume') return on('Continue setup', 'wrench', 'setup');
   if (needsFinish(kind)) return on('Finish update', 'wrench', 'setup');
+  if (kind === 'mods_build') return on('Build with mods', 'wrench', 'setup');   // the code mods changed (pages/mods.js, docs/MODS.md)
   if (kind === 'ready') return on('Play', 'play', 'play');
   return off('Not ready', 'circle-alert', false);   // a kind this build does not know must not fall through to Play
 }

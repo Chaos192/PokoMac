@@ -26,7 +26,9 @@ public:
     // console patch over its base game: the files of `host_dir` win. For an update dumped without the base game's files under it (an
     // update only holds the files it changes; fork #128).
     // `mod_dir` (optional, a romfs-shaped folder): the top layer. Its files win over both `host_dir` and `base_dir`, shared folders merge,
-    // and files found only in the mod are served too.
+    // and files found only in the mod are served too. A `mod_dir` ending in .txt is a mod layer list (the mod manager's, docs/MODS.md;
+    // ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch): "layer <folder>" and "delete <path>" lines, lowest priority
+    // first, applied over host_dir + base_dir.
     bool build(const std::string& host_dir, std::string* err = nullptr, const std::string& base_dir = std::string(),
                const std::string& mod_dir = std::string());
     bool built() const;
@@ -41,6 +43,8 @@ public:
         uint32_t base_files = 0;                            // files served from the base layer (build's base_dir)
         uint32_t mod_files = 0;                             // files served from the mod layer (build's mod_dir)
         uint32_t mod_replaced = 0;                          // of those, the files that replace a file of the update or base game
+        uint32_t mod_deleted = 0;                           // entries a mod layer list removed ("delete <path>": a mod's .stub)
+        uint32_t mod_layers = 0;                            // mod folders layered (1 for a folder, the "layer" lines of a list)
     };
     Stats stats() const;
     // Image offset and size of a file by its path inside the image ("/a/b.bin", case sensitive), for tests and logs. False when absent.

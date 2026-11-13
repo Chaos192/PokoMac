@@ -437,6 +437,12 @@ int main(int argc, char** argv) {
     if (installed && !nxrt::config_has("fs", "romfs")) nxrt::config_set("fs", "romfs", "romfs");   // pkp.ini missing or without [fs]
     // [fs] exefs (pkp.ini, or NXRT_FS_EXEFS) names the ExeFS when neither --exefs nor PKP_EXEFS does; installed: relative to the game folder.
     if (!exefs_given) exefs = nxrt::config_get_str("fs", "exefs", installed ? "exefs" : exefs.c_str());
+    // [fs] exefs_mod (docs/MODS.md): the effective ExeFS of the title's code mods (patched, replaced or added modules), the one the build
+    // lifted. The launcher writes it only when a build with it finished, so the mapped modules always match the compiled code.
+    if (!exefs_given) {
+        const std::string mod = nxrt::config_get_str("fs", "exefs_mod", "");
+        if (!mod.empty()) exefs = mod;
+    }
     nxrt::config_set("fs", "exefs", exefs.c_str());     // the one in use, for the About page
     nxrt::config_set("process", "program_id", "0x0400A3A01EE4C000");     // GetInfo(ProgramId); an ini value or the environment still wins
     NXLOG_I("boot", "pkp %s (PokoMac)", PKP_VERSION);

@@ -141,6 +141,29 @@ def tool_stamp(live_patch=True):
     return stamp
 
 
+def mods_code(game):
+    """The game's code mods (docs/MODS.md, mods.py; ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch): the effective
+    ExeFS the mod manager made (<game>/mods/.active/code.json: patched or replaced modules, the game's own for the rest) and its stamp,
+    or (None, '') when no code mod is on. The build lifts that ExeFS instead of the dump's, once the dump itself is verified."""
+    code = read_json(os.path.join(game, 'mods', '.active', 'code.json'))
+    if not isinstance(code, dict) or not code.get('stamp') or not code.get('exefs'):
+        return None, ''
+    exefs = code['exefs'] if os.path.isabs(code['exefs']) else os.path.join(game, code['exefs'])
+    return os.path.normpath(exefs), str(code['stamp'])
+
+
+def mods_built(game):
+    """After a finished build: [fs] exefs_mod in pkp.ini names the ExeFS it lifted, or nothing without code mods (mods.py built), so the
+    runtime maps exactly the modules that were compiled. A game folder with no mods folder is left as it is."""
+    if not os.path.isdir(os.path.join(game, 'mods')):
+        return
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+    import mods
+    title = mods.Title(game)
+    mods.built(title, mods.Store(title))
+
+
 def check(game):
     """Whether pkp.exe and <game>/build/done.json were built with this package's tools: (current, reason)."""
     if not os.path.isfile(os.path.join(game, EXE)):
@@ -154,6 +177,8 @@ def check(game):
     changed = [k for k in want if done['tools'].get(k) != want[k]]
     if changed:
         return False, 'this release changes ' + ', '.join(changed)
+    if done.get('mods', '') != mods_code(game)[1]:
+        return False, 'the code mods changed (Mods)'
     return True, '%s matches this release' % EXE
 
 
@@ -791,8 +816,20 @@ def main():
         if not os.path.isfile(ZIG):
             raise Fail('The bundled compiler is missing (%s). Extract the release zip again.' % ZIG)
         want = verify(a.exefs)
+        # code mods (docs/MODS.md): their effective ExeFS is lifted in place of the dump's; the dump was verified above
+        lift_exefs, mstamp = mods_code(game)
+        if lift_exefs:
+            missing = [nso for _n, nso, *_ in MODULES if not os.path.isfile(os.path.join(lift_exefs, nso))]
+            if missing:
+                raise Fail("The code mods' game files (%s) are missing %s. Open Mods and switch a mod off and on again to make them again."
+                           % (lift_exefs, ', '.join(missing)))
+            say('note', 'Building with the code mods (%s)' % mstamp)
+        else:
+            lift_exefs = a.exefs
         stamp = {'format': FORMAT, 'main_build_id': want['main_build_id'], 'sha256': want['sha256'], 'tools': tool_stamp(a.live_patch),
                  'missed': missed_stamp(game)}
+        if mstamp:            # only with code mods: a build without them keeps the stamp it had before mods existed
+            stamp['mods'] = mstamp
         state_p = os.path.join(build, 'state.json')
         # another dump or another release (or no readable state): start over. Removing lift/ drops the modules' .lifted
         # markers too, so a changed lifter or main.sites lifts everything again, not only recompiles
@@ -808,8 +845,8 @@ def main():
         gen, obj = os.path.join(build, 'lift'), os.path.join(build, 'obj')
         t = time.time()
         missed_dir = os.path.join(build, 'missed')
-        lift(runner, a.exefs, gen, a.jobs, missed_dir, os.path.join(game, 'missed.txt'), a.live_patch)
-        write_manifest(missed_dir, game, a.exefs)
+        lift(runner, lift_exefs, gen, a.jobs, missed_dir, os.path.join(game, 'missed.txt'), a.live_patch)
+        write_manifest(missed_dir, game, lift_exefs)       # code made on demand is lifted from the same bytes
         times['lift'] = round(time.time() - t, 1)
         t = time.time()
         compile_all(runner, gen, obj, a.jobs, env, make_cache(os.path.join(build, 'objcache'), a.cache_mb))
@@ -823,6 +860,7 @@ def main():
                 shutil.rmtree(os.path.join(build, d), ignore_errors=True)
         done = dict(stamp, exe_sha256=sha256(exe), seconds=times, finished=time.strftime('%Y-%m-%d %H:%M:%S'))
         write_json(os.path.join(build, 'done.json'), done)
+        mods_built(game)
         progress('finish', 1, 1, '%s is ready (%d s)' % (EXE, time.time() - t0))
         return 0
     except Cancelled:

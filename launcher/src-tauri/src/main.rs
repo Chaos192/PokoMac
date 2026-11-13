@@ -10,6 +10,7 @@ mod host;
 mod icloud;
 mod ini;
 mod lan;
+mod mods;
 mod nsp;
 mod nup;
 mod play;
@@ -549,6 +550,8 @@ struct ReadyFacts {
     started: bool,
     /// the base romfs now layered under the update is not the one the shaders were made from (#128)
     base_changed: bool,
+    /// the code mods are not the ones pkp was built with (mods.rs, docs/MODS.md)
+    mods_changed: bool,
 }
 
 fn readiness_of(f: &ReadyFacts) -> Readiness {
@@ -570,6 +573,7 @@ fn readiness_of(f: &ReadyFacts) -> Readiness {
     };
     match f.built {
         gamebuild::Built::Current => {}
+        gamebuild::Built::Stale if f.mods_changed => return Readiness::of("mods_build", mods::CODE_CHANGED),
         gamebuild::Built::Stale => return Readiness::of("rebuild", gamebuild::REBUILD_MESSAGE),
         gamebuild::Built::No => return unfinished(),
     }
@@ -650,6 +654,7 @@ fn readiness(cfg: &Config) -> Probe {
         shaders_complete: shaders::is_complete(&dir),
         started: setup_started(&dir),
         base_changed,
+        mods_changed: builds_exe && mods::code_changed(&dir),
     });
     Probe { readiness, paths: Some(paths), dump: Some(dump) }
 }
@@ -1750,6 +1755,13 @@ fn main() {
             cheats_themes::cheats_themes,
             cheats_themes::cheats_theme_import,
             cheats_themes::cheats_themes_open,
+            mods::mods_list,
+            mods::mods_install,
+            mods::mods_change,
+            mods::mods_make,
+            mods::mods_pack,
+            mods::mods_pick,
+            mods::mods_open,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the launcher");

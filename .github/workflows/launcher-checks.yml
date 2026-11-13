@@ -62,6 +62,7 @@ jobs:
           npm ci --no-audit --no-fund
           npm run build
           node scripts/test-gamepad-nav.mjs
+          node scripts/test-mods-model.mjs
 
       - name: Check (Linux)
         working-directory: launcher/src-tauri
@@ -76,4 +77,7 @@ jobs:
         run: cargo check --target x86_64-pc-windows-gnu --all-targets
 
       - name: Build script (Python)
-        run: python3 -m py_compile game-build/release_b/pkp_build.py
+        run: |
+          python3 -m py_compile game-build/release_b/pkp_build.py game-build/release_b/mods.py game-build/release_b/apply_ips.py
+          python3 -I game-build/tests/test_mods.py
+          python3 -I game-build/tests/test_apply_ips.py

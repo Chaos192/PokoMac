@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <map>
@@ -303,17 +304,18 @@ void mark_mod(Node& n) {
 
 // Puts every entry of `base` that `top` lacks under `top` (the files of `top` win; a folder in both is merged). False with msg set when one
 // layer has a file where the other has a folder: such a pair cannot be layered. `replaced` (optional) counts the files of `top` that replace one of `base`.
-bool overlay(Node& top, Node&& base, std::string& msg, uint32_t* replaced = nullptr) {
+// `as_base`: the entries taken from `base` are the base game's (mark_base); false when `base` is what is built so far and `top` a mod layer.
+bool overlay(Node& top, Node&& base, std::string& msg, uint32_t* replaced = nullptr, bool as_base = true) {
     for (Node& b : base.kids) {
         auto it = std::find_if(top.kids.begin(), top.kids.end(), [&](const Node& k) { return k.name == b.name; });
         if (it == top.kids.end()) {
-            mark_base(b);
+            if (as_base) mark_base(b);
             top.kids.push_back(std::move(b));
         } else if (it->is_dir != b.is_dir) {
             msg = "two RomFS layers disagree on " + b.path + " (a file in one, a folder in the other)";
             return false;
         } else if (it->is_dir) {
-            if (!overlay(*it, std::move(b), msg, replaced)) return false;
+            if (!overlay(*it, std::move(b), msg, replaced, as_base)) return false;
         } else if (replaced) {
             ++*replaced;   // a file of `top` stands where `base` has one
         }
@@ -322,26 +324,107 @@ bool overlay(Node& top, Node&& base, std::string& msg, uint32_t* replaced = null
     return true;
 }
 
-// Lays out the host folder with the optional mod above it and base below it: entries sorted by full path in each table, file data in that
-// order, 16-byte aligned.
-bool make_layout(const std::string& host_dir, const std::string& base_dir, const std::string& mod_dir, Layout& L, std::string* err) {
-    Node root;
-    uint32_t mod_replaced = 0;
-    if (!scan_root(host_dir, root, err)) return false;
-    if (!mod_dir.empty()) {
+// Removes the entry at image path `path` ("/a/b", a file or a whole folder) from the tree. True when there was one.
+bool remove_path(Node& root, const std::string& path) {
+    Node* dir = &root;
+    size_t at = 1;
+    while (at <= path.size()) {
+        const size_t slash = path.find('/', at);
+        const std::string name = path.substr(at, slash == std::string::npos ? std::string::npos : slash - at);
+        auto it = std::find_if(dir->kids.begin(), dir->kids.end(), [&](const Node& k) { return k.name == name; });
+        if (it == dir->kids.end()) return false;
+        if (slash == std::string::npos) {
+            dir->kids.erase(it);
+            return true;
+        }
+        if (!it->is_dir) return false;
+        dir = &*it;
+        at = slash + 1;
+    }
+    return false;
+}
+
+// A mod layer list (docs/MODS.md, written by the mod manager mods.py; ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch):
+// `[fs] romfs_mod` names a .txt file instead of a folder. Lines in order, lowest priority first: "layer <folder>" puts a romfs-shaped folder
+// on top of what is built so far (its files win, folders merge), "delete <image path>" removes a file or folder from what is built so far (a
+// mod's ".stub" file: yuzu/Ryujinx romfs_ext). A relative folder is relative to the list's own folder. '#' starts a comment line.
+bool is_layer_list(const std::string& mod) {
+    return mod.size() > 4 && (mod.compare(mod.size() - 4, 4, ".txt") == 0 || mod.compare(mod.size() - 4, 4, ".TXT") == 0);
+}
+
+bool apply_layer_list(const std::string& list, Node& root, uint32_t& replaced, uint32_t& deleted, uint32_t& layers, std::string* err) {
+    std::wstring wlist;
+    if (!to_wide(list, wlist)) {
+        if (err) *err = "mod layer list name is not valid UTF-8";
+        return false;
+    }
+    const std::filesystem::path lp(wlist);
+    FILE* f = nullptr;
+#if defined(_WIN32) && !defined(__APPLE__)
+    f = _wfopen(long_path(wlist).c_str(), L"rb");
+#else
+    f = std::fopen(list.c_str(), "rb");
+#endif
+    if (!f) {
+        if (err) *err = "mod layer list cannot be read: " + list;
+        return false;
+    }
+    std::string text;
+    char buf[4096];
+    for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) text.append(buf, n);
+    std::fclose(f);
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t eol = text.find('\n', pos);
+        if (eol == std::string::npos) eol = text.size();
+        std::string line = text.substr(pos, eol - pos);
+        pos = eol + 1;
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        if (line.compare(0, 7, "delete ") == 0) {
+            std::string p = line.substr(7);
+            std::replace(p.begin(), p.end(), '\\', '/');
+            if (p.empty() || p[0] != '/') p = "/" + p;
+            if (remove_path(root, p)) deleted++;
+            continue;
+        }
+        if (line.compare(0, 6, "layer ") != 0) {
+            if (err) *err = "mod layer list " + list + ": a line that is neither 'layer <folder>' nor 'delete <path>': " + line;
+            return false;
+        }
+        std::wstring wdir;
+        if (!to_wide(line.substr(6), wdir)) {
+            if (err) *err = "mod layer list " + list + ": a folder name that is not valid UTF-8";
+            return false;
+        }
+        std::filesystem::path dir(wdir);
+        if (dir.is_relative()) dir = lp.parent_path() / dir;
+        std::string dir8;
+        if (!to_utf8(dir.wstring(), dir8)) dir8 = line.substr(6);
         Node mod;
         std::string e;
-        if (!scan_root(mod_dir, mod, &e)) {
+        if (!scan_root(dir8, mod, &e)) {
             if (err) *err = "mod RomFS: " + e;
             return false;
         }
         mark_mod(mod);
-        if (!overlay(mod, std::move(root), e, &mod_replaced)) {
+        if (!overlay(mod, std::move(root), e, &replaced, false)) {
             if (err) *err = e;
             return false;
         }
         root = std::move(mod);
+        layers++;
     }
+    return true;
+}
+
+// Lays out the host folder with the optional base below it and mod above it: entries sorted by full path in each table, file data in that
+// order, 16-byte aligned. The mod goes on last (a folder, or a layer list: is_layer_list), so its deletions also reach the base's files; for
+// a single mod folder the tree is the same as with the mod laid on first.
+bool make_layout(const std::string& host_dir, const std::string& base_dir, const std::string& mod_dir, Layout& L, std::string* err) {
+    Node root;
+    uint32_t mod_replaced = 0, mod_deleted = 0, mod_layers = 0;
+    if (!scan_root(host_dir, root, err)) return false;
     if (!base_dir.empty()) {
         Node base;
         std::string e;
@@ -353,6 +436,23 @@ bool make_layout(const std::string& host_dir, const std::string& base_dir, const
             if (err) *err = e;
             return false;
         }
+    }
+    if (!mod_dir.empty() && is_layer_list(mod_dir)) {
+        if (!apply_layer_list(mod_dir, root, mod_replaced, mod_deleted, mod_layers, err)) return false;
+    } else if (!mod_dir.empty()) {
+        Node mod;
+        std::string e;
+        if (!scan_root(mod_dir, mod, &e)) {
+            if (err) *err = "mod RomFS: " + e;
+            return false;
+        }
+        mark_mod(mod);
+        if (!overlay(mod, std::move(root), e, &mod_replaced, false)) {
+            if (err) *err = e;
+            return false;
+        }
+        root = std::move(mod);
+        mod_layers = 1;
     }
 
     std::vector<Node*> dirs{&root}, files;
@@ -489,6 +589,8 @@ bool make_layout(const std::string& host_dir, const std::string& base_dir, const
     L.stats.base_files = base_files;
     L.stats.mod_files = mod_files;
     L.stats.mod_replaced = mod_replaced;
+    L.stats.mod_deleted = mod_deleted;
+    L.stats.mod_layers = mod_layers;
     L.built = true;
     return true;
 }

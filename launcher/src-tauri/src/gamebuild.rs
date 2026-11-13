@@ -69,7 +69,8 @@ pub enum Built {
 
 /// The last check: (done.json path, its mtime and size, pkp.exe's mtime) -> result. The tools do not change while the
 /// launcher runs, and a finished build rewrites done.json, so one python run per finished build is enough.
-type CheckKey = (PathBuf, Option<std::time::SystemTime>, u64, Option<std::time::SystemTime>);
+// done.json (path, time, size), pkp's time, and the time of mods/.active/code.json (a code mod changed: mods.rs, pkp_build.py mods_code)
+type CheckKey = (PathBuf, Option<std::time::SystemTime>, u64, Option<std::time::SystemTime>, Option<std::time::SystemTime>);
 static CHECKED: std::sync::Mutex<Option<(CheckKey, Built)>> = std::sync::Mutex::new(None);
 
 /// Whether pkp.exe was built by this release's tools (`pkp_build.py --check`, the stamp's only implementation).
@@ -82,7 +83,8 @@ pub fn built_state(game_dir: &Path, tools_dir: &Path) -> Built {
     if !em.is_file() || !dm.is_file() {
         return Built::No;
     }
-    let key: CheckKey = (done.clone(), dm.modified().ok(), dm.len(), em.modified().ok());
+    let mods = fs::metadata(game_dir.join("mods").join(".active").join("code.json")).ok().and_then(|m| m.modified().ok());
+    let key: CheckKey = (done.clone(), dm.modified().ok(), dm.len(), em.modified().ok(), mods);
     if let Some((k, b)) = CHECKED.lock().unwrap().as_ref() {
         if *k == key {
             return *b;
