@@ -13,6 +13,6 @@ PokoMac contains or downloads third-party code under its own licences. The licen
 `recomp/THIRD_PARTY.md` and `tools/shaders/licenses/` in this repository, and in the `licenses/` folder of every release. They include
 Ryujinx (MIT), Mesa (MIT), pokopia-native (MIT), nxrecomp, smo-recomp, ScarletNX, ssbu-recomp and SuperMarioWonderRecomp, yuzu and Eden,
 libnx, SDL3 (zlib), astc-encoder and bc7enc_rdo (Apache-2.0), libvpx (BSD-3-Clause), ImGui (MIT), Vulkan Memory Allocator (MIT), volk (MIT),
-zstd (BSD), miniz (MIT), AMD FidelityFX and NVIDIA Image Scaling (MIT), Tauri (MIT / Apache-2.0), Zig (MIT), Python (PSF), the .NET runtime
+zstd (BSD), miniz (MIT), Lua (MIT), libopus (BSD-3-Clause), AMD FidelityFX and NVIDIA Image Scaling (MIT), Tauri (MIT / Apache-2.0), Zig (MIT), Python (PSF), the .NET runtime
 (MIT), the Khronos Vulkan loader (Apache-2.0), KosmicKrisp (MIT) and MoltenVK (Apache-2.0), Kenney input prompts (CC0), the DejaVu fonts,
 Inter (SIL OFL 1.1) and Lucide icons (ISC).

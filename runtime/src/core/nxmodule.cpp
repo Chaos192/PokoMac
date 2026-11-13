@@ -33,6 +33,7 @@ struct Entry {
     uint32_t abi = 0;                                 // the module's ABI version: 3 has no NxModule.entries (they are past its struct)
     std::unique_ptr<std::atomic<uint64_t>[]> cache;   // per DynSym: resolved target, 0 = not resolved yet
     size_t ncache = 0;
+    std::atomic<bool> retired{false};                 // nxmodule_unregister: lookups skip it (the entry itself stays for lock-free readers)
 };
 
 constexpr size_t kMaxListed = 64;
@@ -62,9 +63,12 @@ GaugeHook gauge_type_cache("core.type_cache", [] {   // resolved typeinfo slots 
 
 Entry* by_index(uint32_t index) { return index < kMaxModules ? g_by_index[index].load(std::memory_order_acquire) : nullptr; }
 
+bool live(const Entry* e) { return e && !e->retired.load(std::memory_order_acquire); }
+
 void invalidate_caches_locked() {
     for (size_t k = 0; k < g_count.load(); k++) {
         Entry* e = g_list[k].load();
+        if (!live(e)) continue;
         for (size_t i = 0; i < e->ncache; i++) e->cache[i].store(0, std::memory_order_relaxed);
     }
     std::lock_guard<std::mutex> lk(g_type_lock);
@@ -120,7 +124,7 @@ const char* validate_entries(const NxModule* nx) {
 uint64_t find_export(const char* name, const NxModule* except) {
     for (size_t k = 0, n = g_count.load(std::memory_order_acquire); k < n; k++) {
         Entry* e = g_list[k].load(std::memory_order_acquire);
-        if (e->nx == except) continue;
+        if (e->nx == except || !live(e)) continue;
         for (int i = 0; i < e->nx->nsyms; i++) {
             const DynSym& s = e->nx->syms[i];
             if (s.defined && s.name && std::strcmp(s.name, name) == 0) return nxmodule_symbol_address(e->nx, i);
@@ -162,6 +166,7 @@ RegResult nxmodule_register(Module* image, const NxModule* nx, uint32_t abi_vers
     std::lock_guard<std::mutex> lk(g_lock);
     if (by_index(nx->index)) return refuse(RegStatus::DuplicateIndex, nx, "module index %u is already registered (%s)", nx->index, g_by_index[nx->index].load()->nx->name);
     for (size_t k = 0; k < g_count.load(); k++) {
+        if (!live(g_list[k].load())) continue;
         const NxModule* o = g_list[k].load()->nx;
         if (nx->base < o->text_end && o->base < nx->text_end)
             return refuse(RegStatus::DuplicateRange, nx, "code range 0x%llx..0x%llx overlaps module %s", static_cast<unsigned long long>(nx->base),
@@ -199,6 +204,19 @@ RegResult nxmodule_register(Module* image, const NxModule* nx, uint32_t abi_vers
 
 size_t module_register_nxmodule(Module* m, const NxModule* nx) { return nxmodule_register(m, nx, NXRECOMP_ABI_VERSION).functions; }
 
+bool nxmodule_unregister(const NxModule* nx) {
+    std::lock_guard<std::mutex> lk(g_lock);
+    Entry* e = nx ? by_index(nx->index) : nullptr;
+    if (!e || e->nx != nx || !live(e)) return false;
+    for (int i = 0; i < nx->nfns; i++)
+        if (fn_lookup(nx->fns[i].addr) == nx->fns[i].fn) fn_unregister(nx->fns[i].addr);
+    e->retired.store(true, std::memory_order_release);
+    g_by_index[nx->index].store(nullptr, std::memory_order_release);
+    invalidate_caches_locked();
+    NXLOG_I("loader", "unregistered lifted module %s (index %u): its functions left the call table", nx->name, nx->index);
+    return true;
+}
+
 const NxModule* nxmodule_by_index(uint32_t index) {
     Entry* e = by_index(index);
     return e ? e->nx : nullptr;
@@ -219,7 +237,9 @@ const NxEntryFn* nxmodule_entry_table(const NxModule* nx, int* n) {
 
 const NxModule* nxmodule_by_name(const char* name) {
     for (size_t k = 0, n = g_count.load(std::memory_order_acquire); k < n; k++) {
-        const NxModule* nx = g_list[k].load(std::memory_order_acquire)->nx;
+        const Entry* e = g_list[k].load(std::memory_order_acquire);
+        if (!live(e)) continue;
+        const NxModule* nx = e->nx;
         if (nx->name && std::strcmp(nx->name, name) == 0) return nx;
     }
     return nullptr;
@@ -227,7 +247,9 @@ const NxModule* nxmodule_by_name(const char* name) {
 
 const NxModule* nxmodule_at(uint64_t addr) {
     for (size_t k = 0, n = g_count.load(std::memory_order_acquire); k < n; k++) {
-        const NxModule* nx = g_list[k].load(std::memory_order_acquire)->nx;
+        const Entry* e = g_list[k].load(std::memory_order_acquire);
+        if (!live(e)) continue;
+        const NxModule* nx = e->nx;
         if (addr - nx->base < nx->text_end - nx->base) return nx;
     }
     return nullptr;
@@ -235,7 +257,8 @@ const NxModule* nxmodule_at(uint64_t addr) {
 
 std::vector<const NxModule*> nxmodules() {
     std::vector<const NxModule*> v;
-    for (size_t k = 0, n = g_count.load(std::memory_order_acquire); k < n; k++) v.push_back(g_list[k].load(std::memory_order_acquire)->nx);
+    for (size_t k = 0, n = g_count.load(std::memory_order_acquire); k < n; k++)
+        if (const Entry* e = g_list[k].load(std::memory_order_acquire); live(e)) v.push_back(e->nx);
     return v;
 }
 
@@ -337,6 +360,6 @@ void module_override_definition(const char* sym) {
     g_def_overrides.insert(sym);
     const std::unordered_set<std::string> one{sym};
     for (size_t k = 0; k < g_count.load(); k++)                       // modules registered before
-        if (const Entry* e = g_list[k].load()) bind_definitions_locked(e->nx, &one);
+        if (const Entry* e = g_list[k].load(); live(e)) bind_definitions_locked(e->nx, &one);
 }
 }  // namespace nxrt

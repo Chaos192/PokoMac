@@ -1,289 +1,249 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Small Horizon services of the title's Service Access Control list (S3c): csrng, ldr:ro, mm:u, hwopus, aoc:u, caps:u, caps:su,
-// mii:u, irs, nfc:user, nfc:mf:u, nfp:user, ectx:aw, pcm, banana, htc, htc:tenv, htcs, olsc:u.
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
+// Small services (S3c): csrng, mm:u, hwopus, aoc:u, caps:u, mii:u / mii:e, irs, nfc:user, nfc:mf:u, nfp:user, olsc:u, ectx:aw, pcm,
+// banana, the TMA services (htc, htc:tenv, htcs), stpl:u (Switch 2 GameShare); and the registration of ldr:ro / ro:1 (ro.cpp), bt / btm:u
+// (bluetooth.cpp), npns (npns.cpp), pm:dmnt (pm.cpp) and caps:su (album.cpp).
+// A console with no IR camera, no NFC reader in use, no network, an empty album and no GameShare session. Command ids and layouts:
+// Switchbrew (https://switchbrew.org/wiki/Services_API and the pages of each service) and the facts Ryujinx (MIT) src/Ryujinx.HLE/HOS/Services
+// and src/Ryujinx.Horizon give (Spl, MmNv, Codec, Ns/Aoc, Caps, Mii, Hid/Irs, Nfc, Olsc, Ectx, Ptm/Pcm): ids, structs, result codes.
+// The default Miis' face values are Ryujinx's default table with the Switch's common colours (nxnative dm/host/hle_mii.c, MIT).
 //
-// Adapted from ScarletNX src/nx/hle/services/misc.swipc, ldr.swipc and misc.c (GPL-3.0-or-later): the command ids and argument
-// layouts of csrng, mm:u, aoc:u, irs, mii:u, nfc/nfp, ectx:aw and ldr:ro, and the no-device result constants.
-// Cross-checked against Switchbrew (https://switchbrew.org/wiki/Services_API and the per-service pages: RO services, SPL services,
-// Audio services (hwopus), Capture services, NFC services, TMA services, Error_codes), and Ryubing (MIT) src/Ryujinx.HLE/HOS/Services
-// (Ro/IRoInterface.cs, Spl/IRandomInterface.cs, Caps/*, Ectx/*, Ptm/Pcm/IManager.cs, Ns/Aoc/IAddOnContentManager.cs, Hid/Irs/
-// IIrSensorServer.cs, Mii/StaticService/IDatabaseService.cs, Nfc/*).
-//
-// Every command in a table has a handler: accepted-and-ignored (logged at Debug), an error result, or a real answer. No table command
-// falls through to kStubService. Two services have no table in the sources read, so their commands do fall through: pcm, and the IUser
-// that nfc:mf:u hands out. "banana" is a StubService by design.
-#include <atomic>
-#include <map>
+// Answers that differ from a console on purpose: an Opus decoder libopus cannot serve (44.1 kHz, 3-8 channels) is a silent one, so
+// opening never fails; the Mii database is empty and its default source has six Miis; conversions refuse (no converter here).
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+#include <bcrypt.h>
+#if defined(_WIN32)
+#pragma comment(lib, "bcrypt")
+#endif
+
 #include <algorithm>
-#include <cstdint>
+#include <array>
+#include <atomic>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "audio_opus.h"
 #include "nxrt/log.h"
+#include "nxrt/ro.h"
 #include "nxrt/tt.h"
 #include "services_internal.h"
-
-#include <windows.h>
-#include <bcrypt.h>
-
-#pragma comment(lib, "bcrypt")
 
 namespace nxrt::services {
 
 namespace {
 
-using ipc::Handler;
-using ipc::Request;
-using ipc::Response;
-using ipc::Service;
+const uint32_t kNotSupported = res(11, 1);
+const uint32_t kNfpNoDevice = res(115, 64);
+const uint32_t kNfcNoDevice = res(127, 64);
+const uint32_t kOlscNullArgument = res(179, 100);
+const uint32_t kOlscNotInitialized = res(179, 101);
+const uint32_t kMiiInvalidArgument = res(126, 1);
+const uint32_t kMiiNotFound = res(126, 4);
+const uint32_t kMiiInvalidCharInfo = res(126, 100);
+const uint32_t kAocNoPurchase = res(164, 400);
+const uint32_t kAocNotConnected = res(110, 300);
 
-// ---- result codes ---------------------------------------------------------------------------------------------------------------
-// ro NotLoaded (module 22, desc 1028 = 0x80816): Switchbrew Error_codes.
-constexpr uint32_t kRoNotLoaded = res(22, 1028);
-// Sf_Hipc NotSupported (module 11, desc 1 = 0x20B): Switchbrew Error_codes. Used where the real console's code is unknown.
-constexpr uint32_t kNotSupported = res(11, 1);
-// No device: ScarletNX misc.c NFP_DEVICE_NOT_FOUND / NFC_DEVICE_NOT_FOUND (modules 115 Nfp and 127 Nfc, names from Switchbrew). Not verified
-// against Switchbrew's listing, which stops before those modules.
-constexpr uint32_t kNfpNoDevice = res(115, 64);
-constexpr uint32_t kNfcNoDevice = res(127, 64);
-constexpr uint32_t kOlscNullArgument = res(179, 100);   // Ryubing Olsc/ResultCode.cs
-constexpr uint32_t kOlscNotInitialized = res(179, 101);
-// Mii: ScarletNX misc.c MII_NOT_FOUND / MII_INVALID_ARGUMENT (module 126 Mii). Not verified against Switchbrew.
-constexpr uint32_t kMiiNotFound = res(126, 4);
-constexpr uint32_t kMiiInvalidArgument = res(126, 1);
-// aoc: ScarletNX misc.c AOC_NO_PURCHASED_PRODUCT (module 164 = Ec, per Switchbrew) and AOC_NOT_CONNECTED (module 110 = Nifm).
-constexpr uint32_t kAocNoPurchase = res(164, 400);
-constexpr uint32_t kAocNotConnected = res(110, 300);
+using H = ipc::Handler;
 
-// Sizes
-constexpr uint64_t kCharInfoSize = 0x58;          // nn::mii::CharInfo (ScarletNX misc.swipc)
-constexpr uint64_t kAocBaseIdOffset = 0x1000;     // add-on content base id = application id + 0x1000
-constexpr uint32_t kOpusWorkBufferSize = 0x8000;  // fixed size reported by GetWorkBufferSize* (page aligned, as Switchbrew says)
-constexpr uint64_t kIrsSharedMemorySize = 0x1000; // size of the IR sensor shared memory handed out by GetIrsensorSharedMemoryHandle
-constexpr size_t kMmSlots = 16;                    // clock requests kept at once (ScarletNX misc.c keeps a fixed table too)
-
-// ---- helpers ---------------------------------------------------------------------------------------------------------------------
+// "Accepted and ignored": result 0, nothing written.
+H accept(const char* name) {
+    return [name](ipc::Request& req, ipc::Response&) -> uint32_t {
+        NXLOG_D("services", "%s (cmd %u) accepted and ignored", name, req.cmd);
+        return 0;
+    };
+}
+H refuse(const char* tag, const char* name, uint32_t result) {
+    return [tag, name, result](ipc::Request& req, ipc::Response&) -> uint32_t {
+        NXLOG_W(tag, "%s (cmd %u) answered with 0x%x", name, req.cmd, result);
+        return result;
+    };
+}
+template <class T>
+H answer(T v) {
+    return [v](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+        rsp.push<T>(v);
+        return 0;
+    };
+}
 void zero_buffer(const ipc::Buffer& b) {
     if (b.addr && b.size) std::memset(buf_mut(b), 0, static_cast<size_t>(b.size));
 }
 
-// A command that is accepted and ignored (logged at Debug).
-Handler accept(const char* tag, const char* what) {
-    return [tag, what](Request& req, Response&) -> uint32_t {
-        NXLOG_D(tag, "%s (cmd %u) accepted and ignored", what, req.cmd);
+// The events no device here ever signals (misc_reset clears them).
+struct Events {
+    ServiceEvent aoc_changed, aoc_purchased;
+    ServiceEvent nfc_avail, nfc_activate, nfc_deactivate;
+    ServiceEvent nfp_avail, nfp_activate, nfp_deactivate;
+    void clear_all() {
+        for (ServiceEvent* e : {&aoc_changed, &aoc_purchased, &nfc_avail, &nfc_activate, &nfc_deactivate, &nfp_avail, &nfp_activate, &nfp_deactivate})
+            e->clear();
+    }
+};
+Events& events() {
+    static Events e;
+    return e;
+}
+H event_handle(ServiceEvent& e) {
+    return [&e](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+        rsp.out_copy.push_back(e.new_handle());
         return 0;
     };
 }
 
-// A command that answers with an error result (logged at Warn).
-Handler refuse(uint32_t rc, const char* tag, const char* what) {
-    return [rc, tag, what](Request& req, Response&) -> uint32_t {
-        NXLOG_W(tag, "%s (cmd %u) answered with 0x%X", what, req.cmd, rc);
-        return rc;
-    };
-}
-
-// Events held for the process (signalled never: none of these services has an event to raise).
-struct MiscEvents {
-    ServiceEvent aoc_list_changed;
-    ServiceEvent aoc_purchased;
-    ServiceEvent nfc_available, nfc_activate, nfc_deactivate;
-    ServiceEvent nfp_available, nfp_activate, nfp_deactivate;
-};
-MiscEvents& events() {
-    static MiscEvents e;
-    return e;
-}
-
 // ---- csrng ----------------------------------------------------------------------------------------------------------------------
-// GenerateRandomBytes(buffer<u8, 6> data): fills the output buffer from the Windows CSPRNG.
-std::shared_ptr<Service> make_csrng() {
-    return make_iface("csrng", [](Service& s) {
-        s.add_cmd(0, "GenerateRandomBytes", [](Request& req, Response&) -> uint32_t {
+std::shared_ptr<ipc::Service> make_csrng() {
+    return make_iface("csrng", [](ipc::Service& s) {
+        s.add_cmd(0, "GenerateRandomBytes", [](ipc::Request& req, ipc::Response&) -> uint32_t {
             const ipc::Buffer b = req.out_buf(0);
-            uint64_t off = 0;
-            if (tt::deterministic()) {                       // test tooling: a seeded stream, so replays see the same random numbers
+            if (!b.addr || !b.size) return 0;
+            NXLOG_D("csrng", "GenerateRandomBytes(%llu)", static_cast<unsigned long long>(b.size));
+            if (tt::deterministic()) {   // one call over the whole buffer: the seeded stream's steps stay what a replay saw
                 tt::rng_fill(buf_mut(b), static_cast<size_t>(b.size));
                 return 0;
             }
-            while (off < b.size) {
-                const uint64_t n = std::min<uint64_t>(b.size - off, 0x10000000ull);
-                const NTSTATUS st = BCryptGenRandom(nullptr, buf_mut(b) + off, static_cast<ULONG>(n), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-                if (!BCRYPT_SUCCESS(st)) {
-                    NXLOG_E("csrng", "BCryptGenRandom failed: 0x%lX", static_cast<unsigned long>(st));
+            uint8_t* p = buf_mut(b);
+            for (uint64_t done = 0; done < b.size;) {
+                const ULONG n = static_cast<ULONG>(std::min<uint64_t>(b.size - done, 0x10000000ull));
+                if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, p + done, n, BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
+                    NXLOG_E("csrng", "the system random generator failed");
                     return kNotSupported;
                 }
-                off += n;
+                done += n;
             }
-            NXLOG_D("csrng", "GenerateRandomBytes: %llu bytes", static_cast<unsigned long long>(b.size));
             return 0;
         });
     });
 }
 
-// ---- ldr:ro -----------------------------------------------------------------------------------------------------------------------
-// The title loads no NRO. RegisterProcessHandle (cmd 4) is what the SDK sends first (the "Initialize" of nn::ro); the module-loading
-// commands answer NotLoaded.
-std::shared_ptr<Service> make_ro() {
-    return make_iface("IRoInterface", [](Service& s) {
-        s.add_cmd(0, "MapManualLoadModuleMemory", refuse(kRoNotLoaded, "ro", "MapManualLoadModuleMemory"));
-        s.add_cmd(1, "UnmapManualLoadModuleMemory", refuse(kRoNotLoaded, "ro", "UnmapManualLoadModuleMemory"));
-        s.add_cmd(2, "RegisterModuleInfo", refuse(kRoNotLoaded, "ro", "RegisterModuleInfo"));
-        s.add_cmd(3, "UnregisterModuleInfo", refuse(kRoNotLoaded, "ro", "UnregisterModuleInfo"));
-        s.add_cmd(4, "RegisterProcessHandle", accept("ro", "RegisterProcessHandle"));
-        s.add_cmd(10, "RegisterModuleInfoWithUserProcessHandle", refuse(kRoNotLoaded, "ro", "RegisterModuleInfoWithUserProcessHandle"));
-    });
-}
-
-// ---- mm:u -------------------------------------------------------------------------------------------------------------------------
-// Multimedia clock requests. The old forms (0 to 3) name the module; the new ones (4 to 7) return a request id. The rate is kept per
-// request and read back. Nothing is clocked here.
+// ---- mm:u -----------------------------------------------------------------------------------------------------------------------
+// Clock requests, remembered (nothing is clocked): the old forms are keyed by module, the new ones by the id Initialize hands out.
 struct MmSlot {
-    bool used = false;
-    bool by_module = false;   // the old forms key the slot by module, the new ones by request id
-    uint32_t key = 0;
-    uint32_t module = 0;
-    uint32_t current = 0;
+    bool used = false, old_form = false;
+    uint32_t key = 0, module = 0, rate = 0;
 };
-struct MmState {
+struct Mm {
     std::mutex mu;
     uint32_t next_id = 0;
-    MmSlot slots[kMmSlots];
+    std::array<MmSlot, 16> slots{};
 };
-MmState& mm_state() {
-    static MmState s;
-    return s;
+Mm& mm() {
+    static Mm m;
+    return m;
 }
-MmSlot* mm_find(MmState& s, bool by_module, uint32_t key) {
-    for (auto& sl : s.slots)
-        if (sl.used && sl.by_module == by_module && sl.key == key) return &sl;
+uint32_t mm_open(bool old_form, uint32_t module) {   // a new id, and a slot for it when one is free
+    Mm& m = mm();
+    std::lock_guard<std::mutex> lk(m.mu);
+    const uint32_t id = ++m.next_id;
+    for (MmSlot& s : m.slots)
+        if (!s.used) {
+            s = MmSlot{true, old_form, old_form ? module : id, module, 0};
+            NXLOG_D("mm", "request %u for module %u", id, module);
+            return id;
+        }
+    NXLOG_W("mm", "every clock request slot is in use: module %u is not kept", module);
+    return id;
+}
+MmSlot* mm_find(Mm& m, bool old_form, uint32_t key) {
+    for (MmSlot& s : m.slots)
+        if (s.used && s.old_form == old_form && s.key == key) return &s;
     return nullptr;
 }
-// Keeps a request. The client gets its id even when no slot is free (it then reads back 0), as ScarletNX does.
-uint32_t mm_open(uint32_t module, bool by_module, uint32_t module_for_id) {
-    MmState& s = mm_state();
-    std::lock_guard<std::mutex> g(s.mu);
-    const uint32_t id = ++s.next_id;
-    const uint32_t key = by_module ? module : id;
-    bool kept = false;
-    for (auto& sl : s.slots) {
-        if (sl.used) continue;
-        sl.used = true;
-        sl.by_module = by_module;
-        sl.key = key;
-        sl.module = by_module ? module : module_for_id;
-        sl.current = 0;
-        kept = true;
-        break;
-    }
-    if (!kept) NXLOG_W("mm", "more than %zu clock requests, request %u is not kept", kMmSlots, id);
-    return by_module ? 0 : id;
-}
-void mm_close(bool by_module, uint32_t key) {
-    MmState& s = mm_state();
-    std::lock_guard<std::mutex> g(s.mu);
-    if (MmSlot* sl = mm_find(s, by_module, key)) sl->used = false;
-}
-void mm_set(bool by_module, uint32_t key, uint32_t value) {
-    MmState& s = mm_state();
-    std::lock_guard<std::mutex> g(s.mu);
-    if (MmSlot* sl = mm_find(s, by_module, key)) sl->current = value;
-}
-uint32_t mm_get(bool by_module, uint32_t key) {
-    MmState& s = mm_state();
-    std::lock_guard<std::mutex> g(s.mu);
-    const MmSlot* sl = mm_find(s, by_module, key);
-    return sl ? sl->current : 0;
-}
-
-std::shared_ptr<Service> make_mm() {
-    return make_iface("mmnv::IRequest", [](Service& s) {
-        // Old forms: module at +0, then priority / min / max at +4 / +8.
-        s.add_cmd(0, "InitializeOld", [](Request& req, Response&) -> uint32_t {
-            mm_open(req.arg<uint32_t>(0), true, 0);
-            NXLOG_D("mm", "InitializeOld module %u", req.arg<uint32_t>(0));
+std::shared_ptr<ipc::Service> make_mm() {
+    return make_iface("mmnv::IRequest", [](ipc::Service& s) {
+        const auto fin = [](bool old_form) {
+            return [old_form](ipc::Request& req, ipc::Response&) -> uint32_t {
+                Mm& m = mm();
+                std::lock_guard<std::mutex> lk(m.mu);
+                if (MmSlot* p = mm_find(m, old_form, req.arg<uint32_t>(0))) *p = MmSlot{};
+                return 0;
+            };
+        };
+        const auto set = [](bool old_form) {
+            return [old_form](ipc::Request& req, ipc::Response&) -> uint32_t {
+                Mm& m = mm();
+                std::lock_guard<std::mutex> lk(m.mu);
+                if (MmSlot* p = mm_find(m, old_form, req.arg<uint32_t>(0))) p->rate = req.arg<uint32_t>(4);
+                return 0;
+            };
+        };
+        const auto get = [](bool old_form) {
+            return [old_form](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+                Mm& m = mm();
+                std::lock_guard<std::mutex> lk(m.mu);
+                const MmSlot* p = mm_find(m, old_form, req.arg<uint32_t>(0));
+                rsp.push<uint32_t>(p ? p->rate : 0);
+                return 0;
+            };
+        };
+        s.add_cmd(0, "InitializeOld", [](ipc::Request& req, ipc::Response&) -> uint32_t {
+            mm_open(true, req.arg<uint32_t>(0));
             return 0;
         });
-        s.add_cmd(1, "FinalizeOld", [](Request& req, Response&) -> uint32_t {
-            mm_close(true, req.arg<uint32_t>(0));
+        s.add_cmd(1, "FinalizeOld", fin(true));
+        s.add_cmd(2, "SetAndWaitOld", set(true));
+        s.add_cmd(3, "GetOld", get(true));
+        s.add_cmd(4, "Initialize", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            rsp.push<uint32_t>(mm_open(false, req.arg<uint32_t>(0)));
             return 0;
         });
-        s.add_cmd(2, "SetAndWaitOld", [](Request& req, Response&) -> uint32_t {
-            mm_set(true, req.arg<uint32_t>(0), req.arg<uint32_t>(4));
-            return 0;
-        });
-        s.add_cmd(3, "GetOld", [](Request& req, Response& rsp) -> uint32_t {
-            rsp.push<uint32_t>(mm_get(true, req.arg<uint32_t>(0)));
-            return 0;
-        });
-        // New forms: request id returned by Initialize, used by the rest.
-        s.add_cmd(4, "Initialize", [](Request& req, Response& rsp) -> uint32_t {
-            const uint32_t id = mm_open(req.arg<uint32_t>(0), false, req.arg<uint32_t>(0));
-            NXLOG_D("mm", "Initialize module %u -> request %u", req.arg<uint32_t>(0), id);
-            rsp.push<uint32_t>(id);
-            return 0;
-        });
-        s.add_cmd(5, "Finalize", [](Request& req, Response&) -> uint32_t {
-            mm_close(false, req.arg<uint32_t>(0));
-            return 0;
-        });
-        s.add_cmd(6, "SetAndWait", [](Request& req, Response&) -> uint32_t {
-            mm_set(false, req.arg<uint32_t>(0), req.arg<uint32_t>(4));
-            return 0;
-        });
-        s.add_cmd(7, "Get", [](Request& req, Response& rsp) -> uint32_t {
-            rsp.push<uint32_t>(mm_get(false, req.arg<uint32_t>(0)));
-            return 0;
-        });
+        s.add_cmd(5, "Finalize", fin(false));
+        s.add_cmd(6, "SetAndWait", set(false));
+        s.add_cmd(7, "Get", get(false));
     });
 }
 
-// ---- hwopus -----------------------------------------------------------------------------------------------------------------------
-// No Opus decoder on this host yet: the decoders open and "decode" to silence of the right length, so titles that need one (Mario Kart
-// World opens one at boot and aborts on a refusal) run with their Opus voices muted. The length comes from the packet's TOC byte
-// (RFC 6716 section 3.1). Input: Nintendo's 8-byte header (u32 big-endian payload size, u32 final range) then the Opus packet.
+// ---- hwopus ---------------------------------------------------------------------------------------------------------------------
+bool libopus_rate(uint32_t r) { return r == 8000 || r == 12000 || r == 16000 || r == 24000 || r == 48000; }
 
-// Samples per channel at `rate` of one Opus packet (0 when the header or TOC is unusable).
-uint32_t opus_packet_samples(const uint8_t* p, size_t n, uint32_t rate) {
-    if (n < 1) return 0;
-    const uint32_t config = p[0] >> 3;
-    // frame duration in units of 1/400 s (2.5 ms)
-    static const uint32_t kSilk[4] = {4, 8, 16, 24}, kHybrid[2] = {4, 8}, kCelt[4] = {1, 2, 4, 8};
-    const uint32_t q = config < 12 ? kSilk[config & 3] : config < 16 ? kHybrid[config & 1] : kCelt[config & 3];
-    uint32_t frames = 1;
-    switch (p[0] & 3) {
+uint32_t be32(const uint8_t* p) { return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3]; }
+
+// Samples per channel an Opus packet decodes to (RFC 6716 section 3.1: the TOC byte), at `rate`.
+uint32_t packet_samples(const uint8_t* pkt, uint32_t size, uint32_t rate) {
+    if (size < 1) return 0;
+    const uint32_t toc = pkt[0], config = toc >> 3;
+    static const uint32_t silk[4] = {4, 8, 16, 24}, hybrid[2] = {4, 8}, celt[4] = {1, 2, 4, 8};   // in 2.5 ms units
+    const uint32_t len = config < 12 ? silk[config & 3] : config < 16 ? hybrid[config & 1] : celt[config & 3];
+    uint32_t frames;
+    switch (toc & 3) {
         case 0: frames = 1; break;
-        case 1: case 2: frames = 2; break;
-        default: if (n < 2) return 0; frames = p[1] & 0x3f; break;
+        case 1:
+        case 2: frames = 2; break;
+        default:
+            if (size < 2) return 0;
+            frames = pkt[1] & 0x3F;
+            break;
     }
-    return frames * q * rate / 400;
+    return frames * len * rate / 400;
 }
 
-std::shared_ptr<Service> make_hwopus_decoder(uint32_t rate, uint32_t channels) {
-    if (rate == 0) rate = 48000;
-    if (channels == 0 || channels > 8) channels = 2;
-    return make_iface("IHardwareOpusDecoder", [rate, channels](Service& s) {
-        // Decode*: consumed bytes, samples per channel [, performance time]; the PCM (s16 interleaved) is zero.
-        auto decode = [rate, channels](bool perf) -> Handler {
-            return [rate, channels, perf](Request& req, Response& rsp) -> uint32_t {
+// A decoder for what libopus cannot decode here: it answers each packet's size and length with silence.
+std::shared_ptr<ipc::Service> make_silent_decoder(uint32_t rate, uint32_t channels) {
+    return make_iface("IHardwareOpusDecoder", [rate, channels](ipc::Service& s) {
+        const auto decode = [rate, channels](bool perf) {
+            return [rate, channels, perf](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
                 const ipc::Buffer in = req.in_buf(0), out = req.out_buf(0);
-                const uint8_t* src = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(in.addr));
                 uint32_t consumed = 0, samples = 0;
-                if (src && in.size >= 8) {
-                    const uint32_t size = (uint32_t(src[0]) << 24) | (uint32_t(src[1]) << 16) | (uint32_t(src[2]) << 8) | src[3];
+                if (in.addr && in.size >= 8) {
+                    const uint8_t* p = buf_ptr(in);
+                    const uint32_t size = be32(p);
                     if (size <= in.size - 8) {
                         consumed = 8 + size;
-                        samples = opus_packet_samples(src + 8, size, rate);
+                        samples = packet_samples(p + 8, size, rate);
                     }
                 }
-                if (out.addr && out.size) {
-                    const uint64_t bytes = std::min<uint64_t>(out.size, uint64_t(samples) * channels * 2);
-                    samples = static_cast<uint32_t>(bytes / (channels * 2));
-                    std::memset(reinterpret_cast<void*>(static_cast<uintptr_t>(out.addr)), 0, static_cast<size_t>(out.size));
+                if (out.addr && out.size > 0) {
+                    const uint64_t frame = static_cast<uint64_t>(channels) * 2;
+                    const uint64_t bytes = std::min<uint64_t>(out.size, static_cast<uint64_t>(samples) * frame);
+                    samples = static_cast<uint32_t>(bytes / frame);
+                    zero_buffer(out);
                 }
                 rsp.push<uint32_t>(consumed);
                 rsp.push<uint32_t>(samples);
@@ -292,9 +252,9 @@ std::shared_ptr<Service> make_hwopus_decoder(uint32_t rate, uint32_t channels) {
             };
         };
         s.add_cmd(0, "DecodeInterleavedOld", decode(false));
-        s.add_cmd(1, "SetContext", [](Request&, Response&) -> uint32_t { return 0; });
+        s.add_cmd(1, "SetContext", [](ipc::Request&, ipc::Response&) -> uint32_t { return 0; });
         s.add_cmd(2, "DecodeInterleavedForMultiStreamOld", decode(false));
-        s.add_cmd(3, "SetContextForMultiStream", [](Request&, Response&) -> uint32_t { return 0; });
+        s.add_cmd(3, "SetContextForMultiStream", [](ipc::Request&, ipc::Response&) -> uint32_t { return 0; });
         s.add_cmd(4, "DecodeInterleavedWithPerfOld", decode(true));
         s.add_cmd(5, "DecodeInterleavedForMultiStreamWithPerfOld", decode(true));
         s.add_cmd(6, "DecodeInterleavedWithPerfAndResetOld", decode(true));
@@ -304,696 +264,662 @@ std::shared_ptr<Service> make_hwopus_decoder(uint32_t rate, uint32_t channels) {
     });
 }
 
-std::shared_ptr<Service> make_hwopus() {
-    return make_iface("IHardwareOpusDecoderManager", [](Service& s) {
-        // Open*(params..., work buffer size, transfer memory): a silent decoder. Raw arguments of the old forms are
-        // {s32 sample rate, s32 channels, u32 work size}; the Ex forms pass OpusParametersEx {sample rate, channels, ...} in a buffer.
-        auto open = [](bool ex) -> Handler {
-            return [ex](Request& req, Response& rsp) -> uint32_t {
-                uint32_t rate = 0, ch = 0;
-                if (ex) {
-                    const ipc::Buffer b = req.in_buf(0);
-                    if (b.addr && b.size >= 8) {
-                        std::memcpy(&rate, reinterpret_cast<const void*>(static_cast<uintptr_t>(b.addr)), 4);
-                        std::memcpy(&ch, reinterpret_cast<const void*>(static_cast<uintptr_t>(b.addr + 4)), 4);
-                    }
-                } else {
-                    rate = req.arg<uint32_t>(0);
-                    ch = req.arg<uint32_t>(4);
-                }
-                static std::atomic<int> logs{0};
-                if (logs.fetch_add(1) < 4)
-                    NXLOG_I("hwopus", "Opus decoder opened (cmd %u, %u Hz, %u channels): no Opus decoder here, it decodes silence", req.cmd, rate, ch);
-                rsp.push_object(make_hwopus_decoder(rate, ch));
-                return 0;
-            };
-        };
-        s.add_cmd(0, "OpenHardwareOpusDecoder", open(false));
-        s.add_cmd(2, "OpenHardwareOpusDecoderForMultiStream", refuse(kNotSupported, "hwopus", "OpenHardwareOpusDecoderForMultiStream"));
-        s.add_cmd(4, "OpenHardwareOpusDecoderEx", open(true));
-        s.add_cmd(6, "OpenHardwareOpusDecoderForMultiStreamEx", refuse(kNotSupported, "hwopus", "OpenHardwareOpusDecoderForMultiStreamEx"));
-        const Handler size = [](Request& req, Response& rsp) -> uint32_t {
-            NXLOG_I("hwopus", "game asked for the Opus work buffer size (cmd %u); reporting %u", req.cmd, kOpusWorkBufferSize);
-            rsp.push<uint32_t>(kOpusWorkBufferSize);
-            return 0;
-        };
-        s.add_cmd(1, "GetWorkBufferSize", size);
-        s.add_cmd(3, "GetWorkBufferSizeForMultiStream", size);
-        s.add_cmd(5, "GetWorkBufferSizeEx", size);
-        s.add_cmd(7, "GetWorkBufferSizeForMultiStreamEx", size);
-        s.add_cmd(8, "GetWorkBufferSizeExEx", size);
-        s.add_cmd(9, "GetWorkBufferSizeForMultiStreamExEx", size);
-    });
-}
+std::atomic<int> g_single_opens{0}, g_multi_opens{0};
 
-// ---- aoc:u ------------------------------------------------------------------------------------------------------------------------
-// The add-on content (DLC) of [fs] aoc_dir is installed (add_on_contents(), services.h); without it, none. The base id of the title's
-// add-on content is its program id + 0x1000, an add-on's index its id minus that. fsp-srv OpenDataStorageByDataId serves their RomFS.
-// List*: ListAddOnContent (u32 offset, u32 count, pid placeholder), ListAddOnContentByApplicationId (u64 application id, u32
-// offset, u32 count; [1.0.0-6.2.0]) -> u32 written, the indices in a u32 array (Switchbrew aoc:u, Ryujinx IAddOnContentManager).
-// `at`: the byte offset of the u32 offset argument (0 or 8).
-uint32_t aoc_list(Request& req, Response& rsp, size_t at, bool this_title, const char* what) {
-    const ipc::Buffer b = req.out_buf(0);
-    zero_buffer(b);
-    const auto& list = add_on_contents();
-    const uint32_t offset = req.arg<uint32_t>(at), count = req.arg<uint32_t>(at + 4);
-    const uint64_t room = b.addr ? b.size / sizeof(uint32_t) : 0;
-    const uint64_t want = std::min<uint64_t>(count, room);
-    uint32_t n = 0;
-    for (size_t i = offset; this_title && i < list.size() && n < want; ++i, ++n)
-        std::memcpy(buf_mut(b) + n * sizeof(uint32_t), &list[i].index, sizeof(uint32_t));
-    rsp.push<uint32_t>(n);
-    NXLOG_I("aoc", "%s(offset %u, count %u): %u of %zu add-ons", what, offset, count, n, this_title ? list.size() : size_t{0});
+uint32_t open_single(ipc::Request& req, ipc::Response& rsp) {
+    const uint32_t asked_rate = req.arg<uint32_t>(0), asked_channels = req.arg<uint32_t>(4);
+    if (g_single_opens.fetch_add(1) < 4)
+        NXLOG_I("hwopus", "cmd %u: open a decoder for %u Hz, %u channels", req.cmd, asked_rate, asked_channels);
+    const uint32_t rate = asked_rate ? asked_rate : 48000;
+    const uint32_t channels = asked_channels == 0 || asked_channels > 8 ? 2 : asked_channels;
+    if (opus::available() && channels <= 2 && libopus_rate(rate)) {
+        opus::Config c;
+        c.kind = opus::Kind::Opus;
+        c.rate = rate;
+        c.channels = channels;
+        c.streams = 1;
+        c.coupled = 0;
+        c.frame_samples = rate / 1000 * 120;
+        rsp.push_object(opus::make_decoder_object(c));
+    } else {
+        rsp.push_object(make_silent_decoder(rate, channels));
+    }
     return 0;
 }
 
-std::shared_ptr<Service> make_purchase_manager() {
-    return make_iface("IPurchaseEventManager", [](Service& s) {
-        s.add_cmd(2, "GetPurchasedEventReadableHandle", [](Request&, Response& rsp) -> uint32_t {
-            rsp.out_copy.push_back(events().aoc_purchased.new_handle());
-            return 0;
-        });
-        s.add_cmd(3, "PopPurchasedProductInfo", refuse(kAocNoPurchase, "aoc", "PopPurchasedProductInfo"));
-        s.add_cmd(4, "PopPurchasedProductInfoWithUid", refuse(kAocNoPurchase, "aoc", "PopPurchasedProductInfoWithUid"));
-    });
+uint32_t open_multistream(ipc::Request& req, ipc::Response& rsp, uint64_t need, uint64_t mapping_at) {
+    const ipc::Buffer b = req.in_buf(0);
+    if (!b.addr || b.size < need) return opus::kResBadArg;
+    const uint8_t* p = buf_ptr(b);
+    uint32_t rate, channels, streams, coupled;
+    std::memcpy(&rate, p, 4);
+    std::memcpy(&channels, p + 4, 4);
+    std::memcpy(&streams, p + 8, 4);
+    std::memcpy(&coupled, p + 12, 4);
+    if (!libopus_rate(rate)) return opus::kResInvalidRate;
+    if (channels == 0 || channels > 255) return opus::kResInvalidChannels;
+    if (streams == 0 || coupled > streams || streams + coupled > 255) return opus::kResBadArg;
+    for (uint32_t i = 0; i < channels; ++i) {
+        const uint8_t m = p[mapping_at + i];
+        if (m != 255 && m >= streams + coupled) return opus::kResBadArg;
+    }
+    if (g_multi_opens.fetch_add(1) < 4)
+        NXLOG_I("hwopus", "cmd %u: open a multistream decoder for %u Hz, %u channels, %u streams, %u stereo", req.cmd, rate, channels, streams,
+                coupled);
+    if (!opus::available()) return opus::kResUnimplemented;
+    opus::Config c;
+    c.kind = opus::Kind::Multistream;
+    c.rate = rate;
+    c.channels = channels;
+    c.streams = streams;
+    c.coupled = coupled;
+    c.frame_samples = rate / 1000 * 120;
+    std::memcpy(c.mapping.data(), p + mapping_at, c.mapping.size());
+    rsp.push_object(opus::make_decoder_object(c));
+    return 0;
 }
-std::shared_ptr<Service> make_contents_manager() {
-    return make_iface("IContentsServiceManager", [](Service& s) {
-        // The authorization token comes from the network, which this console does not have.
-        s.add_cmd(0, "RequestContentsAuthorizationToken", refuse(kAocNotConnected, "aoc", "RequestContentsAuthorizationToken"));
-    });
-}
-std::shared_ptr<Service> make_aoc() {
-    return make_iface("IAddOnContentManager", [](Service& s) {
-        // Count and list answer the add-ons of [fs] aoc_dir (the ByApplicationId forms only for this title).
-        s.add_cmd(0, "CountAddOnContentByApplicationId", [](Request& req, Response& rsp) -> uint32_t {
-            const bool ours = req.arg<uint64_t>(0) == profile().program_id;
-            const auto n = static_cast<int32_t>(ours ? add_on_contents().size() : 0);
-            rsp.push<int32_t>(n);
-            NXLOG_I("aoc", "CountAddOnContentByApplicationId(0x%016llX): %d", static_cast<unsigned long long>(req.arg<uint64_t>(0)), n);
-            return 0;
-        });
-        s.add_cmd(1, "ListAddOnContentByApplicationId", [](Request& req, Response& rsp) -> uint32_t {
-            return aoc_list(req, rsp, 8, req.arg<uint64_t>(0) == profile().program_id, "ListAddOnContentByApplicationId");
-        });
-        s.add_cmd(2, "CountAddOnContent", [](Request&, Response& rsp) -> uint32_t {
-            const auto n = static_cast<int32_t>(add_on_contents().size());
-            rsp.push<int32_t>(n);
-            NXLOG_I("aoc", "CountAddOnContent: %d", n);
-            return 0;
-        });
-        s.add_cmd(3, "ListAddOnContent", [](Request& req, Response& rsp) -> uint32_t {
-            return aoc_list(req, rsp, 0, true, "ListAddOnContent");
-        });
-        s.add_cmd(4, "GetAddOnContentBaseIdByApplicationId", [](Request& req, Response& rsp) -> uint32_t {
-            rsp.push<uint64_t>(req.arg<uint64_t>(0) + kAocBaseIdOffset);
-            return 0;
-        });
-        s.add_cmd(5, "GetAddOnContentBaseId", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push<uint64_t>(profile().program_id + kAocBaseIdOffset);
-            NXLOG_I("aoc", "GetAddOnContentBaseId: 0x%016llX", static_cast<unsigned long long>(profile().program_id + kAocBaseIdOffset));
-            return 0;
-        });
-        s.add_cmd(6, "PrepareAddOnContentByApplicationId", accept("aoc", "PrepareAddOnContentByApplicationId"));
-        s.add_cmd(7, "PrepareAddOnContent", accept("aoc", "PrepareAddOnContent"));
-        const Handler list_event = [](Request&, Response& rsp) -> uint32_t {
-            rsp.out_copy.push_back(events().aoc_list_changed.new_handle());
+
+std::shared_ptr<ipc::Service> make_hwopus() {
+    return make_iface("IHardwareOpusDecoderManager", [](ipc::Service& s) {
+        const auto work = [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            NXLOG_I("hwopus", "cmd %u: work buffer of 0x8000 bytes", req.cmd);
+            rsp.push<uint32_t>(0x8000);
             return 0;
         };
-        s.add_cmd(8, "GetAddOnContentListChangedEvent", list_event);
-        s.add_cmd(9, "GetAddOnContentLostErrorCode", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push<uint64_t>(0);   // no add-on content was lost
+        s.add_cmd(0, "OpenHardwareOpusDecoder", open_single);
+        s.add_cmd(1, "GetWorkBufferSize", work);
+        s.add_cmd(2, "OpenHardwareOpusDecoderForMultiStream",
+                  [](ipc::Request& req, ipc::Response& rsp) -> uint32_t { return open_multistream(req, rsp, 0x110, 0x10); });
+        s.add_cmd(3, "GetWorkBufferSizeForMultiStream", work);
+        s.add_cmd(4, "OpenHardwareOpusDecoderEx", open_single);   // OpusParametersEx in the raw data, not a buffer
+        s.add_cmd(5, "GetWorkBufferSizeEx", work);
+        s.add_cmd(6, "OpenHardwareOpusDecoderForMultiStreamEx",
+                  [](ipc::Request& req, ipc::Response& rsp) -> uint32_t { return open_multistream(req, rsp, 0x118, 0x18); });
+        s.add_cmd(7, "GetWorkBufferSizeForMultiStreamEx", work);
+        s.add_cmd(8, "GetWorkBufferSizeExEx", work);
+        s.add_cmd(9, "GetWorkBufferSizeForMultiStreamExEx", work);
+    });
+}
+
+// ---- aoc:u ----------------------------------------------------------------------------------------------------------------------
+uint64_t app_id() { return profile().application_id; }
+
+// ListAddOnContent*: the indices from list position `offset`, as many as `count` and the buffer allow.
+uint32_t list_add_ons(const ipc::Buffer& b, uint32_t offset, uint32_t count, bool this_title) {
+    zero_buffer(b);
+    const uint64_t room = b.addr ? b.size / 4 : 0;
+    const uint64_t want = std::min<uint64_t>(count, room);
+    if (!this_title) return 0;
+    const std::vector<AddOnContent>& list = add_on_contents();
+    uint32_t n = 0;
+    for (uint64_t i = offset; i < list.size() && n < want; ++i, ++n) {
+        const uint32_t index = static_cast<uint32_t>(list[i].index);
+        std::memcpy(buf_mut(b) + 4 * n, &index, 4);
+    }
+    return n;
+}
+
+std::shared_ptr<ipc::Service> make_purchase_manager() {
+    return make_iface("IPurchaseEventManager", [](ipc::Service& s) {
+        s.add_cmd(2, "GetPurchasedEventReadableHandle", event_handle(events().aoc_purchased));
+        s.add_cmd(3, "PopPurchasedProductInfo", refuse("aoc", "PopPurchasedProductInfo", kAocNoPurchase));
+        s.add_cmd(4, "PopPurchasedProductInfoWithUid", refuse("aoc", "PopPurchasedProductInfoWithUid", kAocNoPurchase));
+    });
+}
+
+std::shared_ptr<ipc::Service> make_aoc() {
+    return make_iface("IAddOnContentManager", [](ipc::Service& s) {
+        s.add_cmd(0, "CountAddOnContentByApplicationId", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            const uint64_t id = req.arg<uint64_t>(0);
+            const int32_t n = id == app_id() ? static_cast<int32_t>(add_on_contents().size()) : 0;
+            NXLOG_I("aoc", "CountAddOnContentByApplicationId(%016llx) = %d", static_cast<unsigned long long>(id), n);
+            rsp.push<int32_t>(n);
             return 0;
         });
-        s.add_cmd(10, "GetAddOnContentListChangedEventWithProcessId", list_event);
-        s.add_cmd(11, "NotifyMountAddOnContent", accept("aoc", "NotifyMountAddOnContent"));
-        s.add_cmd(12, "NotifyUnmountAddOnContent", accept("aoc", "NotifyUnmountAddOnContent"));
-        s.add_cmd(13, "IsAddOnContentMountedForDebug", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push<uint8_t>(0);
+        s.add_cmd(1, "ListAddOnContentByApplicationId", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            const uint64_t id = req.arg<uint64_t>(0);
+            const uint32_t n = list_add_ons(req.out_buf(0), req.arg<uint32_t>(8), req.arg<uint32_t>(12), id == app_id());
+            NXLOG_I("aoc", "ListAddOnContentByApplicationId(%016llx) = %u", static_cast<unsigned long long>(id), n);
+            rsp.push<uint32_t>(n);
             return 0;
         });
-        s.add_cmd(50, "CheckAddOnContentMountStatus", accept("aoc", "CheckAddOnContentMountStatus"));
-        const Handler purchase = [](Request&, Response& rsp) -> uint32_t {
+        s.add_cmd(2, "CountAddOnContent", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            const int32_t n = static_cast<int32_t>(add_on_contents().size());
+            NXLOG_I("aoc", "CountAddOnContent = %d", n);
+            rsp.push<int32_t>(n);
+            return 0;
+        });
+        s.add_cmd(3, "ListAddOnContent", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            const uint32_t n = list_add_ons(req.out_buf(0), req.arg<uint32_t>(0), req.arg<uint32_t>(4), true);
+            NXLOG_I("aoc", "ListAddOnContent = %u", n);
+            rsp.push<uint32_t>(n);
+            return 0;
+        });
+        s.add_cmd(4, "GetAddOnContentBaseIdByApplicationId", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            rsp.push<uint64_t>(req.arg<uint64_t>(0) + 0x1000);
+            return 0;
+        });
+        s.add_cmd(5, "GetAddOnContentBaseId", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            NXLOG_I("aoc", "GetAddOnContentBaseId = %016llx", static_cast<unsigned long long>(app_id() + 0x1000));
+            rsp.push<uint64_t>(app_id() + 0x1000);
+            return 0;
+        });
+        s.add_cmd(6, "PrepareAddOnContentByApplicationId", accept("PrepareAddOnContentByApplicationId"));
+        s.add_cmd(7, "PrepareAddOnContent", accept("PrepareAddOnContent"));
+        s.add_cmd(8, "GetAddOnContentListChangedEvent", event_handle(events().aoc_changed));
+        s.add_cmd(9, "GetAddOnContentLostErrorCode", answer<uint64_t>(0));
+        s.add_cmd(10, "GetAddOnContentListChangedEventWithProcessId", event_handle(events().aoc_changed));
+        s.add_cmd(11, "NotifyMountAddOnContent", accept("NotifyMountAddOnContent"));
+        s.add_cmd(12, "NotifyUnmountAddOnContent", accept("NotifyUnmountAddOnContent"));
+        s.add_cmd(13, "IsAddOnContentMountedForDebug", answer<uint8_t>(0));
+        s.add_cmd(50, "CheckAddOnContentMountStatus", accept("CheckAddOnContentMountStatus"));
+        const auto purchase = [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
             rsp.push_object(make_purchase_manager());
             return 0;
         };
         s.add_cmd(100, "CreateEcPurchasedEventManager", purchase);
         s.add_cmd(101, "CreatePermanentEcPurchasedEventManager", purchase);
-        s.add_cmd(110, "CreateContentsServiceManager", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push_object(make_contents_manager());
+        s.add_cmd(110, "CreateContentsServiceManager", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.push_object(make_iface("IContentsServiceManager", [](ipc::Service& c) {
+                c.add_cmd(0, "RequestContentsAuthorizationToken", refuse("aoc", "RequestContentsAuthorizationToken", kAocNotConnected));
+            }));
             return 0;
         });
         s.add_cmd(200, "SetRequiredAddOnContentsOnContentsAvailabilityTransition",
-                  accept("aoc", "SetRequiredAddOnContentsOnContentsAvailabilityTransition"));
+                  accept("SetRequiredAddOnContentsOnContentsAvailabilityTransition"));
     });
 }
 
-// ---- caps:u (caps:su is in album.cpp) --------------------------------------------------------------------------------------------
-// Album reading: lists are empty (Pokopia main imports no album list or load function, only nn::album::SaveScreenshot).
-Handler album_list() {
-    return [](Request& req, Response& rsp) -> uint32_t {
-        zero_buffer(req.out_buf(0));
-        rsp.push<uint64_t>(0);
+// ---- caps:u ---------------------------------------------------------------------------------------------------------------------
+std::shared_ptr<ipc::Service> make_caps() {
+    return make_iface("IAlbumApplicationService", [](ipc::Service& s) {
+        const auto empty_list = [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            zero_buffer(req.out_buf(0));
+            rsp.push<uint64_t>(0);
+            return 0;
+        };
+        s.add_cmd(32, "SetShimLibraryVersion", accept("SetShimLibraryVersion"));
+        s.add_cmd(102, "GetAlbumFileList0AafeAruidDeprecated", empty_list);
+        s.add_cmd(103, "DeleteAlbumFileByAruid", accept("DeleteAlbumFileByAruid"));
+        s.add_cmd(104, "GetAlbumFileSizeByAruid", answer<uint64_t>(0));
+        s.add_cmd(105, "DeleteAlbumFileByAruidForDebug", accept("DeleteAlbumFileByAruidForDebug"));
+        s.add_cmd(110, "LoadAlbumScreenShotImageByAruid", accept("LoadAlbumScreenShotImageByAruid"));
+        s.add_cmd(120, "LoadAlbumScreenShotThumbnailImageByAruid", accept("LoadAlbumScreenShotThumbnailImageByAruid"));
+        s.add_cmd(130, "PrecheckToCreateContentsByAruid", accept("PrecheckToCreateContentsByAruid"));
+        s.add_cmd(140, "GetAlbumFileList1AafeAruidDeprecated", empty_list);
+        s.add_cmd(141, "GetAlbumFileList2AafeUidAruidDeprecated", empty_list);
+        s.add_cmd(142, "GetAlbumFileList3AaeAruidDeprecated", empty_list);
+    });
+}
+
+// ---- mii ------------------------------------------------------------------------------------------------------------------------
+constexpr size_t kCharInfo = 0x58, kCharInfoElement = 0x5C, kStoreData = 0x44, kDefaultMiis = 6;
+
+// nn::mii::CharInfo of default Mii k (k < 6), or the BuildRandom form (random create id, colour 0, the given gender).
+std::array<uint8_t, kCharInfo> char_info(int k, bool random, uint32_t gender) {
+    std::array<uint8_t, kCharInfo> c{};
+    if (random) {
+        BCryptGenRandom(nullptr, c.data(), 16, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    } else {
+        const uint64_t a = 0x4D49494E44454641ull + static_cast<uint64_t>(k), b = 0x554C54444D484F53ull;
+        std::memcpy(c.data(), &a, 8);
+        std::memcpy(c.data() + 8, &b, 8);
+    }
+    c[6] = static_cast<uint8_t>((c[6] & 0x0F) | 0x40);   // a version-4 UUID
+    c[8] = static_cast<uint8_t>((c[8] & 0x3F) | 0x80);
+    const char* nick = "no name";
+    for (size_t i = 0; nick[i]; ++i) c[0x10 + 2 * i] = static_cast<uint8_t>(nick[i]);
+    c[0x27] = random ? 0 : static_cast<uint8_t>(2 * k);                  // favourite colour
+    c[0x28] = random ? (gender == 1 ? 1 : 0) : (k >= 3 ? 1 : 0);        // gender
+    static const uint8_t face[] = {
+        64, 64, 0, 0, 0, 0, 0, 0,                     // 0x29 height, build, type, region move, faceline type / colour / wrinkle / make
+        33, 1, 0,                                     // 0x31 hair type, colour, flip
+        2, 8, 4, 3, 4, 2, 12,                         // 0x34 eye type, colour, scale, aspect, rotate, x, y
+        6, 1, 4, 3, 6, 2, 10,                         // 0x3B eyebrow type, colour, scale, aspect, rotate, x, y
+        1, 4, 9,                                      // 0x42 nose type, scale, y
+        23, 19, 4, 3, 13,                             // 0x45 mouth type, colour, scale, aspect, y
+        8, 0, 0, 4, 10,                               // 0x4A beard colour, beard type, mustache type, scale, y
+        0, 8, 4, 10,                                  // 0x4F glass type, colour, scale, y
+        0, 4, 2, 20,                                  // 0x53 mole type, scale, x, y
+    };
+    std::memcpy(c.data() + 0x29, face, sizeof face);
+    return c;
+}
+
+// Get / Get1: the default source's Miis (flag bit 1), as many whole elements as fit.
+uint32_t write_miis(const ipc::Request& req, size_t stride) {
+    const ipc::Buffer b = req.out_buf(0);
+    zero_buffer(b);
+    if (!(req.arg<uint32_t>(0) & 2) || !b.addr) return 0;
+    const uint32_t n = static_cast<uint32_t>(std::min<uint64_t>(kDefaultMiis, b.size / stride));
+    for (uint32_t k = 0; k < n; ++k) {
+        const auto c = char_info(static_cast<int>(k), false, 0);
+        std::memcpy(buf_mut(b) + k * stride, c.data(), c.size());
+        if (stride == kCharInfoElement) {
+            const uint32_t source = 1;   // Default
+            std::memcpy(buf_mut(b) + k * stride + kCharInfo, &source, 4);
+        }
+    }
+    return n;
+}
+
+H echo(size_t n) {   // the first n raw bytes as they came, or n zeros when fewer came
+    return [n](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+        std::vector<uint8_t> v(n, 0);
+        if (req.in_size >= n) std::memcpy(v.data(), req.in, n);
+        rsp.out.insert(rsp.out.end(), v.begin(), v.end());
         return 0;
     };
 }
-std::shared_ptr<Service> make_album_app() {
-    return make_iface("IAlbumApplicationService", [](Service& s) {
-        s.add_cmd(32, "SetShimLibraryVersion", accept("caps", "SetShimLibraryVersion"));
-        s.add_cmd(102, "GetAlbumFileList0AafeAruidDeprecated", album_list());
-        s.add_cmd(103, "DeleteAlbumFileByAruid", accept("caps", "DeleteAlbumFileByAruid"));
-        s.add_cmd(104, "GetAlbumFileSizeByAruid", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push<uint64_t>(0);
+
+std::shared_ptr<ipc::Service> make_mii_database() {
+    return make_iface("IDatabaseService", [](ipc::Service& s) {
+        s.add_cmd(0, "IsUpdated", answer<uint8_t>(0));
+        s.add_cmd(1, "IsFullDatabase", answer<uint8_t>(0));
+        s.add_cmd(2, "GetCount", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            rsp.push<int32_t>(req.arg<uint32_t>(0) & 2 ? static_cast<int32_t>(kDefaultMiis) : 0);
             return 0;
         });
-        s.add_cmd(105, "DeleteAlbumFileByAruidForDebug", accept("caps", "DeleteAlbumFileByAruidForDebug"));
-        s.add_cmd(110, "LoadAlbumScreenShotImageByAruid", accept("caps", "LoadAlbumScreenShotImageByAruid"));
-        s.add_cmd(120, "LoadAlbumScreenShotThumbnailImageByAruid", accept("caps", "LoadAlbumScreenShotThumbnailImageByAruid"));
-        s.add_cmd(130, "PrecheckToCreateContentsByAruid", accept("caps", "PrecheckToCreateContentsByAruid"));
-        s.add_cmd(140, "GetAlbumFileList1AafeAruidDeprecated", album_list());
-        s.add_cmd(141, "GetAlbumFileList2AafeUidAruidDeprecated", album_list());
-        s.add_cmd(142, "GetAlbumFileList3AaeAruidDeprecated", album_list());
-    });
-}
-// ---- mii:u ------------------------------------------------------------------------------------------------------------------------
-// The shared Mii database is empty. Count and get answer zero; the default and random builders return an all-zero CharInfo (the
-// real default Mii data is not reproduced here).
-std::shared_ptr<Service> make_mii_database() {
-    return make_iface("IDatabaseService", [](Service& s) {
-        s.add_cmd(0, "IsUpdated", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push<uint8_t>(0);
+        s.add_cmd(3, "Get", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            rsp.push<int32_t>(static_cast<int32_t>(write_miis(req, kCharInfoElement)));
             return 0;
         });
-        s.add_cmd(1, "IsFullDatabase", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push<uint8_t>(0);
+        s.add_cmd(4, "Get1", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            rsp.push<int32_t>(static_cast<int32_t>(write_miis(req, kCharInfo)));
             return 0;
         });
-        const Handler count = [](Request&, Response& rsp) -> uint32_t {
-            rsp.push<int32_t>(0);
+        s.add_cmd(5, "UpdateLatest", echo(kCharInfo));
+        s.add_cmd(6, "BuildRandom", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            const auto c = char_info(0, true, req.arg<uint32_t>(4));
+            rsp.out.insert(rsp.out.end(), c.begin(), c.end());
             return 0;
-        };
-        s.add_cmd(2, "GetCount", count);
-        const Handler get = [](Request& req, Response& rsp) -> uint32_t {
+        });
+        s.add_cmd(7, "BuildDefault", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            const uint32_t k = req.arg<uint32_t>(0);
+            if (k >= kDefaultMiis) return kMiiInvalidArgument;
+            const auto c = char_info(static_cast<int>(k), false, 0);
+            rsp.out.insert(rsp.out.end(), c.begin(), c.end());
+            return 0;
+        });
+        const auto none = [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
             zero_buffer(req.out_buf(0));
             rsp.push<int32_t>(0);
             return 0;
         };
-        s.add_cmd(3, "Get", get);
-        s.add_cmd(4, "Get1", get);
-        s.add_cmd(8, "Get2", get);
-        s.add_cmd(9, "Get3", get);
-        // UpdateLatest / UpdateLatest1: nothing is stored, so the Mii that was given comes back unchanged.
-        const Handler latest = [](Request& req, Response& rsp) -> uint32_t {
-            if (req.in_size >= kCharInfoSize) {
-                rsp.out.insert(rsp.out.end(), req.in, req.in + kCharInfoSize);
-            } else {
-                rsp.out.resize(rsp.out.size() + kCharInfoSize, 0);
-            }
-            return 0;
-        };
-        s.add_cmd(5, "UpdateLatest", latest);
-        s.add_cmd(10, "UpdateLatest1", latest);
-        s.add_cmd(6, "BuildRandom", [](Request&, Response& rsp) -> uint32_t {
-            rsp.out.resize(rsp.out.size() + kCharInfoSize, 0);
-            return 0;
-        });
-        s.add_cmd(7, "BuildDefault", [](Request& req, Response& rsp) -> uint32_t {
-            if (req.arg<uint32_t>(0) >= 6) return kMiiInvalidArgument;   // six defaults
-            rsp.out.resize(rsp.out.size() + kCharInfoSize, 0);
-            return 0;
-        });
-        s.add_cmd(11, "FindIndex", refuse(kMiiNotFound, "mii", "FindIndex"));
-        s.add_cmd(21, "GetIndex", refuse(kMiiNotFound, "mii", "GetIndex"));
-        s.add_cmd(12, "Move", accept("mii", "Move"));
-        s.add_cmd(13, "AddOrReplace", accept("mii", "AddOrReplace"));
-        s.add_cmd(14, "Delete", accept("mii", "Delete"));
-        s.add_cmd(15, "DestroyFile", accept("mii", "DestroyFile"));
-        s.add_cmd(16, "DeleteFile", accept("mii", "DeleteFile"));
-        s.add_cmd(17, "Format", accept("mii", "Format"));
-        s.add_cmd(18, "Import", accept("mii", "Import"));
-        s.add_cmd(19, "Export", accept("mii", "Export"));
-        s.add_cmd(20, "IsBrokenDatabaseWithClearFlag", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push<uint8_t>(0);
-            return 0;
-        });
-        s.add_cmd(22, "SetInterfaceVersion", accept("mii", "SetInterfaceVersion"));
-        s.add_cmd(23, "Convert", accept("mii", "Convert"));
-        s.add_cmd(24, "ConvertCoreDataToCharInfo", accept("mii", "ConvertCoreDataToCharInfo"));
-        s.add_cmd(25, "ConvertCharInfoToCoreData", accept("mii", "ConvertCharInfoToCoreData"));
-        s.add_cmd(26, "Append", accept("mii", "Append"));
+        s.add_cmd(8, "Get2", none);
+        s.add_cmd(9, "Get3", none);
+        s.add_cmd(10, "UpdateLatest1", echo(kStoreData));
+        s.add_cmd(11, "FindIndex", refuse("mii", "FindIndex", kMiiNotFound));
+        for (const auto& c : std::vector<std::pair<uint32_t, const char*>>{{12, "Move"},          {13, "AddOrReplace"}, {14, "Delete"},
+                                                                         {15, "DestroyFile"},   {16, "DeleteFile"},   {17, "Format"},
+                                                                         {18, "Import"},        {19, "Export"},       {22, "SetInterfaceVersion"},
+                                                                         {26, "Append"}})
+            s.add_cmd(c.first, c.second, accept(c.second));
+        s.add_cmd(20, "IsBrokenDatabaseWithClearFlag", answer<uint8_t>(0));
+        s.add_cmd(21, "GetIndex", refuse("mii", "GetIndex", kMiiNotFound));
+        s.add_cmd(23, "Convert", refuse("mii", "Convert", kMiiInvalidCharInfo));
+        s.add_cmd(24, "ConvertCoreDataToCharInfo", refuse("mii", "ConvertCoreDataToCharInfo", kMiiInvalidCharInfo));
+        s.add_cmd(25, "ConvertCharInfoToCoreData", refuse("mii", "ConvertCharInfoToCoreData", kMiiInvalidCharInfo));
     });
 }
-std::shared_ptr<Service> make_mii_static() {
-    return make_iface("IStaticService", [](Service& s) {
-        s.add_cmd(0, "GetDatabaseService", [](Request&, Response& rsp) -> uint32_t {
+
+std::shared_ptr<ipc::Service> make_mii() {
+    return make_iface("IStaticService", [](ipc::Service& s) {
+        s.add_cmd(0, "GetDatabaseService", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
             rsp.push_object(make_mii_database());
             return 0;
         });
     });
 }
 
-// ---- irs --------------------------------------------------------------------------------------------------------------------------
-// No IR camera is connected: sessions are accepted, processors accept and do nothing, and the camera handle is 0.
-std::shared_ptr<Service> make_irs() {
-    return make_iface("IIrSensorServer", [](Service& s) {
-        s.add_cmd(302, "ActivateIrsensor", accept("irs", "ActivateIrsensor"));
-        s.add_cmd(303, "DeactivateIrsensor", accept("irs", "DeactivateIrsensor"));
-        s.add_cmd(304, "GetIrsensorSharedMemoryHandle", [](Request&, Response& rsp) -> uint32_t {
-            services::ServiceSharedMemory sm(kIrsSharedMemorySize, "irs");
-            if (!sm.ok()) return kNotSupported;
-            rsp.out_copy.push_back(sm.new_handle());
+// ---- irs ------------------------------------------------------------------------------------------------------------------------
+// The IR sensor shared memory: 9 device formats of 0xE30 bytes, every camera Unconnected (2). Made once, never reset.
+ServiceSharedMemory* irs_memory() {
+    static std::mutex mu;
+    static std::unique_ptr<ServiceSharedMemory> m;
+    std::lock_guard<std::mutex> lk(mu);
+    if (!m) {
+        m = std::make_unique<ServiceSharedMemory>(0x8000, "irs");
+        if (m->ok() && m->host()) {
+            uint8_t* p = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(m->host()));
+            for (uint32_t k = 0; k < 9; ++k) {
+                const uint32_t unconnected = 2;
+                std::memcpy(p + k * 0xE30, &unconnected, 4);
+            }
+        }
+    }
+    return m.get();
+}
+
+std::shared_ptr<ipc::Service> make_irs() {
+    return make_iface("IIrSensorServer", [](ipc::Service& s) {
+        for (const auto& c : std::vector<std::pair<uint32_t, const char*>>{
+                 {302, "ActivateIrsensor"},          {303, "DeactivateIrsensor"},     {305, "StopImageProcessor"},
+                 {306, "RunMomentProcessor"},        {307, "RunClusteringProcessor"}, {308, "RunImageTransferProcessor"},
+                 {310, "RunTeraPluginProcessor"},    {314, "CheckFirmwareVersion"},   {318, "StopImageProcessorAsync"},
+                 {319, "ActivateIrsensorWithFunctionLevel"}})
+            s.add_cmd(c.first, c.second, accept(c.second));
+        s.add_cmd(304, "GetIrsensorSharedMemoryHandle", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            ServiceSharedMemory* m = irs_memory();
+            if (!m || !m->ok()) return kNotSupported;
+            rsp.out_copy.push_back(m->new_handle());
             return 0;
         });
-        s.add_cmd(305, "StopImageProcessor", accept("irs", "StopImageProcessor"));
-        s.add_cmd(306, "RunMomentProcessor", accept("irs", "RunMomentProcessor"));
-        s.add_cmd(307, "RunClusteringProcessor", accept("irs", "RunClusteringProcessor"));
-        s.add_cmd(308, "RunImageTransferProcessor", accept("irs", "RunImageTransferProcessor"));
-        s.add_cmd(309, "GetImageTransferProcessorState", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push<uint32_t>(0);
-            return 0;
-        });
-        s.add_cmd(310, "RunTeraPluginProcessor", accept("irs", "RunTeraPluginProcessor"));
-        s.add_cmd(311, "GetNpadIrCameraHandle", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push<uint32_t>(0);   // no camera: handle 0
-            return 0;
-        });
-        s.add_cmd(314, "CheckFirmwareVersion", accept("irs", "CheckFirmwareVersion"));
-        s.add_cmd(318, "StopImageProcessorAsync", accept("irs", "StopImageProcessorAsync"));
-        s.add_cmd(319, "ActivateIrsensorWithFunctionLevel", accept("irs", "ActivateIrsensorWithFunctionLevel"));
+        s.add_cmd(309, "GetImageTransferProcessorState", answer<uint32_t>(0));
+        s.add_cmd(311, "GetNpadIrCameraHandle", answer<uint32_t>(0));
     });
 }
 
-// ---- nfc:user, nfc:mf:u, nfp:user -------------------------------------------------------------------------------------------------
-// NFC is switched off: the state is NonInitialized, nothing is enabled, and there are no devices. Commands that need a device answer
-// the no-device result.
-Handler nfc_no_device(const char* tag, const char* what) { return refuse(kNfcNoDevice, tag, what); }
-Handler nfp_no_device(const char* tag, const char* what) { return refuse(kNfpNoDevice, tag, what); }
-
-std::shared_ptr<Service> make_nfc_user() {
-    return make_iface("nn::nfc::detail::IUser", [](Service& s) {
-        s.add_cmd(0, "InitializeOld", accept("nfc", "InitializeOld"));
-        s.add_cmd(1, "FinalizeOld", accept("nfc", "FinalizeOld"));
-        s.add_cmd(2, "GetStateOld", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push<uint32_t>(0);   // NonInitialized
-            return 0;
-        });
-        s.add_cmd(3, "IsNfcEnabledOld", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push<uint8_t>(0);
-            return 0;
-        });
-        s.add_cmd(400, "Initialize", accept("nfc", "Initialize"));
-        s.add_cmd(401, "Finalize", accept("nfc", "Finalize"));
-        s.add_cmd(402, "GetState", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push<uint32_t>(0);
-            return 0;
-        });
-        s.add_cmd(403, "IsNfcEnabled", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push<uint8_t>(0);
-            return 0;
-        });
-        s.add_cmd(404, "ListDevices", [](Request& req, Response& rsp) -> uint32_t {
-            zero_buffer(req.out_buf(0));
-            rsp.push<int32_t>(0);
-            return 0;
-        });
-        s.add_cmd(405, "GetDeviceState", nfc_no_device("nfc", "GetDeviceState"));
-        s.add_cmd(406, "GetNpadId", nfc_no_device("nfc", "GetNpadId"));
-        s.add_cmd(407, "GetAvailabilityChangeEventHandle", [](Request&, Response& rsp) -> uint32_t {
-            rsp.out_copy.push_back(events().nfc_available.new_handle());
-            return 0;
-        });
-        s.add_cmd(408, "StartDetection", nfc_no_device("nfc", "StartDetection"));
-        s.add_cmd(409, "StopDetection", nfc_no_device("nfc", "StopDetection"));
-        s.add_cmd(410, "GetTagInfo", nfc_no_device("nfc", "GetTagInfo"));
-        s.add_cmd(411, "GetActivateEventHandle", [](Request&, Response& rsp) -> uint32_t {
-            rsp.out_copy.push_back(events().nfc_activate.new_handle());
-            return 0;
-        });
-        s.add_cmd(412, "GetDeactivateEventHandle", [](Request&, Response& rsp) -> uint32_t {
-            rsp.out_copy.push_back(events().nfc_deactivate.new_handle());
-            return 0;
-        });
-        s.add_cmd(1000, "ReadMifare", nfc_no_device("nfc", "ReadMifare"));
-        s.add_cmd(1001, "WriteMifare", nfc_no_device("nfc", "WriteMifare"));
-        s.add_cmd(1300, "SendCommandByPassThrough", nfc_no_device("nfc", "SendCommandByPassThrough"));
-        s.add_cmd(1301, "KeepPassThroughSession", nfc_no_device("nfc", "KeepPassThroughSession"));
-        s.add_cmd(1302, "ReleasePassThroughSession", nfc_no_device("nfc", "ReleasePassThroughSession"));
-    });
-}
-
-std::shared_ptr<Service> make_nfp_user() {
-    return make_iface("nn::nfp::detail::IUser", [](Service& s) {
-        // The object's State (Ryujinx IUser: NonInitialized 0, Initialized 1): GetState reports it, so a caller that checks it
-        // before nn::nfp::Initialize does not initialise twice (the SDK aborts on a second Initialize).
-        auto state = std::make_shared<std::atomic<uint32_t>>(0);
-        s.add_cmd(0, "Initialize", [state](Request&, Response&) -> uint32_t {
+// ---- nfc:user, nfc:mf:u, nfp:user --------------------------------------------------------------------------------------------------
+std::shared_ptr<ipc::Service> make_nfc_user() {
+    auto state = std::make_shared<std::atomic<uint32_t>>(0);   // 0 NonInitialized, 1 Initialized
+    return make_iface("nn::nfc::detail::IUser", [state](ipc::Service& s) {
+        const auto init = [state](ipc::Request&, ipc::Response&) -> uint32_t {
             state->store(1);
-            NXLOG_D("nfp", "Initialize: state Initialized");
             return 0;
-        });
-        s.add_cmd(1, "Finalize", [state](Request&, Response&) -> uint32_t {
+        };
+        const auto fin = [state](ipc::Request&, ipc::Response&) -> uint32_t {
             state->store(0);
-            NXLOG_D("nfp", "Finalize: state NonInitialized");
             return 0;
-        });
-        s.add_cmd(2, "ListDevices", [](Request& req, Response& rsp) -> uint32_t {
+        };
+        const auto get = [state](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.push<uint32_t>(state->load());
+            return 0;
+        };
+        s.add_cmd(0, "InitializeOld", init);
+        s.add_cmd(1, "FinalizeOld", fin);
+        s.add_cmd(2, "GetStateOld", get);
+        s.add_cmd(3, "IsNfcEnabledOld", answer<uint8_t>(0));
+        s.add_cmd(400, "Initialize", init);
+        s.add_cmd(401, "Finalize", fin);
+        s.add_cmd(402, "GetState", get);
+        s.add_cmd(403, "IsNfcEnabled", answer<uint8_t>(0));
+        s.add_cmd(404, "ListDevices", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
             zero_buffer(req.out_buf(0));
             rsp.push<int32_t>(0);
             return 0;
         });
-        s.add_cmd(3, "StartDetection", nfp_no_device("nfp", "StartDetection"));
-        s.add_cmd(4, "StopDetection", nfp_no_device("nfp", "StopDetection"));
-        s.add_cmd(5, "Mount", nfp_no_device("nfp", "Mount"));
-        s.add_cmd(6, "Unmount", nfp_no_device("nfp", "Unmount"));
-        s.add_cmd(7, "OpenApplicationArea", nfp_no_device("nfp", "OpenApplicationArea"));
-        s.add_cmd(8, "GetApplicationArea", nfp_no_device("nfp", "GetApplicationArea"));
-        s.add_cmd(9, "SetApplicationArea", nfp_no_device("nfp", "SetApplicationArea"));
-        s.add_cmd(10, "Flush", nfp_no_device("nfp", "Flush"));
-        s.add_cmd(11, "Restore", nfp_no_device("nfp", "Restore"));
-        s.add_cmd(12, "CreateApplicationArea", nfp_no_device("nfp", "CreateApplicationArea"));
-        s.add_cmd(13, "GetTagInfo", nfp_no_device("nfp", "GetTagInfo"));
-        s.add_cmd(14, "GetRegisterInfo", nfp_no_device("nfp", "GetRegisterInfo"));
-        s.add_cmd(15, "GetCommonInfo", nfp_no_device("nfp", "GetCommonInfo"));
-        s.add_cmd(16, "GetModelInfo", nfp_no_device("nfp", "GetModelInfo"));
-        s.add_cmd(17, "AttachActivateEvent", [](Request&, Response& rsp) -> uint32_t {
-            rsp.out_copy.push_back(events().nfp_activate.new_handle());
+        for (const auto& c : std::vector<std::pair<uint32_t, const char*>>{
+                 {405, "GetDeviceState"}, {406, "GetNpadId"},  {408, "StartDetection"},      {409, "StopDetection"},
+                 {410, "GetTagInfo"},     {1000, "ReadMifare"}, {1001, "WriteMifare"},       {1300, "SendCommandByPassThrough"},
+                 {1301, "KeepPassThroughSession"}, {1302, "ReleasePassThroughSession"}})
+            s.add_cmd(c.first, c.second, refuse("nfc", c.second, kNfcNoDevice));
+        s.add_cmd(407, "GetAvailabilityChangeEventHandle", event_handle(events().nfc_avail));
+        s.add_cmd(411, "GetActivateEventHandle", event_handle(events().nfc_activate));
+        s.add_cmd(412, "GetDeactivateEventHandle", event_handle(events().nfc_deactivate));
+    });
+}
+
+std::shared_ptr<ipc::Service> make_nfp_user() {
+    auto state = std::make_shared<std::atomic<uint32_t>>(0);
+    return make_iface("nn::nfp::detail::IUser", [state](ipc::Service& s) {
+        const auto init = [state](ipc::Request& req, ipc::Response&) -> uint32_t {
+            NXLOG_D("nfp", "cmd %u: initialized (no reader in use)", req.cmd);
+            state->store(1);
+            return 0;
+        };
+        s.add_cmd(0, "Initialize", init);
+        s.add_cmd(1, "Finalize", [state](ipc::Request&, ipc::Response&) -> uint32_t {
+            NXLOG_D("nfp", "Finalize");
+            state->store(0);
             return 0;
         });
-        s.add_cmd(18, "AttachDeactivateEvent", [](Request&, Response& rsp) -> uint32_t {
-            rsp.out_copy.push_back(events().nfp_deactivate.new_handle());
+        s.add_cmd(2, "ListDevices", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            zero_buffer(req.out_buf(0));
+            rsp.push<int32_t>(0);
             return 0;
         });
-        s.add_cmd(19, "GetState", [state](Request&, Response& rsp) -> uint32_t {
+        for (const auto& c : std::vector<std::pair<uint32_t, const char*>>{
+                 {3, "StartDetection"},       {4, "StopDetection"},           {5, "Mount"},           {6, "Unmount"},
+                 {7, "OpenApplicationArea"},  {8, "GetApplicationArea"},      {9, "SetApplicationArea"}, {10, "Flush"},
+                 {11, "Restore"},             {12, "CreateApplicationArea"},  {13, "GetTagInfo"},     {14, "GetRegisterInfo"},
+                 {15, "GetCommonInfo"},       {16, "GetModelInfo"},           {20, "GetDeviceState"}, {21, "GetNpadId"},
+                 {22, "GetApplicationAreaSize"}, {24, "RecreateApplicationArea"}, {25, "StartDetectionWithFilter"},
+                 {301, "GetExtendedApplicationAreaInfo"}, {302, "GetExtendedApplicationArea"}, {303, "SetExtendedApplicationArea"}})
+            s.add_cmd(c.first, c.second, refuse("nfp", c.second, kNfpNoDevice));
+        s.add_cmd(17, "AttachActivateEvent", event_handle(events().nfp_activate));
+        s.add_cmd(18, "AttachDeactivateEvent", event_handle(events().nfp_deactivate));
+        s.add_cmd(19, "GetState", [state](ipc::Request&, ipc::Response& rsp) -> uint32_t {
             rsp.push<uint32_t>(state->load());
             return 0;
         });
-        s.add_cmd(20, "GetDeviceState", nfp_no_device("nfp", "GetDeviceState"));
-        s.add_cmd(21, "GetNpadId", nfp_no_device("nfp", "GetNpadId"));
-        s.add_cmd(22, "GetApplicationAreaSize", nfp_no_device("nfp", "GetApplicationAreaSize"));
-        s.add_cmd(23, "GetAvailabilityChangeEventHandle", [](Request&, Response& rsp) -> uint32_t {
-            rsp.out_copy.push_back(events().nfp_available.new_handle());
-            return 0;
-        });
-        s.add_cmd(24, "RecreateApplicationArea", nfp_no_device("nfp", "RecreateApplicationArea"));
-        s.add_cmd(25, "StartDetectionWithFilter", nfp_no_device("nfp", "StartDetectionWithFilter"));
+        s.add_cmd(23, "GetAvailabilityChangeEventHandle", event_handle(events().nfp_avail));
+        s.add_cmd(300, "InitializeWithExtendedApplicationArea", init);
     });
 }
 
-// IUserManager of nfc:user, nfc:mf:u and nfp:user: CreateUserInterface returns the user object for that service. The nfc:mf:u
-// IUser has no command table here (its ids are not in the sources read), so its commands answer kStubService.
-std::shared_ptr<Service> make_user_manager(const char* name, std::shared_ptr<Service> (*make_user)()) {
-    return make_iface(name, [make_user](Service& s) {
-        s.add_cmd(0, "CreateUserInterface", [make_user](Request&, Response& rsp) -> uint32_t {
-            rsp.push_object(make_user());
+template <std::shared_ptr<ipc::Service> (*Make)()>
+std::shared_ptr<ipc::Service> make_user_manager(const char* name) {
+    return make_iface(name, [](ipc::Service& s) {
+        s.add_cmd(0, "CreateUserInterface", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.push_object(Make());
             return 0;
         });
     });
 }
-std::shared_ptr<Service> make_mifare_user() { return make_iface("nn::nfc::mifare::detail::IUser", [](Service&) {}); }
+std::shared_ptr<ipc::Service> make_mifare_user() {
+    return make_iface("nn::nfc::mifare::detail::IUser", [](ipc::Service&) {});   // answered by ext_system.cpp
+}
 
-// ---- olsc:u -----------------------------------------------------------------------------------------------------------------------
-// IOlscServiceForApplication (10.0.0+), online save data backup, which is off: Ryubing Olsc/IOlscServiceForApplication.cs (MIT)
-// for the commands, results and the setting values (1 enabled, 2 not; Ryubing marks the values as not determined).
-std::shared_ptr<Service> make_olsc() {
-    struct Olsc {
+// ---- olsc:u ---------------------------------------------------------------------------------------------------------------------
+std::shared_ptr<ipc::Service> make_olsc() {
+    struct State {
         std::mutex mu;
         bool initialized = false;
         std::map<std::pair<uint64_t, uint64_t>, bool> backup;
     };
-    auto o = std::make_shared<Olsc>();
-    return make_iface("olsc:u", [o](Service& s) {
-        s.add_cmd(0, "Initialize", [o](Request&, Response&) -> uint32_t {
-            std::lock_guard<std::mutex> g(o->mu);
-            o->initialized = true;
-            NXLOG_D("olsc", "Initialize: online save data backup is not available");
+    auto st = std::make_shared<State>();
+    return make_iface("olsc:u", [st](ipc::Service& s) {
+        s.add_cmd(0, "Initialize", [st](ipc::Request&, ipc::Response&) -> uint32_t {
+            NXLOG_D("olsc", "Initialize");
+            std::lock_guard<std::mutex> lk(st->mu);
+            st->initialized = true;
             return 0;
         });
-        s.add_cmd(13, "GetSaveDataBackupSetting", [o](Request& req, Response& rsp) -> uint32_t {
-            const auto uid = std::make_pair(req.arg<uint64_t>(0), req.arg<uint64_t>(8));
-            std::lock_guard<std::mutex> g(o->mu);
-            if (!o->initialized) return kOlscNotInitialized;
+        s.add_cmd(13, "GetSaveDataBackupSetting", [st](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            std::lock_guard<std::mutex> lk(st->mu);
+            if (!st->initialized) return kOlscNotInitialized;
+            const std::pair<uint64_t, uint64_t> uid{req.arg<uint64_t>(0), req.arg<uint64_t>(8)};
             if (uid.first == 0 && uid.second == 0) return kOlscNullArgument;
-            const auto it = o->backup.find(uid);
-            rsp.push<uint8_t>(it != o->backup.end() && it->second ? 1 : 2);
+            const auto it = st->backup.find(uid);
+            rsp.push<uint8_t>(it != st->backup.end() && it->second ? 1 : 2);   // 1 enabled, 2 not
             return 0;
         });
-        s.add_cmd(14, "SetSaveDataBackupSettingEnabled", [o](Request& req, Response&) -> uint32_t {
-            const bool enabled = req.arg<uint64_t>(0) != 0;
-            const auto uid = std::make_pair(req.arg<uint64_t>(8), req.arg<uint64_t>(16));
-            std::lock_guard<std::mutex> g(o->mu);
-            if (!o->initialized) return kOlscNotInitialized;
+        s.add_cmd(14, "SetSaveDataBackupSettingEnabled", [st](ipc::Request& req, ipc::Response&) -> uint32_t {
+            std::lock_guard<std::mutex> lk(st->mu);
+            if (!st->initialized) return kOlscNotInitialized;
+            const std::pair<uint64_t, uint64_t> uid{req.arg<uint64_t>(8), req.arg<uint64_t>(16)};
             if (uid.first == 0 && uid.second == 0) return kOlscNullArgument;
-            o->backup[uid] = enabled;
+            st->backup[uid] = req.arg<uint64_t>(0) != 0;
             return 0;
         });
     });
 }
 
-// ---- ectx:aw ----------------------------------------------------------------------------------------------------------------------
-// Error-context writer: the registrar takes the context and drops it.
-std::shared_ptr<Service> make_ectx_registrar() {
-    return make_iface("nn::err::context::IContextRegistrar", [](Service& s) {
-        s.add_cmd(0, "Complete", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push<int32_t>(0);   // context_descriptor
-            return 0;
-        });
-    });
-}
-std::shared_ptr<Service> make_ectx() {
-    return make_iface("nn::err::context::IWriterForApplication", [](Service& s) {
-        s.add_cmd(0, "CreateContextRegistrar", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push_object(make_ectx_registrar());
-            return 0;
-        });
-    });
-}
-
-// ---- pcm and banana ---------------------------------------------------------------------------------------------------------------
-// pcm: the interface has no command table in the sources read (Ryubing's IManager is empty; Switchbrew lists pcm as not present on
-// retail), so every command reaches the framework's default and answers kStubService.
-// banana: the profiler service, not on retail. Every command is logged at Warn and answered with kStubService.
-class BananaService : public ipc::StubService {
+// ---- banana, TMA --------------------------------------------------------------------------------------------------------------
+class Banana : public ipc::StubService {
 public:
-    BananaService() : ipc::StubService("banana") {}
-    uint32_t handle(Request& req, Response& rsp) override {
+    Banana() : ipc::StubService("banana") {}
+    uint32_t handle(ipc::Request& req, ipc::Response& rsp) override {
         NXLOG_W("banana", "command %u (msg type %u) asked of banana; answering StubService", req.cmd, req.msg_type);
         return ipc::StubService::handle(req, rsp);
     }
 };
 
-// ---- htc, htc:tenv, htcs ----------------------------------------------------------------------------------------------------------
-// TMA services: absent on retail (Switchbrew). Every command answers NotSupported and is logged.
-using CmdNames = std::vector<std::pair<uint32_t, const char*>>;
-std::shared_ptr<Service> make_tma(const char* name, const CmdNames& cmds) {
-    return make_iface(name, [cmds](Service& s) {
-        for (const auto& c : cmds) s.add_cmd(c.first, c.second, refuse(kNotSupported, "tma", c.second));
+std::shared_ptr<ipc::Service> make_tma(const char* name, const std::vector<std::pair<uint32_t, const char*>>& cmds) {
+    return make_iface(name, [&cmds](ipc::Service& s) {
+        for (const auto& c : cmds) s.add_cmd(c.first, c.second, refuse("tma", c.second, kNotSupported));
     });
 }
-CmdNames htc_cmds() {
-    return {{0, "GetEnvironmentVariable"},        {1, "GetEnvironmentVariableLength"}, {2, "BindHostConnectionEvent"},
-            {3, "BindHostDisconnectionEvent"},    {4, "BindHostConnectionEventForSystem"}, {5, "BindHostDisconnectionEventForSystem"},
-            {6, "GetBridgeIpAddress"},            {7, "GetBridgePort"},                {8, "SetCradleAttached"},
-            {9, "GetBridgeSubnetMask"},           {10, "GetBridgeMacAddress"},         {11, "GetWorkingDirectoryPath"},
-            {12, "GetWorkingDirectoryPathSize"},  {13, "RunOnHostStart"},              {14, "RunOnHostResults"},
-            {15, "SetBridgeIpAddress"},           {16, "SetBridgeSubnetMask"},         {17, "SetBridgePort"},
-            {18, "GetBridgeSerialNumber"},        {19, "GetBridgeFwVersion"},          {20, "ResetBridgeSettings"},
-            {21, "BeginUpdateBridge"},            {22, "ContinueUpdateBridge"},        {23, "EndUpdateBridge"},
-            {24, "GetBridgeType"},                {25, "GetBridgeDefaultGateway"},     {26, "SetBridgeDefaultGateway"},
-            {27, "GetBridgeDhcp"},                {28, "SetBridgeDhcp"},               {29, "GetBridgeProgramVersion"}};
+const std::vector<std::pair<uint32_t, const char*>>& htc_cmds() {
+    static const std::vector<std::pair<uint32_t, const char*>> v = {
+        {0, "GetEnvironmentVariable"}, {1, "GetEnvironmentVariableLength"}, {2, "BindHostConnectionEvent"},
+        {3, "BindHostDisconnectionEvent"}, {4, "BindHostConnectionEventForSystem"}, {5, "BindHostDisconnectionEventForSystem"},
+        {6, "GetBridgeIpAddress"}, {7, "GetBridgePort"}, {8, "SetCradleAttached"}, {9, "GetBridgeSubnetMask"}, {10, "GetBridgeMacAddress"},
+        {11, "GetWorkingDirectoryPath"}, {12, "GetWorkingDirectoryPathSize"}, {13, "RunOnHostStart"}, {14, "RunOnHostResults"},
+        {15, "SetBridgeIpAddress"}, {16, "SetBridgeSubnetMask"}, {17, "SetBridgePort"}, {18, "GetBridgeSerialNumber"},
+        {19, "GetBridgeFwVersion"}, {20, "ResetBridgeSettings"}, {21, "BeginUpdateBridge"}, {22, "ContinueUpdateBridge"},
+        {23, "EndUpdateBridge"}, {24, "GetBridgeType"}, {25, "GetBridgeDefaultGateway"}, {26, "SetBridgeDefaultGateway"},
+        {27, "GetBridgeDhcp"}, {28, "SetBridgeDhcp"}, {29, "GetBridgeProgramVersion"}};
+    return v;
 }
-CmdNames htcs_cmds() {
-    return {{0, "Socket"},  {1, "Close"},   {2, "Connect"},   {3, "Bind"},     {4, "Listen"},   {5, "Accept"},   {6, "Recv"},
-            {7, "Send"},    {8, "Shutdown"}, {9, "Fcntl"},     {10, "GetPeerNameAny"}, {11, "GetDefaultHostName"}, {12, "CreateSocketOld"},
-            {13, "CreateSocket"}, {100, "RegisterProcessId"}, {101, "MonitorManager"}, {130, "Cmd130"}, {131, "Cmd131"}};
+const std::vector<std::pair<uint32_t, const char*>>& htcs_cmds() {
+    static const std::vector<std::pair<uint32_t, const char*>> v = {
+        {0, "Socket"}, {1, "Close"}, {2, "Connect"}, {3, "Bind"}, {4, "Listen"}, {5, "Accept"}, {6, "Recv"}, {7, "Send"}, {8, "Shutdown"},
+        {9, "Fcntl"}, {10, "GetPeerNameAny"}, {11, "GetDefaultHostName"}, {12, "CreateSocketOld"}, {13, "CreateSocket"},
+        {100, "RegisterProcessId"}, {101, "MonitorManager"}, {130, "Cmd130"}, {131, "Cmd131"}};
+    return v;
 }
-CmdNames htc_tenv_cmds() { return {{0, "GetServiceInterface"}}; }
-
-}  // namespace
-
-// ---- registration ------------------------------------------------------------------------------------------------------------------
-// stpl:u (Switch 2 stream play / GameShare): nn::streamplay::detail::GetUserService opens it and calls cmd 0 for the user service object.
-// GameShare is not available here, but the two IUserService commands the SDK sends at start-up abort the process on any failure
-// (sdk 0x75006b9744 and 0x75006ad634: AbortImpl), so they answer "nothing to share" instead of failing:
-//   300 GetHidSharedMemory (sdk proxy 0x75006b78f4, caller GetUserService 0x75006b95f0): out {u64 size, u64 offset} + a copy handle.
-//       HidApplicationResourceHolder (0x75006b08b8) attaches `size` bytes, maps them and reads the guest-input format at `offset`.
-//   1   GetRequiredMemorySize(u8 type, u8 mode, u32 guests) -> u32 (sdk proxy 0x75006b76f0): the work memory sizes below (it was 0, but
-//       nn::streamplay::Initialize divides the buffer size by the per-guest size, CalculateGuestCountFromMemorySize
-//       (sdk 0x75006b9850), and aborts when the quotient is not at least 1: 0 made hosting a GameShare session abort).
-// The format, from HidSharedMemoryAccessor's readers (sdk 0x75006b0980..0x75006b24a0), for up to three guests (IsGuestIdValid: id < 3):
-// pads at 0, 0x24000 per guest pad id (0, 1, 32 = handheld) and 0xC000 per guest inside it (u32 NpadStyleSet at +0, pad ring at +0x28
-// of 33 x 0x38 entries, six-axis rings from +0x2490 every 0xE80, controller colours at +0x7B90); touch screens at 0x6C000, 0x6000 per
-// guest; Jcms rings at 0x7E000, 0x1800 per (pad 0/1, Joy-Con type 0/1) and 0x800 per guest. The readers reach 0x84000. "No GameShare
-// session" is all zero: every style set 0 (GetGuestPadStyleSet: no pad) and every ring count 0 (the state readers return 0 entries).
-//
-// Hosting a GameShare session (Pokopia: main 0x7101132f60 state 1 nn::streamplay::Initialize, state 2 OpenSessionWithMatchmakeSupport).
-// A console with no guests around shows the matchmaking applet and the player backs out of it; am.cpp ends that applet (0x1000024 /
-// 0x1030024) as cancelled, the SDK returns 0x3D1F and the game (main 0x7101133704) goes back quietly, without the error applet, and
-// tears the session down (nn::streamplay::Finalize). Before that applet every IUserService command on the way must succeed: a failure
-// in cmd 502 / 503 / 505 / 506 aborts the SDK, and a failure in Initialize makes the game show it through the error applet. Command
-// ids are the IUserService proxy's (vtable 0x7500dd8d20, thunks 0x75006b7708..0x75006b79a8; slot +32 is cmd 1, +40 cmd 2 ...), the
-// layouts come from the CMIF writers they branch to:
-//   2   Initialize(u8 StreamPlayType, u8 StreamingMode, u32 guest count, pid) (0x75006b7ae0): kept for 502 / 503. No output.
-//   3   Finalize, 5 CloseSession: accepted.
-//   7   GetConnectionStateChangedEvent -> copy handle (Initialize attaches it): an event that never fires (no guest ever connects).
-//   8   GetConnectionState -> 8 bytes (u8 flags, bit 0 connected; u32 result at 4): all zero, not connected.
-//   25  SetSupportedGuestNpadStyleSet(u32), 27 SetGuestNpadJoyHoldType(u32): stored nowhere (no guest pads), accepted.
-//   502 -> u8, 503 -> u8 (0x75001cb5e8): OpenSessionWithMatchmakeSupport passes them on as the StreamPlayType and StreamingMode
-//       (CreateWorkBufferInProcessGlobal(type, mode), the same pair GetRequiredMemorySize takes; 502 also picks the applet id), so
-//       they answer what Initialize was given. Type 1 skips the in-process work buffers (505 / 506).
-//   504 (32-byte MatchmakeConfig) -> 0x80 bytes (0x75006b8990): the applet's argument, opaque to the SDK: zeros.
-//   505 (copy handle: the work buffer's transfer memory, u64 size), 506 (u32 guest, 3 copy handles, 3 u64 sizes): accepted; the
-//       handles stay the client's (it closes them).
-//   507, 509 (no data), 510 (16 bytes: the audio output volumes Initialize reads): accepted.
-//   9   GetWorkBufferSizes(u8 type, u8 mode) -> 4 x u64 {global, three per-guest parts} (0x75006b7d0c): type 0 (in-process) carves
-//       its transfer memories out of the game's buffer with these sizes (CreateWorkBufferInProcessGlobal / PerGuest). Real sizes are
-//       not known; one page each keeps everything page aligned and the game's buffer small (nothing is ever streamed). Command 1
-//       answers to match: type 0 = global + guests x 3 pages, type 1 = guests x 1 page (CalculateRequiredWorkBufferSizePerInterface
-//       asks cmd 1 for one guest of type 1).
-// Every other command (StartStreaming's 4 / 500 / 501, the guest queries) is not implemented: it fails and is logged, so a GameShare
-// path that gets past the matchmaking applet shows up in the log instead of running on zeros.
-constexpr uint64_t kStreamplayHidSharedMemorySize = 0x84000;   // the extent of the format above (page aligned)
-
-constexpr uint64_t kStreamplayPage = 0x1000;   // every work buffer part (see cmd 9 above)
-
-uint32_t streamplay_required_memory(uint8_t type, uint32_t guests) {
-    if (guests > 3) guests = 3;   // the SDK never asks for more (CalculateGuestCountFromMemorySize caps at 3)
-    return static_cast<uint32_t>(type == 1 ? guests * kStreamplayPage : kStreamplayPage + guests * 3 * kStreamplayPage);
+const std::vector<std::pair<uint32_t, const char*>>& tenv_cmds() {
+    static const std::vector<std::pair<uint32_t, const char*>> v = {{0, "GetServiceInterface"}};
+    return v;
 }
 
-// What Initialize was given (one GameShare session per process).
-struct StreamplayState {
+// ---- stpl:u -----------------------------------------------------------------------------------------------------------------------
+// Switch 2 GameShare: no session, nobody connects. One process-wide state: the type and mode Initialize got, the connection event.
+struct Streamplay {
     std::mutex mu;
-    uint8_t type = 0;
-    uint8_t mode = 0;
-    ServiceEvent connection_changed{false};
+    uint8_t type = 0, mode = 0;
+    ServiceEvent connection;
 };
-StreamplayState& streamplay_state() {
-    static StreamplayState s;
+Streamplay& streamplay() {
+    static Streamplay s;
     return s;
 }
+constexpr uint64_t kStreamplayPage = 0x1000;
+constexpr uint64_t kStreamplayHidBytes = 0x84000;
 
-Handler streamplay_ok(const char* name) {
-    return [name](Request&, Response&) -> uint32_t {
-        NXLOG_I("streamplay", "%s: accepted (no GameShare session here)", name);
+H sp_accept(const char* name) {
+    return [name](ipc::Request& req, ipc::Response&) -> uint32_t {
+        NXLOG_I("streamplay", "%s (cmd %u) accepted", name, req.cmd);
         return 0;
     };
 }
 
 std::shared_ptr<ipc::Service> make_streamplay_user_service() {
-    return make_iface("nn::streamplay::detail::IUserService", [](Service& s) {
-        s.add_cmd(1, "GetRequiredMemorySize", [](Request& req, Response& rsp) -> uint32_t {
-            rsp.push<uint32_t>(streamplay_required_memory(req.arg<uint8_t>(0), req.arg<uint32_t>(4)));
+    return make_iface("nn::streamplay::detail::IUserService", [](ipc::Service& s) {
+        s.add_cmd(1, "GetRequiredMemorySize", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            const uint8_t type = req.arg<uint8_t>(0);
+            const uint64_t guests = std::min<uint32_t>(req.arg<uint32_t>(4), 3);
+            const uint64_t size = type == 1 ? guests * kStreamplayPage : kStreamplayPage + guests * 3 * kStreamplayPage;
+            rsp.push<uint32_t>(static_cast<uint32_t>(size));
             return 0;
         });
-        s.add_cmd(9, "GetWorkBufferSizes", [](Request&, Response& rsp) -> uint32_t {
+        s.add_cmd(2, "Initialize", [](ipc::Request& req, ipc::Response&) -> uint32_t {
+            Streamplay& sp = streamplay();
+            std::lock_guard<std::mutex> lk(sp.mu);
+            sp.type = req.arg<uint8_t>(0);
+            sp.mode = req.arg<uint8_t>(1);
+            NXLOG_I("streamplay", "Initialize(type %u, mode %u, %u guests)", sp.type, sp.mode, req.arg<uint32_t>(4));
+            return 0;
+        });
+        s.add_cmd(3, "Finalize", sp_accept("Finalize"));
+        s.add_cmd(5, "CloseSession", sp_accept("CloseSession"));
+        s.add_cmd(7, "GetConnectionStateChangedEvent", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.out_copy.push_back(streamplay().connection.new_handle());
+            return 0;
+        });
+        s.add_cmd(8, "GetConnectionState", answer<uint64_t>(0));
+        s.add_cmd(9, "GetWorkBufferSizes", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
             for (int i = 0; i < 4; ++i) rsp.push<uint64_t>(kStreamplayPage);
             return 0;
         });
-        s.add_cmd(300, "GetHidSharedMemory", [](Request&, Response& rsp) -> uint32_t {
-            services::ServiceSharedMemory sm(kStreamplayHidSharedMemorySize, "streamplay.hid");
-            if (!sm.ok()) return kNotSupported;
-            const uint32_t h = sm.new_handle();
+        s.add_cmd(25, "SetSupportedGuestNpadStyleSet", sp_accept("SetSupportedGuestNpadStyleSet"));
+        s.add_cmd(27, "SetGuestNpadJoyHoldType", sp_accept("SetGuestNpadJoyHoldType"));
+        s.add_cmd(300, "GetHidSharedMemory", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            ServiceSharedMemory m(kStreamplayHidBytes, "streamplay.hid");   // no guest pad, every ring empty
+            if (!m.ok() || !m.host()) return kNotSupported;
+            std::memset(reinterpret_cast<void*>(static_cast<uintptr_t>(m.host())), 0, static_cast<size_t>(m.size()));
+            const uint32_t h = m.new_handle();
             if (!h) return kNotSupported;
-            rsp.push<uint64_t>(kStreamplayHidSharedMemorySize);
-            rsp.push<uint64_t>(0);   // the format starts at the beginning of the block
+            rsp.push<uint64_t>(kStreamplayHidBytes);
+            rsp.push<uint64_t>(0);
             rsp.out_copy.push_back(h);
             return 0;
         });
-        s.add_cmd(2, "Initialize", [](Request& req, Response&) -> uint32_t {
-            StreamplayState& st = streamplay_state();
-            std::lock_guard<std::mutex> lk(st.mu);
-            st.type = req.arg<uint8_t>(0);
-            st.mode = req.arg<uint8_t>(1);
-            NXLOG_I("streamplay", "Initialize(type %u, mode %u, %u guests): accepted, no guest will connect", st.type, st.mode,
-                    req.arg<uint32_t>(4));
+        s.add_cmd(502, "GetStreamPlayType", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            Streamplay& sp = streamplay();
+            std::lock_guard<std::mutex> lk(sp.mu);
+            rsp.push<uint8_t>(sp.type);
             return 0;
         });
-        s.add_cmd(3, "Finalize", streamplay_ok("Finalize"));
-        s.add_cmd(5, "CloseSession", streamplay_ok("CloseSession"));
-        s.add_cmd(7, "GetConnectionStateChangedEvent", [](Request&, Response& rsp) -> uint32_t {
-            rsp.out_copy.push_back(streamplay_state().connection_changed.new_handle());
+        s.add_cmd(503, "GetStreamingMode", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            Streamplay& sp = streamplay();
+            std::lock_guard<std::mutex> lk(sp.mu);
+            rsp.push<uint8_t>(sp.mode);
             return 0;
         });
-        s.add_cmd(8, "GetConnectionState", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push<uint64_t>(0);   // not connected, result 0
+        s.add_cmd(504, "PrepareMatchmake", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            NXLOG_I("streamplay", "PrepareMatchmake");
+            rsp.out.resize(rsp.out.size() + 0x80, 0);
             return 0;
         });
-        s.add_cmd(25, "SetSupportedGuestNpadStyleSet", streamplay_ok("SetSupportedGuestNpadStyleSet"));
-        s.add_cmd(27, "SetGuestNpadJoyHoldType", streamplay_ok("SetGuestNpadJoyHoldType"));
-        s.add_cmd(502, "GetStreamPlayType", [](Request&, Response& rsp) -> uint32_t {
-            StreamplayState& st = streamplay_state();
-            std::lock_guard<std::mutex> lk(st.mu);
-            rsp.push<uint8_t>(st.type);
-            return 0;
-        });
-        s.add_cmd(503, "GetStreamingMode", [](Request&, Response& rsp) -> uint32_t {
-            StreamplayState& st = streamplay_state();
-            std::lock_guard<std::mutex> lk(st.mu);
-            rsp.push<uint8_t>(st.mode);
-            return 0;
-        });
-        s.add_cmd(504, "PrepareMatchmake", [](Request&, Response& rsp) -> uint32_t {
-            NXLOG_I("streamplay", "matchmaking requested: the matchmaking applet comes next (it ends as cancelled)");
-            rsp.out.insert(rsp.out.end(), 0x80, uint8_t{0});
-            return 0;
-        });
-        s.add_cmd(505, "SetWorkBuffer", streamplay_ok("SetWorkBuffer (cmd 505)"));
-        s.add_cmd(506, "SetGuestWorkBuffer", streamplay_ok("SetGuestWorkBuffer (cmd 506)"));
-        s.add_cmd(507, "Cmd507", streamplay_ok("cmd 507"));
-        s.add_cmd(509, "Cmd509", streamplay_ok("cmd 509"));
-        s.add_cmd(510, "SetAudioOutputVolumes", streamplay_ok("SetAudioOutputVolumes (cmd 510)"));
+        s.add_cmd(505, "SetWorkBuffer", sp_accept("SetWorkBuffer"));
+        s.add_cmd(506, "SetGuestWorkBuffer", sp_accept("SetGuestWorkBuffer"));
+        s.add_cmd(507, "Cmd507", sp_accept("Cmd507"));
+        s.add_cmd(509, "Cmd509", sp_accept("Cmd509"));
+        s.add_cmd(510, "SetAudioOutputVolumes", sp_accept("SetAudioOutputVolumes"));
     });
 }
 
-std::shared_ptr<ipc::Service> make_streamplay_user() {
-    auto s = std::make_shared<ipc::Service>("stpl:u");
-    s->add_cmd(0, "CreateUserService", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push_object(make_streamplay_user_service());
-        return 0;
+std::shared_ptr<ipc::Service> make_streamplay() {
+    return make_iface("stpl:u", [](ipc::Service& s) {
+        s.add_cmd(0, "CreateUserService", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.push_object(make_streamplay_user_service());
+            return 0;
+        });
     });
-    return s;
 }
+
+}  // namespace
 
 void register_misc() {
-    add("stpl:u", [] { return make_streamplay_user(); });
+    add("stpl:u", [] { return make_streamplay(); });
     add("csrng", [] { return make_csrng(); });
-    add("ldr:ro", [] { return make_ro(); });
+    register_ro();
+    register_bluetooth();
+    register_npns();
+    register_pm();
     add("mm:u", [] { return make_mm(); });
     add("hwopus", [] { return make_hwopus(); });
     add("aoc:u", [] { return make_aoc(); });
-    add("caps:u", [] { return make_album_app(); });
+    add("caps:u", [] { return make_caps(); });
     add("caps:su", [] { return make_screenshot_app(); });
-    add("mii:u", [] { return make_mii_static(); });
+    add("mii:u", [] { return make_mii(); });
+    add("mii:e", [] { return make_mii(); });   // the same database (Mario Kart 8 Deluxe opens mii:e first)
     add("irs", [] { return make_irs(); });
-    add("nfc:user", [] { return make_user_manager("nn::nfc::detail::IUserManager", &make_nfc_user); });
-    add("nfc:mf:u", [] { return make_user_manager("nn::nfc::mifare::detail::IUserManager", &make_mifare_user); });
-    add("nfp:user", [] { return make_user_manager("nn::nfp::detail::IUserManager", &make_nfp_user); });
-    add("ectx:aw", [] { return make_ectx(); });
-    add("pcm", [] { return make_iface("pcm", [](Service&) {}); });
-    add("banana", [] { return std::make_shared<BananaService>(); });
+    add("nfc:user", [] { return make_user_manager<&make_nfc_user>("nn::nfc::detail::IUserManager"); });
+    add("nfc:mf:u", [] { return make_user_manager<&make_mifare_user>("nn::nfc::mifare::detail::IUserManager"); });
+    add("nfp:user", [] { return make_user_manager<&make_nfp_user>("nn::nfp::detail::IUserManager"); });
+    add("ectx:aw", [] {
+        return make_iface("nn::err::context::IWriterForApplication", [](ipc::Service& s) {
+            s.add_cmd(0, "CreateContextRegistrar", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+                rsp.push_object(make_iface("nn::err::context::IContextRegistrar", [](ipc::Service& r) {
+                    r.add_cmd(0, "Complete", answer<int32_t>(0));
+                }));
+                return 0;
+            });
+        });
+    });
+    add("pcm", [] { return make_iface("pcm", [](ipc::Service&) {}); });
+    add("banana", [] { return std::make_shared<Banana>(); });
     add("htc", [] { return make_tma("nn::tma::IHtcManager", htc_cmds()); });
-    add("htc:tenv", [] { return make_tma("nn::htc::tenv::IServiceManager", htc_tenv_cmds()); });
+    add("htc:tenv", [] { return make_tma("nn::htc::tenv::IServiceManager", tenv_cmds()); });
     add("htcs", [] { return make_tma("nn::tma::IHtcsManager", htcs_cmds()); });
     add("olsc:u", [] { return make_olsc(); });
 }
 
-// Process-wide state back to its start-up value: the clock requests, and the events (cleared).
 void misc_reset() {
+    ro::reset_for_tests();
+    bluetooth_reset();
+    npns_reset();
     {
-        MmState& s = mm_state();
-        std::lock_guard<std::mutex> g(s.mu);
-        s.next_id = 0;
-        for (auto& sl : s.slots) sl = MmSlot{};
+        Mm& m = mm();
+        std::lock_guard<std::mutex> lk(m.mu);
+        m.next_id = 0;
+        m.slots = {};
     }
-    MiscEvents& e = events();
-    e.aoc_list_changed.clear();
-    e.aoc_purchased.clear();
-    e.nfc_available.clear();
-    e.nfc_activate.clear();
-    e.nfc_deactivate.clear();
-    e.nfp_available.clear();
-    e.nfp_activate.clear();
-    e.nfp_deactivate.clear();
+    events().clear_all();
 }
 
 }  // namespace nxrt::services

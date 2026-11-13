@@ -94,6 +94,9 @@ enum class Language : uint32_t {   // nn::settings::Language / set LanguageCode 
 };
 struct TitleProfile {
     uint64_t program_id = 0;                               // [title] program_id
+    // [title] application_id: the application the program belongs to (its add-ons are the application's). Default: the program id
+    // without its program index (the low 12 bits). From AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+    uint64_t application_id = 0;
     std::string name;                                      // [title] name
     std::string display_version;                           // [title] display_version
     uint32_t supported_languages = 0;                      // bit n = Language n; [title] supported_languages (comma list of names, or a hex mask)

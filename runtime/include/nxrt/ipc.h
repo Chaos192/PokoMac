@@ -64,6 +64,17 @@ struct Response {
 
 using Handler = std::function<uint32_t(Request&, Response&)>;   // returns a Result code (0 = success)
 
+// ---- command extensions (src/ipc/extend.cpp; ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch) ------------------
+// Commands added to an interface, by its Service name, from a file of their own (src/services/ext_*.cpp): Service::handle consults them
+// only when the interface's own table has no handler for the command, so a handler the interface registers itself always wins. The
+// handler gets the Service it was asked of. Registered at start-up (services::register_all), read-only afterwards.
+class Service;
+using ExtHandler = std::function<uint32_t(Service&, Request&, Response&)>;
+void extend(const std::string& iface, uint32_t id, const char* cmd_name, ExtHandler h);
+bool find_extension(const std::string& iface, uint32_t id, ExtHandler* out);   // copies the handler out (no lock held while it runs)
+std::vector<std::pair<std::string, std::pair<uint32_t, const char*>>> extensions();   // (interface, (id, name)) of every extension
+void extensions_clear();                                                               // tests
+
 // ---- request recorder (src/ipc/record.cpp) ---------------------------------------------------------------------------------
 // [ipc] record = <file> (off by default): every request a service handles, its reply and every service closed are written to the file,
 // so a game's run can be replayed against two builds of a service (tools/services/ipc_diff, runtime/tests/ipc_replay). Format: record.cpp.

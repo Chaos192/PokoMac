@@ -25,6 +25,9 @@ constexpr uint64_t kGuestWindowLo = 0x7100000000ull, kGuestWindowHi = 0x80000000
 constexpr uint64_t kRemoteBase = 0x7200000000ull;   // Switch 2 remote region (svcGetInfo 29/30): reserved address space
 #endif
 constexpr uint64_t kRemoteSize = 0x100000000ull;   // 4 GiB
+// AnySwitch lifts and maps an Android build 256 GiB lower (kGuestShift); PokoMac has no Android layout, so its guest addresses are
+// the console's. Kept for the code PokoMac takes from AnySwitch (ro.h).
+constexpr uint64_t kGuestShift = 0;
 constexpr uint64_t kHleBase = 0x7400000000ull;      // placeholder addresses for host functions (never mapped): see dispatch.h
 constexpr uint64_t kHleSize = 0x1000000ull;         // 16 bytes per thunk
 constexpr uint64_t kSdkBase = 0x7500000000ull;      // sdk / subsdk modules sit at their own bases from here on

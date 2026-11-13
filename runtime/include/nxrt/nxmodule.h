@@ -49,6 +49,11 @@ struct RegResult {
 RegResult nxmodule_register(Module* image, const NxModule* nx, uint32_t abi_version);
 #define NXRT_REGISTER_NXMODULE(image, nxmod) ::nxrt::nxmodule_register((image), &(nxmod), NXRECOMP_ABI_VERSION)
 
+// Takes a module registered while the game runs out again (an NRO the game unmapped, whose address range another NRO now needs): its
+// functions leave the call table, lookups no longer see it, its index and range are free for another registration. False when it is not
+// registered. Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+bool nxmodule_unregister(const NxModule* nx);
+
 const NxModule* nxmodule_by_index(uint32_t index);
 const NxModule* nxmodule_by_name(const char* name);
 const NxModule* nxmodule_at(uint64_t addr);        // the registered module whose [base, text_end) contains addr, or null

@@ -76,6 +76,7 @@ add_subdirectory(third_party/pokopia-coop)   # [net] protocol = native: pokopia-
 target_link_libraries(nxrt PRIVATE pokopia_coop)
 add_subdirectory(third_party/miniz)   # zlib streams (MIT): the Pokopia save repair, games/pkp/pkp_save_uuid.cpp
 include(cmake/media_deps.cmake)   # libvpx for the Switch 2 video decoders (optional)
+include(cmake/opus_deps.cmake)    # libopus (BSD-3-Clause) for hwopus (src/services/audio_opus.cpp; ported from AnySwitch by Chaos192)
 # The cheats menu (src/cheats, src/gfx/play/cheats_ui*; ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch)
 include(cmake/lua_deps.cmake)     # Lua 5.4 (MIT) for the cheats overlay's scripts (src/cheats/luavm.cpp)
 target_link_libraries(nxrt PRIVATE nxrt_lua)

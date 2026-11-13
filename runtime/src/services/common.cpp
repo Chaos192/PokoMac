@@ -288,6 +288,7 @@ TitleProfile load_profile() {
     p.program_id = static_cast<uint64_t>(config_get_int("title", "program_id", static_cast<int64_t>(p.program_id)));
     // [process] program_id (kernel GetInfo ProgramId) overrides when it is set explicitly.
     if (config_has("process", "program_id")) p.program_id = static_cast<uint64_t>(config_get_int("process", "program_id", 0));
+    p.application_id = static_cast<uint64_t>(config_get_int("title", "application_id", static_cast<int64_t>(p.program_id & ~0xFFFull)));
     p.name = config_get_str("title", "name", p.name.c_str());
     p.display_version = config_get_str("title", "display_version", p.display_version.c_str());
     p.supported_languages = parse_language_mask(config_get_str("title", "supported_languages", ""), p.supported_languages);

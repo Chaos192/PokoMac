@@ -40,6 +40,9 @@ void font_engine_set_originals_for_tests(uint64_t init, uint64_t fin, uint64_t w
 void register_network();     void network_reset();     // network.cpp     nifm, bsd, ssl, nim, friend, prepo, pctl, bcat, ldn, nsd, ...
 std::shared_ptr<ipc::Service> make_ldn_user_creator();   void ldn_reset();   // ldn.cpp: ldn:u's objects (registered by network.cpp)
 void register_misc();        void misc_reset();        // misc.cpp        csrng, ldr:ro, mm:u, hwopus, aoc:u, caps, mii, irs, nfc, nfp, ...
+void register_bluetooth();   void bluetooth_reset();   // bluetooth.cpp   bt, btm:u (registered by misc.cpp; from AnySwitch by Chaos192)
+void register_npns();        void npns_reset();        // npns.cpp        npns:u, npns:s (registered by misc.cpp; from AnySwitch by Chaos192)
+void register_pm();                                    // pm.cpp          pm:dmnt (registered by misc.cpp; from AnySwitch by Chaos192)
 void register_audio();       void audio_reset();       // audio.cpp       audren:u (calls the two below)
 void register_audio_out();   void audio_out_reset();   // audio_out.cpp   audout:u, audin:u
 std::shared_ptr<ipc::Service> audio_out_manager();   std::shared_ptr<ipc::Service> audio_in_manager();   // for aud:u (Switch 2)

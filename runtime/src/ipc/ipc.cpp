@@ -292,6 +292,7 @@ uint32_t control(const std::shared_ptr<KSession>& s, const hipc::Message& m, Res
 uint32_t Service::handle(Request& req, Response& rsp) {
     auto it = cmds_.find(req.cmd);
     if (it != cmds_.end()) return it->second.fn(req, rsp);
+    if (ExtHandler ext; find_extension(name_, req.cmd, &ext)) return ext(*this, req, rsp);   // src/services/ext_*.cpp (AnySwitch's)
     // [ipc] stub_result (NXRT_IPC_STUB_RESULT) also answers unknown commands of real services. The default refuses with kStubService
     // (the guest sees a failure at the call that has no answer); 0 is a bring-up probe only: an empty "success" hands the guest zeros
     // and no objects, so the crash comes later and far from its cause. Logged at Warn once per (service, command); the end-of-run
