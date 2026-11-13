@@ -226,8 +226,25 @@ only) runs the glass blur on the GPU against the reference and times it.
   compiler inlined the function into keep the old code unless the game is built for live patching (below). The overlay shows which, and
   **Write the IPS patches** gives the next build the patch everywhere (`<cheats dir>/exefs_patches/<build id>.ips`, see "Code patches
   (IPS / IPS32)").
-- **Live patching in every build** (`pkp_build.py` lifts with `--live-patch` by default since f721f36: the decision that code
-  patches work in the one normal build of each game; a build from before plays as it is and the next Build adds it). Every lifted function starts with `NX_OV` (recomp
+- **Cheats cost nothing while no code cheat is on** (a cheat should only affect the game while it is on;
+  dmnt on the console costs nothing either). The default build has no live-patch checks (the code of each function is that of
+  `--no-live-patch`, compared instruction by instruction on Pokopia's sdk, subsdk0 and rtld) and **room before every function's entry**:
+  `pkp_build.py` `ENTRY_ROOM`, `-fpatchable-function-entry` with all of it before the entry (4 nops on arm64, 14 one-byte nops on
+  x86-64), never run. Data cheats need nothing else: the VM writes guest memory as on the console. A code cheat redirects only what it
+  patches (`entryjump.cpp`): the function lifted again from the patched bytes as a unit (as before), then a far jump written into the
+  room of its compiled entry and one branch over the entry's first instruction (LLVM never branches to a function's first instruction:
+  its entry block has no predecessors), so every call, from any caller, runs the unit; turned off, the branch goes first, then the room
+  (its nops fall through to the entry). On macOS the code page is replaced by a changed copy in one `mach_vm_remap` (no thread runs half
+  a change; the process stays signed-valid); on Windows the game's other threads are suspended, none inside the bytes that change, as
+  debuggers and Detours change live code. The redirect goes through a stub that records the unit's first run: a patched function the
+  game has not called in the 10 s since is logged once and shown as **not run yet** (a function the game is inside, in a loop it never
+  leaves, keeps the old code until it returns: the case the loop-head checks below covered). **Inlined copies**: the guest callers of the
+  patched function (its `bl` / `b` sites, scanned in the module's code) whose compiled code has no call or jump to its compiled entry
+  inlined it (`inliners.cpp`; arm64 `bl` / `b`, through a linker branch island; x86-64 `call` / `jmp` rel32): each is lifted again from
+  its unchanged code and redirected too, recursively, at most 64; turned off, they go back with it. `nxrt_entryjump_test` (macOS and
+  Windows: 4 threads calling throughout redirects and their removal, every result the old or the new one), `nxrt_inliners_test`.
+- **Live patching through checks** (`--live-patch`, the default from f721f36 on 2026-11-10 to 11-13; a build with it plays as it is and
+  the next Build drops it: +9.7 % instructions in Pokopia with every cheat off, 396,890 checks and 75,308 resume sites). Every lifted function starts with `NX_OV` (recomp
   `ctx.h`): a load of `Ctx.ov` and a branch. While no live patch exists `Ctx.ov` is null and that is all it costs; when one does, the
   runtime points every guest thread's `Ctx.ov` at a table of per-module bitmaps (one bit per 4-byte word of code) and sets the patched
   function's bit, and its entry sends the call to `nx_hook_entry`, where the function recompiled from the patched bytes runs. So a live

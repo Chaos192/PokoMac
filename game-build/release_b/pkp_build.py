@@ -79,6 +79,15 @@ MODULES = [
 CXXFLAGS = TARGET + ['-std=c++20', '-O1', '-w', '-fno-exceptions', '-fno-rtti',
                      '-fno-strict-aliasing', '-ffp-contract=off', '-fno-threadsafe-statics']
 COMPILER = [ZIG, 'c++']                 # the compile command before the flags (tests put a fake one here)
+# Room before every lifted function's entry, never run (ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch, 84a42ecc; since
+# 2026-11-13: cheats cost nothing while no code cheat is on, and only the functions a code cheat patches while one is). A
+# code cheat redirects the patched function's compiled entry into it while the game runs (runtime/src/cheats/entryjump.h): a far jump in the
+# room, one branch over the first instruction. All of it before the entry, so the function's own instructions are those of a build without
+# it: 4 nops (16 bytes: ldr x16 / br x16 / the target) on arm64, 14 one-byte nops (jmp [rip] / the target) on x86-64. Zig's c++ takes the
+# flag through -Xclang only. Stamped as 'entry_room'.
+ENTRY_ROOM = (['-Xclang', '-fpatchable-function-entry=4', '-Xclang', '-fpatchable-function-entry-offset=4'] if MACOS
+              else ['-Xclang', '-fpatchable-function-entry=14', '-Xclang', '-fpatchable-function-entry-offset=14'])
+LIFTED_FLAGS = CXXFLAGS + ENTRY_ROOM    # the lifted game code (its translation units); not the on-demand units
 CACHE_MB = 3072                         # default size cap of <game>/build/objcache
 CREATE_NO_WINDOW = 0x08000000
 BELOW_NORMAL = 0x00004000
@@ -130,12 +139,13 @@ def tree_hash(root, rels):
     return h.hexdigest()
 
 
-def tool_stamp(live_patch=True):
+def tool_stamp(live_patch=False):
     """The part of the build stamp this package decides: a release that changes any of it rebuilds pkp.exe. live_patch: every function
-    entry and loop head checks for live code patches (NX_OV, NX_OVL)."""
+    entry and loop head checks for live code patches (NX_OV, NX_OVL; +9.7 % instructions in Pokopia with every cheat off): off by default
+    since 2026-11-13, code cheats redirect the patched function's entry instead (entry_room)."""
     stamp = {'lifter': tree_hash(RECOMP, LIFTER), 'sites': tree_hash(RECOMP, [SITES]), 'sdk': tree_hash(SDK, SDK_FILES),
              'runtime': sha256(os.path.join(SDK, RT_LIB)), 'cxxflags': CXXFLAGS, 'modules': [list(m) for m in MODULES],
-             'live_patch': bool(live_patch)}
+             'live_patch': bool(live_patch), 'entry_room': ENTRY_ROOM}
     if MACOS:
         stamp['identity'] = IDENTITY
     return stamp
@@ -371,7 +381,7 @@ class Runner:
         return rc, '\n'.join(tail)
 
 
-def lift(runner, exefs, gen, jobs, missed_dir=None, missed_txt=None, live_patch=True):
+def lift(runner, exefs, gen, jobs, missed_dir=None, missed_txt=None, live_patch=False):
     """One lifter process per module (the lifter itself runs `jobs` worker processes). missed_dir: where the lift maps go (code made again
     on demand is lifted with them); missed_txt: the game's missed.txt, whose addresses become entries or functions of this lift; live_patch:
     the NX_OV / NX_OVL checks (the cheats overlay's live code patches)."""
@@ -539,7 +549,7 @@ def make_cache(folder, cap_mb):
         return None
     try:
         compiler = ','.join(sha256(c) if os.path.isfile(c) else c for c in COMPILER)
-        return ObjCache(folder, cap_mb << 20, compiler, ' '.join(CXXFLAGS), tree_hash(RECOMP, ['include']))
+        return ObjCache(folder, cap_mb << 20, compiler, ' '.join(LIFTED_FLAGS), tree_hash(RECOMP, ['include']))
     except OSError:
         return None
 
@@ -577,7 +587,7 @@ def compile_all(runner, gen, obj, jobs, env, cache=None):
     def one(t):
         name, src, o = t
         tmp = o + '.tmp'
-        cmd = COMPILER + CXXFLAGS + ['-I', os.path.join(RECOMP, 'include'), '-I', os.path.dirname(src), '-c', src, '-o', tmp]
+        cmd = COMPILER + LIFTED_FLAGS + ['-I', os.path.join(RECOMP, 'include'), '-I', os.path.dirname(src), '-c', src, '-o', tmp]
         rc, tail = runner.run(cmd, env=env)
         if rc != 0:
             return 'Compiling %s/%s failed (exit %d):\n%s' % (name, os.path.basename(src), rc, tail)
@@ -723,6 +733,9 @@ def link(runner, obj, game, env):
         raise Fail('Linking %s failed (exit %d):\n%s' % (EXE, rc, tail))
     if MACOS:
         macho_set_sdk_version(tmp, 12)
+        # ad hoc, without the hardened runtime: a code cheat redirects compiled entries while the game runs (runtime entryjump.cpp). A signing
+        # with the hardened runtime needs allow-unsigned-executable-memory + disable-library-validation (never allow-jit alone: killed);
+        # docs/MACOS.md "Signing and code cheats".
         rc, tail = runner.run(['/usr/bin/codesign', '-s', '-', '-f', tmp], env=env)
         if rc != 0:
             raise Fail('Signing %s failed (exit %d):\n%s' % (EXE, rc, tail))
@@ -856,10 +869,11 @@ def main():
     ap.add_argument('--cache-mb', type=int, default=CACHE_MB, help='size cap of the compiled-object cache in MiB (0 = off)')
     ap.add_argument('--keep', action='store_true', help='keep the generated sources and objects')
     ap.add_argument('--check', action='store_true', help='only say whether <game>/build/done.json matches these tools')
-    ap.add_argument('--live-patch', dest='live_patch', action='store_true', default=True,
-                    help='lift every function with the live-patch checks (recomp ctx.h NX_OV / NX_OVL), so the cheats overlay\'s code patches '
-                         'reach every caller while the game runs (the default)')
-    ap.add_argument('--no-live-patch', dest='live_patch', action='store_false', help=argparse.SUPPRESS)   # only to measure the checks' cost
+    ap.add_argument('--live-patch', dest='live_patch', action='store_true', default=False,
+                    help='lift every function with the live-patch checks (recomp ctx.h NX_OV / NX_OVL): +9.7 %% instructions in Pokopia with '
+                         'every cheat off. Off by default since 2026-11-13 (cheats cost nothing unless a code cheat is on): code '
+                         'cheats redirect the patched function\'s entry instead (ENTRY_ROOM, docs/CHEATS.md). Only to compare the two')
+    ap.add_argument('--no-live-patch', dest='live_patch', action='store_false', help=argparse.SUPPRESS)   # the default
     a = ap.parse_args()
     if a.check:
         if not a.game:

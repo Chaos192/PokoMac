@@ -36,6 +36,27 @@ dotnet publish -c Release -r osx-arm64 --self-contained true tools/shaders/harne
 game-build/scripts/make-release-mac.sh --version <version>
 ```
 
+## Signing and code cheats
+
+`pkp` and the app are signed ad hoc without the hardened runtime (`pkp_build.py` link step, `make-release-mac.sh`). A code cheat
+redirects the patched function's compiled entry while the game runs (`runtime/src/cheats/entryjump.cpp`: the code page replaced by a
+changed copy, `mach_vm_remap`), which such a process may do. Measured on macOS 27.2 (M5 Max, 11-13) with a function of the program's own
+signed code redirected and put back while four threads called it:
+
+| how the program is signed | the redirect |
+|---|---|
+| ad hoc, no hardened runtime (the app as it ships) | works, both ways (page copy in place, page swap); the process stays signed-valid |
+| hardened runtime | killed (SIGKILL) |
+| hardened runtime + `com.apple.security.cs.allow-unsigned-executable-memory` | works |
+| hardened runtime + `com.apple.security.cs.disable-executable-page-protection` | works |
+| hardened runtime + `com.apple.security.cs.allow-jit` only | killed |
+
+(Each hardened case also needs `com.apple.security.cs.disable-library-validation`, or the ad-hoc-signed game libraries do not load.) So a
+package built with the hardened runtime (notarization requires it, and accepts these exceptions) must give `pkp` the pair
+`allow-unsigned-executable-memory` + `disable-library-validation`; never `allow-jit` alone. Bit Slicer (BSD-3-Clause) and frida
+(wxWindows Library Licence 3.1) change code the same way (a private copy of the code page, `VM_PROT_COPY`): their mechanism only, none
+of their code.
+
 ## How the port works
 
 The original Windows runtime is kept as it is; the macOS build adds:

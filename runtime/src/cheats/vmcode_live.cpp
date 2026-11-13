@@ -58,6 +58,11 @@ public:
             if (p.addr == word) return p.state == cp::State::Compiling;
         return false;
     }
+    bool waiting(uint64_t word) override {
+        for (const cp::Patch& p : cp::patches())
+            if (p.addr == word) return p.waiting;
+        return false;
+    }
     bool failed(uint64_t word, std::string* why) override {
         for (const cp::Patch& p : cp::patches())
             if (p.addr == word) {

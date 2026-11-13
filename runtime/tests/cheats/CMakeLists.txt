@@ -30,6 +30,15 @@ target_include_directories(nxrt_vmcode_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}
 add_executable(nxrt_reach_test reach_test.cpp)
 target_include_directories(nxrt_reach_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cheats")
 
+# A compiled function's entry redirected while threads call it, and put back (entryjump.cpp, this host); which compiled functions inlined a
+# patched one (inliners.cpp). Both include their source directly.
+add_executable(nxrt_entryjump_test entryjump_test.cpp)
+target_include_directories(nxrt_entryjump_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cheats")
+find_package(Threads)
+target_link_libraries(nxrt_entryjump_test PRIVATE Threads::Threads)
+add_executable(nxrt_inliners_test inliners_test.cpp)
+target_include_directories(nxrt_inliners_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cheats")
+
 add_executable(nxrt_export_test export_test.cpp)
 target_include_directories(nxrt_export_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cheats")
 
@@ -61,6 +70,8 @@ add_test(NAME aob COMMAND nxrt_aob_test)
 add_test(NAME cheat_engine COMMAND nxrt_cheat_engine_test)
 add_test(NAME vmcode COMMAND nxrt_vmcode_test)
 add_test(NAME reach COMMAND nxrt_reach_test)
+add_test(NAME entryjump COMMAND nxrt_entryjump_test)
+add_test(NAME inliners COMMAND nxrt_inliners_test)
 add_test(NAME cheat_export COMMAND nxrt_export_test)
 add_test(NAME pointerscan COMMAND nxrt_pointerscan_test)
 add_test(NAME disasm COMMAND nxrt_disasm_test)

@@ -641,6 +641,13 @@ void page_cheats() {
                 ImGui::SameLine(0, th::sp(th::S3));
                 th::text(th::Type::Small, p.text2, "applying…");
             }
+            if (r.waiting && r.error.empty()) {   // live, its new code not run yet (the game has not called the patched function again)
+                ImGui::SameLine(0, th::sp(th::S3));
+                th::text(th::Type::Small, p.text2, "not run yet");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", "On, but the game has not run its new code yet. It takes effect the next time the game calls the "
+                                            "changed function; if the game is inside that function in a loop it never leaves, only once it returns.");
+            }
             if (!r.error.empty()) {   // its code could not go live (a compile failed, the patcher refused it): turned off, never half on
                 ImGui::SameLine(0, th::sp(th::S3));
                 th::text(th::Type::Small, p.warn, "could not turn on");

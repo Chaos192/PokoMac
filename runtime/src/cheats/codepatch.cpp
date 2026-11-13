@@ -36,6 +36,8 @@
 #include "nxrt/missed.h"
 #include "nxrt/module.h"
 #include "nxrt/nxmodule.h"
+#include "entryjump.h"
+#include "inliners.h"
 #include "reach.h"
 
 namespace nxrt::cheats::cp {
@@ -60,6 +62,14 @@ struct Fn {
     size_t jump_len = 0;
     uint64_t gen = 0;                // bumped by every rebuild; a worker whose generation is stale throws its result away
     uint64_t done_gen = 0;           // the rebuild whose swap has run (== gen: the code runs what memory holds, see settled())
+    // A build with room before its entries (entryjump.h, the default since 11-13: no live-patch checks): the entry redirected to the unit
+    // through a stub that records the first run, and the functions that inlined this one redirected with it.
+    bool ej_room = false;
+    ej::Saved ej_saved;
+    ej::Stub stub;
+    std::chrono::steady_clock::time_point live_at{};
+    std::vector<uint64_t> inliners;  // guest functions redirected along with this one (they inlined it)
+    int inl_refs = 0;                // patched functions this one is redirected for (it inlined them)
 };
 
 struct G {
@@ -346,6 +356,95 @@ void set_state_locked(uint64_t fn_start, State st, const std::string& note) {
     }
 }
 
+// ---- the functions that inlined a patched one (inliners.h), for a build without live-patch checks -------------------------------------
+// The build's compiled entry of a guest function (its module table: the dispatcher may point at a unit by now), and where its code ends
+// (the next compiled entry of the module).
+struct HostIndex {
+    std::vector<uint64_t> starts;    // every compiled entry of the module, sorted
+};
+std::mutex g_hix_mu;
+std::map<const NxModule*, HostIndex> g_hix;
+
+bool host_of(uint64_t fn, uint64_t* host, uint64_t* host_end) {
+    const NxModule* nx = nxmodule_at(fn);
+    if (!nx || !nx->fns || nx->nfns <= 0) return false;
+    const FnEntry* lo = nx->fns;
+    const FnEntry* hi = nx->fns + nx->nfns;
+    const FnEntry* it = std::lower_bound(lo, hi, fn, [](const FnEntry& e, uint64_t a) { return e.addr < a; });
+    if (it == hi || it->addr != fn || !it->fn) return false;
+    const uint64_t h = reinterpret_cast<uint64_t>(it->fn);
+    std::lock_guard<std::mutex> lk(g_hix_mu);
+    HostIndex& ix = g_hix[nx];
+    if (ix.starts.empty()) {
+        ix.starts.reserve(static_cast<size_t>(nx->nfns));
+        for (int i = 0; i < nx->nfns; ++i)
+            if (nx->fns[i].fn) ix.starts.push_back(reinterpret_cast<uint64_t>(nx->fns[i].fn));
+        std::sort(ix.starts.begin(), ix.starts.end());
+    }
+    auto nx_it = std::upper_bound(ix.starts.begin(), ix.starts.end(), h);
+    *host = h;
+    *host_end = nx_it == ix.starts.end() ? h + 0x10000 : std::min<uint64_t>(*nx_it, h + 0x100000);
+    return true;
+}
+
+// The guest functions of fn's module with a bl / b to fn (the guest code scanned in 1 MiB pieces).
+std::vector<uint64_t> guest_callers(uint64_t fn) {
+    std::vector<uint64_t> out;
+    const NxModule* nx = nxmodule_at(fn);
+    if (!nx) return out;
+    std::vector<uint32_t> buf;
+    for (uint64_t a = nx->base; a < nx->text_end;) {
+        const uint64_t n = std::min<uint64_t>(nx->text_end - a, 1 << 20) & ~uint64_t{3};
+        if (!n) break;
+        buf.resize(static_cast<size_t>(n / 4));
+        if (gmem::read(a, buf.data(), static_cast<size_t>(n)))
+            for (uint64_t site : inl::guest_sites(buf.data(), buf.size(), a, fn)) {
+                uint64_t fs = 0, fe = 0;
+                std::string m;
+                if (function_at(site, &m, &fs, &fe) && fs != fn) out.push_back(fs);
+            }
+        a += n;
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+std::vector<uint64_t> find_inliners(uint64_t fn) {
+    inl::Source src;
+    src.guest_callers = guest_callers;
+    src.host_of = host_of;
+    src.host_calls = [](uint64_t h, uint64_t e, uint64_t callee) {
+#if defined(__aarch64__) || defined(_M_ARM64)
+        const inl::Host arch = inl::Host::Arm64;
+#else
+        const inl::Host arch = inl::Host::X64;
+#endif
+        auto rd = [](uint64_t a, uint32_t* w) { std::memcpy(w, reinterpret_cast<const void*>(a), 4); return true; };
+        return inl::calls(reinterpret_cast<const uint8_t*>(h), static_cast<size_t>(e - h), h, callee, arch, rd);
+    };
+    bool capped = false;
+    std::vector<uint64_t> out = inl::inliners(fn, src, 64, &capped);
+    if (capped)
+        NXLOG_W(kTag, "code at %s: more than 64 functions inlined it: the first 64 are redirected with it, the rest keep the old code",
+                where(fn).c_str());
+    return out;
+}
+
+// The game's guest threads other than the calling one, for the entry writes that stop them (Windows).
+void init_threads_once() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        ej::set_threads([] {
+            std::vector<void*> out;
+            kernel::KThread* self = kernel::current_thread();
+            for (auto& t : kernel::threads())
+                if (t && t.get() != self && t->started && !t->exited.load() && t->host_handle) out.push_back(t->host_handle);
+            return out;
+        });
+    });
+}
+
 // Everything the patched words reach that the dispatcher may not have yet (a code cave, the instruction after the hook): made ready here,
 // on the patch's worker thread before the swap, so no guest thread waits for the build's compiler when it first runs the patch (reach.h;
 // a code cheat turned on stalled a frame for 12.7 s on the PC). The game keeps running the old code meanwhile.
@@ -362,9 +461,28 @@ reach::Ready prepare_reach(uint64_t fn_start, uint64_t fn_end, const std::vector
     return r;
 }
 
+bool fn_for_locked(uint64_t addr, uint64_t* fn_start, std::string* err);
+
+// A function redirected because it inlined patched ones (Fn::inl_refs): back to its compiled code once none is left and it has no patch of
+// its own. Called with s.mu held, the game's other threads held (a swap job).
+void release_inliner_locked(uint64_t fn) {
+    G& s = g();
+    auto it = s.fns.find(fn);
+    if (it == s.fns.end() || --it->second.inl_refs > 0) return;
+    for (const auto& kv : s.patches)
+        if (kv.second.fn_start == fn && kv.second.state != State::Reverted) return;   // its own patch keeps it compiled again
+    Fn& gf = it->second;
+    std::string why;
+    if (gf.ej_saved.on && gf.orig) ej::restore(reinterpret_cast<void*>(gf.orig), gf.ej_saved, &why);
+    gf.ej_saved = ej::Saved{};
+    if (gf.orig) fn_register(fn, gf.orig);
+    gf.unit = nullptr;
+}
+
 // Lifts the function again from its bytes in memory (with every patch in it) and the sites its breakpoints need, then swaps it in at the
 // next frame boundary. With nothing left in it, the compiled code comes back. Called with s.mu held.
 void rebuild_locked(uint64_t fn_start) {
+    init_threads_once();
     G& s = g();
     Fn& f = s.fns[fn_start];
     f.gen++;
@@ -381,7 +499,7 @@ void rebuild_locked(uint64_t fn_start) {
         any_stop |= kv.second.stop;
         sites.push_back(kv.first);
     }
-    if (!any_patch && !any_bp) {
+    if (!any_patch && !any_bp && f.inl_refs == 0) {
         // back to the build's code
         if (f.orig) {
             const GuestFn orig = f.orig;
@@ -389,18 +507,25 @@ void rebuild_locked(uint64_t fn_start) {
             uint8_t saved[16];
             std::memcpy(saved, f.saved, sizeof saved);
             const size_t len = f.jump_len;
+            const ej::Saved ejs = f.ej_saved;
+            const std::vector<uint64_t> inls = f.inliners;
             f.redirected = false;
             f.unit = nullptr;
-            ctl::run_held([orig, redirected, saved, len, fn_start, gen] {
+            f.ej_saved = ej::Saved{};
+            f.inliners.clear();
+            ctl::run_held([orig, redirected, saved, len, fn_start, gen, ejs, inls] {
                 ov_clear(fn_start);
+                std::string why;
                 if (redirected) {
-                    std::string why;
                     uint8_t tmp[16];
                     write_code(reinterpret_cast<void*>(orig), saved, len, tmp, &why);
                 }
+                if (ejs.on && !ej::restore(reinterpret_cast<void*>(orig), ejs, &why))
+                    NXLOG_W(kTag, "code at %s: its compiled entry could not be put back (%s)", where(fn_start).c_str(), why.c_str());
                 fn_register(fn_start, orig);
                 G& s = g();
                 std::lock_guard<std::mutex> lk(s.mu);
+                for (uint64_t gfn : inls) release_inliner_locked(gfn);
                 if (auto it = s.fns.find(fn_start); it != s.fns.end() && it->second.gen == gen) it->second.done_gen = gen;
             });
         } else {
@@ -432,12 +557,28 @@ void rebuild_locked(uint64_t fn_start) {
         }
     }
     const uint64_t fn_end = f.end;
-    std::thread([name, fn_start, fn_end, bytes, sites, gen, patched] {
+    // a build without live-patch checks: the functions that inlined this one are compiled again too, and redirected with it (once)
+    const NxModule* fnx = nxmodule_at(fn_start);
+    const bool want_inl = f.ej_room && f.orig && !(fnx && nxmodule_live_patch(fnx)) && f.inliners.empty() && any_patch;
+    std::thread([name, fn_start, fn_end, bytes, sites, gen, patched, want_inl] {
         const auto t0 = std::chrono::steady_clock::now();
         std::string err;
         const GuestFn unit = missed::make_code_unit(name, fn_start, bytes, sites, &err);
         // a patch goes live only with all of its code ready: the function, and what it reaches (its cave, the code after its hook)
         const reach::Ready ready = unit ? prepare_reach(fn_start, fn_end, patched) : reach::Ready{};
+        std::vector<std::pair<uint64_t, GuestFn>> inl_units;
+        if (unit && ready.ok && want_inl) {
+            for (uint64_t gfn : find_inliners(fn_start)) {
+                std::string m, e2;
+                uint64_t gs = 0, ge = 0;
+                if (!function_at(gfn, &m, &gs, &ge)) continue;
+                std::vector<uint8_t> gb(static_cast<size_t>(std::min<uint64_t>(ge, gs + 0x40000) - gs));
+                if (!gmem::read(gs, gb.data(), gb.size())) continue;
+                if (const GuestFn gu = missed::make_code_unit("patch_" + m, gs, gb, {}, &e2)) inl_units.push_back({gs, gu});
+                else NXLOG_W(kTag, "code at %s: %s inlined it and could not be compiled again (%s): it keeps the old code", where(fn_start).c_str(),
+                             where(gs).c_str(), e2.c_str());
+            }
+        }
         const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         G& s = g();
         std::lock_guard<std::mutex> lk(s.mu);
@@ -461,7 +602,8 @@ void rebuild_locked(uint64_t fn_start) {
         set_state_locked(fn_start, State::Compiling, std::string(note) + "; swapping it in at the next frame");
         const GuestFn orig = f.orig;
         const bool room = f.room;
-        ctl::run_held([fn_start, unit, orig, room, gen, secs] {
+        const bool ej_room = f.ej_room;
+        ctl::run_held([fn_start, unit, orig, room, ej_room, gen, secs, inl_units] {
             G& s = g();
             std::lock_guard<std::mutex> lk(s.mu);
             Fn& f = s.fns[fn_start];
@@ -476,6 +618,42 @@ void rebuild_locked(uint64_t fn_start) {
                 set_state_locked(fn_start, State::Live, note);
                 NXLOG_I(kTag, "code at %s: %s", where(fn_start).c_str(), note);
                 return;
+            }
+            if (ej_room && orig) {
+                // the build's room before the entry (entryjump.h): every call of the compiled function goes to the unit, through the stub
+                // that records its first run; the functions that inlined it go to theirs
+                const ej::Stub stub = ej::make_stub(reinterpret_cast<const void*>(unit));
+                const void* target = stub.code ? stub.code : reinterpret_cast<const void*>(unit);
+                if (ej::redirect(reinterpret_cast<void*>(orig), target, &f.ej_saved, &why)) {
+                    f.stub = stub;                           // an older stub stays: a thread may still be on its way through it
+                    f.live_at = std::chrono::steady_clock::now();
+                    size_t inl_n = 0;
+                    for (const auto& [gfn, gunit] : inl_units) {
+                        uint64_t gs = 0;
+                        std::string e2;
+                        if (!fn_for_locked(gfn, &gs, &e2)) continue;
+                        Fn& gf = s.fns[gs];
+                        Fn& self = s.fns[fn_start];                  // (fn_for_locked may have grown the map: refer to it again)
+                        self.inliners.push_back(gs);
+                        if (gf.inl_refs++ > 0 || gf.ej_saved.on) { ++inl_n; continue; }   // redirected already (another patch, its own)
+                        fn_register(gs, gunit);
+                        if (gf.orig && gf.ej_room && ej::redirect(reinterpret_cast<void*>(gf.orig), reinterpret_cast<const void*>(gunit), &gf.ej_saved, &e2)) {
+                            gf.unit = gunit;
+                            ++inl_n;
+                        } else {
+                            NXLOG_W(kTag, "code at %s: %s inlined it and could not be redirected (%s): it keeps the old code", where(fn_start).c_str(),
+                                    where(gs).c_str(), e2.empty() ? "no room before its compiled entry" : e2.c_str());
+                        }
+                    }
+                    const std::string with = inl_n ? ", with the " + std::to_string(inl_n) + " functions that inlined it" : std::string();
+                    char note[240];
+                    std::snprintf(note, sizeof note, "live for every call (recompiled in %.1f s; its compiled entry redirected%s)", secs, with.c_str());
+                    set_state_locked(fn_start, State::Live, note);
+                    NXLOG_I(kTag, "code at %s: %s", where(fn_start).c_str(), note);
+                    return;
+                }
+                if (stub.code) ej::free_stub(stub);
+                NXLOG_W(kTag, "code at %s: its compiled entry could not be redirected (%s)", where(fn_start).c_str(), why.c_str());
             }
             if (kJumpLen && orig && room) {
                 uint8_t jump[16];
@@ -518,6 +696,7 @@ bool fn_for_locked(uint64_t addr, uint64_t* fn_start, std::string* err) {
         f.end = std::min<uint64_t>(end, start + 0x40000);      // a unit of at most 256 KiB
         f.module = module;
         f.orig = fn_lookup(start);
+        f.ej_room = f.orig && ej::has_room(reinterpret_cast<const void*>(f.orig));   // the build's room before the entry (entryjump.h)
         // room for the jump: no other registered function's host code starts within it (judged before any unit replaces this one)
         if (f.orig && kJumpLen) {
             const uint64_t h = reinterpret_cast<uint64_t>(f.orig);
@@ -770,7 +949,15 @@ std::vector<Patch> patches() {
     G& s = g();
     std::lock_guard<std::mutex> lk(s.mu);
     std::vector<Patch> out;
-    for (const auto& kv : s.patches) out.push_back(kv.second);
+    const auto now = std::chrono::steady_clock::now();
+    for (const auto& kv : s.patches) {
+        out.push_back(kv.second);
+        // live through a redirected entry, and its new code not run in the 10 s since (entryjump.h's stub)
+        auto f = s.fns.find(kv.second.fn_start);
+        if (kv.second.state == State::Live && f != s.fns.end() && f->second.stub.code && !ej::entered(f->second.stub) &&
+            now - f->second.live_at > std::chrono::seconds(10))
+            out.back().waiting = true;
+    }
     return out;
 }
 

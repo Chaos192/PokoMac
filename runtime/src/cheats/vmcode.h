@@ -58,6 +58,9 @@ public:
     // True when the patch of this word could not be made (its function, or what it reaches, did not compile): it never went live, the game
     // runs the code it had. *why: the reason.
     virtual bool failed(uint64_t word, std::string* why) { (void)word; (void)why; return false; }
+    // True when the patch of this word went live through a redirected entry and its new code has not run since (codepatch.h
+    // Patch::waiting: the game has not called the function again; one it is inside, in a loop it never leaves, keeps the old code).
+    virtual bool waiting(uint64_t word) { (void)word; return false; }
     // [lo, hi) of the cave [cave_lo, cave_hi) holds new bytes: make the cave code and drop what was made from the old bytes.
     virtual void cave_written(uint64_t cave_lo, uint64_t cave_hi, uint64_t lo, uint64_t hi) = 0;
     virtual void log(const std::string& line) { (void)line; }
@@ -114,6 +117,8 @@ public:
     // The cheat's code cannot go live: a code word it holds could not be made (Sink::failed) or the patcher refused it. *why: the reason.
     // The engine turns such a cheat off and the cheats list shows why.
     bool failure(int entry, std::string* why) const;
+    // The cheat's code is live but has not run yet (Sink::waiting for a code word it holds).
+    bool waiting(int entry) const;
     size_t caves_waiting() const;                      // cave words whose return waits for their code to settle
 
 private:

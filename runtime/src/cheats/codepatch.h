@@ -43,6 +43,9 @@ struct Patch {
     std::string note;              // why not live, or how long the unit took
     bool by_game = false;          // the game wrote this code itself (guest_code_written): live like a patch, never reverted or exported
     bool by_cheat = false;         // an Atmosphère cheat wrote it (apply_words, vmcode.h): reverted when the cheat goes off, never exported
+    // Live through a redirected entry (entryjump.h) and its new code has not run in the 10 s since: the game has not called the function
+    // again (it takes effect at the next call; a function the game is inside, in a loop it never leaves, keeps the old code until it returns).
+    bool waiting = false;
 };
 
 // Patches the code at addr (a multiple of 4; up to 64 bytes). Returns at once; the unit is made on a worker thread and the patch goes live

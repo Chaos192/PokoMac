@@ -382,6 +382,13 @@ bool Router::failure(int entry, std::string* why) const {
     return false;
 }
 
+bool Router::waiting(int entry) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    for (const auto& [w, h] : held_)
+        if (h.place.kind == Kind::Code && !h.plain && h.owners.count(entry) && sink_.waiting(w)) return true;
+    return false;
+}
+
 bool Router::applying(int entry) const {
     std::lock_guard<std::mutex> lk(mu_);
     for (const auto& [w, h] : held_)

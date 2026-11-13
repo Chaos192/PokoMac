@@ -239,7 +239,7 @@ std::vector<Engine::CheatRow> Engine::cheats() const {
         if (!e.used) continue;
         auto err = errors_.find(static_cast<int>(i));
         out.push_back({static_cast<int>(i), e.name, i == 0, e.enabled, e.words.size(), e.enabled && router_.applying(static_cast<int>(i)),
-                       err != errors_.end() ? err->second : std::string()});
+                       err != errors_.end() ? err->second : std::string(), e.enabled && i != 0 && router_.waiting(static_cast<int>(i))});
     }
     return out;
 }
@@ -253,7 +253,10 @@ void Engine::set_cheat_enabled(int entry, bool on) {
         if (!e.used) return;
         e.enabled = on;
         program_dirty_ = true;
-        if (on) errors_.erase(entry);                    // tried again: its code is made again
+        if (on) {                                        // tried again: its code is made again
+            errors_.erase(entry);
+            waiting_logged_.erase(entry);
+        }
         // persist toggles.txt beside the file
         const std::string path = stats_.file_path;
         if (!path.empty()) {
@@ -406,6 +409,19 @@ void Engine::turn_off_failed() {
     }
     for (int k : on) {
         std::string why;
+        // live, and its new code not run yet: said once in the log (the cheats list shows it while it lasts)
+        const bool wait = router_.waiting(k);
+        bool say = false;
+        std::string wname;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            bool& logged = waiting_logged_[k];
+            if (wait && !logged) { logged = true; say = true; wname = file_.entries[k].name; }
+        }
+        if (say)
+            NXLOG_W(kTag, "cheat [%s] is live, but the game has not run its new code in the 10 s since: it takes effect the next time the game "
+                          "calls the patched function (one the game is inside, in a loop it never leaves, keeps the old code until it returns)",
+                    wname.c_str());
         if (!router_.failure(k, &why)) continue;
         std::string name;
         {

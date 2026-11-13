@@ -72,7 +72,9 @@ public:
 
     // The loaded cheats, for the overlay list.
     // applying: its code is on its way in. error: why it was turned off (its code could not go live: a compile failed, the patcher refused it)
-    struct CheatRow { int entry; std::string name; bool master; bool enabled; size_t words; bool applying = false; std::string error; };
+    // waiting: on, and its code has not run since it went live (the game has not called the patched function again).
+    struct CheatRow { int entry; std::string name; bool master; bool enabled; size_t words; bool applying = false; std::string error;
+                      bool waiting = false; };
     std::vector<CheatRow> cheats() const;
     void set_cheat_enabled(int entry, bool on);     // persists to toggles.txt (on clears the cheat's error)
     size_t master_entry() const { return 0; }
@@ -118,7 +120,8 @@ private:
     CheatFile file_;
     Vm vm_;
     bool program_dirty_ = true;        // reload the VM program (a toggle changed)
-    std::map<int, std::string> errors_;  // entry -> why it was turned off (CheatRow::error); cleared when it is turned on, and by reload
+    std::map<int, std::string> errors_;
+    std::map<int, bool> waiting_logged_;     // entry -> its "not run yet" said in the log (once while it stays on)  // entry -> why it was turned off (CheatRow::error); cleared when it is turned on, and by reload
     std::vector<FrozenAddr> frozen_;
     uint64_t next_id_ = 1;
     std::function<void(bool)> pause_fn_;
