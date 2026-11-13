@@ -1,6 +1,7 @@
 # Builds the player zip (game-build/scripts/make-release.ps1). A tag v<x.y.z> publishes it as a GitHub release, its notes taken from
 # that version's section of CHANGELOG.md. Manual runs only build it (artifact), unless they name a release tag: run on main with
-# release_tag = v<x.y.z>, they publish it the same way and GitHub creates the tag on the commit that was built. No test or pull
+# release_tag = v<x.y.z>, they publish it the same way and GitHub creates the tag on the commit that was built. A build-only run can
+# name the version it builds as (version = x.y.z: a release candidate to try before it is published; empty: 0.0.0). No test or pull
 # request checks.
 # Testing channel: a tag v<x.y.z>-alpha.N, -beta.N or -rc.N (run on the `testing` branch) publishes a GitHub PRERELEASE. The launcher's
 # Stable channel never offers it; players who chose Testing do. Its notes come from its own CHANGELOG section if there is one, else from
@@ -16,6 +17,10 @@ on:
         description: 'Publish as this release (v<x.y.z> from main; v<x.y.z>-beta.N, -alpha.N or -rc.N, a Testing prerelease, from the testing branch; GitHub creates the tag). Empty: build only.'
         required: false
         default: ''
+      version:
+        description: 'Build only (no release_tag): the version to build as, x.y.z (a release candidate). Empty: 0.0.0.'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -28,6 +33,8 @@ env:
   BASE_RELEASE: v0.8.2
   # the release this run publishes: the pushed tag, or a manual run's release_tag; empty = build only
   REL_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}
+  # a build-only run's version (empty: 0.0.0)
+  BUILD_VERSION: ${{ github.ref_type != 'tag' && inputs.version || '' }}
 
 jobs:
   release:
@@ -49,7 +56,9 @@ jobs:
               if ($env:REL_TAG -notmatch '^v\d+\.\d+\.\d+$') { throw "release_tag '$env:REL_TAG' is not v<x.y.z> or v<x.y.z>-beta.N" }
             }
           }
-          $v = if ($env:REL_TAG) { $env:REL_TAG -replace '^v', '' } else { '0.0.0' }
+          if ($env:BUILD_VERSION -and $env:REL_TAG) { throw "name either release_tag or version, not both" }
+          if ($env:BUILD_VERSION -and $env:BUILD_VERSION -notmatch '^\d+\.\d+\.\d+$') { throw "version '$env:BUILD_VERSION' is not x.y.z" }
+          $v = if ($env:REL_TAG) { $env:REL_TAG -replace '^v', '' } elseif ($env:BUILD_VERSION) { $env:BUILD_VERSION } else { '0.0.0' }
           "VERSION=$v" >> $env:GITHUB_ENV
           "PRERELEASE=$(if ($v -match '-') { 'true' } else { 'false' })" >> $env:GITHUB_ENV
 
@@ -146,7 +155,7 @@ jobs:
       - name: Launcher
         working-directory: launcher
         run: |
-          if ($env:REL_TAG) {   # the launcher window shows its own version
+          if ($env:VERSION -ne '0.0.0') {   # the launcher window shows its own version
             $c = 'src-tauri/tauri.conf.json'; (Get-Content -Raw $c) -replace '"version": "[^"]*"', "`"version`": `"$env:VERSION`"" | Set-Content -NoNewline $c
             $t = 'src-tauri/Cargo.toml'; (Get-Content -Raw $t) -replace '(?m)^version = "[^"]*"', "version = `"$env:VERSION`"" | Set-Content -NoNewline $t
           }
@@ -250,7 +259,7 @@ jobs:
 
       - name: Version
         run: |
-          if [ -n "$REL_TAG" ]; then v=${REL_TAG#v}; else v=0.0.0; fi
+          if [ -n "$REL_TAG" ]; then v=${REL_TAG#v}; elif [ -n "$BUILD_VERSION" ]; then v=$BUILD_VERSION; else v=0.0.0; fi
           echo "VERSION=$v" >> "$GITHUB_ENV"
 
       - name: Packages
@@ -270,7 +279,7 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: 1     # linuxdeploy is an AppImage itself; no FUSE on the runner
           NO_STRIP: true
         run: |
-          if [ -n "$REL_TAG" ]; then   # the launcher window shows its own version
+          if [ "$VERSION" != 0.0.0 ]; then   # the launcher window shows its own version
             sed -i -E "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" src-tauri/tauri.conf.json
             sed -i -E "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" src-tauri/Cargo.toml
           fi
