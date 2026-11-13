@@ -2869,8 +2869,7 @@ struct RbConfig {
     int64_t grace_ms = -1;      // [nvn] readback_grace_ms (-1 auto: 0, flush at once; -2: one frame at the limiter's target, 33 ms when unknown)
     bool check = false;         // [nvn] readback_check
     bool log = false;           // [nvn] readback_log
-    bool defer = false;         // [nvn] readback_defer (off: it froze the game, see CONFIG.md)
-    uint32_t texture = 0;        // [nvn] readback_defer_texture: explicit diagnostic texture id, 0 disables
+    bool defer = true;          // [nvn] readback_defer (on: Recompia, Dittobyte/Recompia 599930bc, #276)
 };
 const RbConfig& rb_config() {
     static const RbConfig c = [] {
@@ -2879,10 +2878,7 @@ const RbConfig& rb_config() {
         r.grace_ms = nxrt::config_get_int("nvn", "readback_grace_ms", -1);
         r.check = nxrt::config_get_bool("nvn", "readback_check", false);
         r.log = nxrt::config_get_bool("nvn", "readback_log", false);
-        r.defer = nxrt::config_get_bool("nvn", "readback_defer", false);
-        const int64_t texture = nxrt::config_get_int("nvn", "readback_defer_texture", 0);
-        if (texture > 0 && texture <= UINT32_MAX) r.texture = static_cast<uint32_t>(texture);
-        NXLOG_I(kTag, "readback candidate: private buffers, completion-only polling, selected texture %u (0 disables); experimental stale-data semantics", r.texture);
+        r.defer = nxrt::config_get_bool("nvn", "readback_defer", true);
         NXLOG_I(kTag, "readback: async %s, grace %s ms, check %s, log %s, defer %s", r.async ? "on" : "off",
                 r.grace_ms == -1 ? "auto (0)" : r.grace_ms == -2 ? "one frame" : std::to_string(r.grace_ms).c_str(), r.check ? "on" : "off", r.log ? "on" : "off",
                 r.defer ? "on" : "off");
@@ -3205,10 +3201,14 @@ bool download_texture(Texture* t, uint32_t level_first, uint32_t level_count, ui
 
     std::lock_guard<std::mutex> lk(g->rb_mu);
 
-    // [nvn] readback_defer (#276): a small texture the game reads again and again (Pokopia: texture 286, 30x16, about once a second) gets
-    // the data of its previous read, and this read's copy is queued without waiting; the next read lands it. The reading thread (often
-    // the game's main thread) then never waits for the GPU: on a capped frame rate the old forced flush and GPU wait (about 13 ms, 21 ms
-    // in all on a Legion Go S at 40 fps) made the frame miss its slot. A first read, or one after a pause, waits as before.
+    // [nvn] readback_defer (#276): Pokopia's scene-colour probes (two 30x16 RGBA8 sRGB render targets a pass reduces the scene image into;
+    // once a second a timer reads one back with no fence and smooths its mean into a tint), read again and again, get the data of their
+    // previous read, and this read's copy is queued without waiting; the next read lands it. On the console the read is a plain memory read
+    // that gets whichever capture the GPU had finished, so data one read period old is what the game saw there too. The reading thread
+    // (often the game's main thread) then never waits for the GPU: on a capped frame rate the old forced flush and GPU wait (about 13 ms,
+    // 21 ms in all on a Legion Go S at 40 fps) made the frame miss its slot. A first read, or one after a pause, a CPU write or a
+    // synchronous read, waits as before. The shape is the identity (texture ids change between sessions). From Recompia
+    // (Dittobyte/Recompia 599930bc), on by default.
     const uint32_t range[4] = {l0, nl, y0, ny};
     const rbdiag::Stamp request{t->id, t->prep_gen.load(std::memory_order_acquire), reinterpret_cast<uintptr_t>(t->mem),
                                t->storage_size, {l0, nl, y0, ny}, g->rb_sync_epoch.load(std::memory_order_acquire)};
@@ -3217,12 +3217,10 @@ bool download_texture(Texture* t, uint32_t level_first, uint32_t level_count, ui
                         std::equal(range, range + 4, g->rb_last_range);
     g->rb_last = now;
     std::copy(range, range + 4, g->rb_last_range);
-    // Explicit texture-id selection is required in addition to the exact observed format/extent. This does not prove stale-data safety.
-    constexpr uint64_t kDeferMaxBytes = 64 * 1024;
+    constexpr uint64_t kDeferMaxBytes = 64 * 1024;   // a private buffer per pending copy: keep them small
     const bool exact_texture = g->format == VK_FORMAT_R8G8B8A8_SRGB && g->base.width == 30 && g->base.height == 16 &&
                                g->base.depth == 1 && L.levels == 1 && L.layers == 1 && L.layout.linear_size <= kDeferMaxBytes;
-    const bool may_defer = rbdiag::eligible(cfg.defer, cfg.texture, exact_texture, repeat,
-                                           g->rb_previous_valid, g->rb_previous, request);
+    const bool may_defer = rbdiag::eligible(cfg.defer, exact_texture, repeat, g->rb_previous_valid, g->rb_previous, request);
     if (g->rb_pending && !may_defer) {
         g->rb_pending.reset();   // incompatible / CPU-written / expired: retire, never reuse, its private buffer
         g->rb_previous_valid = false;

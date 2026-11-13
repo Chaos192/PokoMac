@@ -464,11 +464,17 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     std::vector<VkPhysicalDevice> devs(ndev);
     vkEnumeratePhysicalDevices(instance_, &ndev, devs.data());
 
-    struct Cand { VkPhysicalDevice pd; uint32_t qfam; bool eligible; std::string why; };
+    // luid/uuid: the adapter's identity, used to find one GPU listed twice by two installed drivers (below).
+    struct Cand {
+        VkPhysicalDevice pd; uint32_t qfam; bool eligible; std::string why;
+        bool luid_valid = false; uint8_t luid[VK_LUID_SIZE] = {}; uint8_t uuid[VK_UUID_SIZE] = {};
+    };
     std::vector<Cand> cands;
     for (uint32_t i = 0; i < ndev; ++i) {
-        VkPhysicalDeviceProperties p;
-        vkGetPhysicalDeviceProperties(devs[i], &p);
+        VkPhysicalDeviceIDProperties idp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
+        VkPhysicalDeviceProperties2 p2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &idp};
+        vkGetPhysicalDeviceProperties2(devs[i], &p2);
+        const VkPhysicalDeviceProperties& p = p2.properties;
         GpuInfo gi;
         gi.index = i;
         gi.name = p.deviceName;
@@ -483,6 +489,9 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
             if (mp.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) gi.vram_bytes = std::max<uint64_t>(gi.vram_bytes, mp.memoryHeaps[h].size);
 
         Cand c{devs[i], UINT32_MAX, true, ""};
+        c.luid_valid = idp.deviceLUIDValid == VK_TRUE;
+        std::memcpy(c.luid, idp.deviceLUID, VK_LUID_SIZE);
+        std::memcpy(c.uuid, idp.deviceUUID, VK_UUID_SIZE);
         if (p.apiVersion < VK_API_VERSION_1_3) { c.eligible = false; c.why = "Vulkan 1.3 not supported"; }
         if (c.eligible) {
             VkPhysicalDeviceVulkan13Features f13 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
@@ -520,6 +529,29 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
                 VK_API_VERSION_MAJOR(p.apiVersion), VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion),
                 p.driverVersion, static_cast<double>(gi.vram_bytes) / (1024.0 * 1024.0 * 1024.0),
                 c.eligible ? "" : " NOT USABLE: ", c.eligible ? "" : c.why.c_str());
+    }
+
+    // One GPU, two drivers: a leftover driver package (often an APU's older Radeon driver, whose Vulkan driver also lists
+    // the discrete card) shows the same adapter a second time. The old user-mode driver against the new kernel driver
+    // crashes inside the driver on the first frames, and the default rule cannot tell the two apart (same type, same
+    // memory), so the copy with the older Vulkan / driver version is dropped before the rule runs.
+    auto same_adapter = [](const Cand& a, const Cand& b) {
+        if (a.luid_valid && b.luid_valid) return std::memcmp(a.luid, b.luid, VK_LUID_SIZE) == 0;
+        static const uint8_t zero[VK_UUID_SIZE] = {};
+        return std::memcmp(a.uuid, zero, VK_UUID_SIZE) != 0 && std::memcmp(a.uuid, b.uuid, VK_UUID_SIZE) == 0;
+    };
+    for (size_t i = 0; i < cands.size(); ++i) {
+        for (size_t j = 0; j < cands.size() && cands[i].eligible; ++j) {
+            if (i == j || !cands[j].eligible || !same_adapter(cands[i], cands[j])) continue;
+            const auto vi = std::make_tuple(gpus_[i].api_version, gpus_[i].driver_version, i < j);
+            const auto vj = std::make_tuple(gpus_[j].api_version, gpus_[j].driver_version, j < i);
+            if (vi > vj) continue;   // i is the newer copy (equal versions: the first one listed stays)
+            cands[i].eligible = false;
+            cands[i].why = "older driver for the same GPU as GPU " + std::to_string(j);
+            gpus_[i].can_present = false;
+            NXLOG_W(kTag, "GPU %zu NOT USABLE: %s (two graphics drivers are installed for this GPU; reinstalling the "
+                    "graphics driver removes the old one)", i, cands[i].why.c_str());
+        }
     }
 
     // The rule runs over the usable devices only; a numeric override is an index into the list logged above.
@@ -729,8 +761,10 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
         limits_.max_subgroup_size = p13.maxSubgroupSize;
         limits_.required_subgroup_stages = p13.requiredSubgroupSizeStages;
         limits_.subgroup_size_control = a13.subgroupSizeControl == VK_TRUE;
-        NXLOG_I(kTag, "subgroups: %u wide (%u..%u), size control %d, a size can be required for stages 0x%x", p11.subgroupSize,
-                p13.minSubgroupSize, p13.maxSubgroupSize, limits_.subgroup_size_control ? 1 : 0, static_cast<unsigned>(p13.requiredSubgroupSizeStages));
+        limits_.max_compute_workgroup_subgroups = p13.maxComputeWorkgroupSubgroups;
+        NXLOG_I(kTag, "subgroups: %u wide (%u..%u), size control %d, a size can be required for stages 0x%x, at most %u per compute workgroup",
+                p11.subgroupSize, p13.minSubgroupSize, p13.maxSubgroupSize, limits_.subgroup_size_control ? 1 : 0,
+                static_cast<unsigned>(p13.requiredSubgroupSizeStages), p13.maxComputeWorkgroupSubgroups);
         limits_.max_memory_allocation_count = props_.limits.maxMemoryAllocationCount;
     }
     if (!headless) dev_exts.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);

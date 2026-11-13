@@ -149,6 +149,8 @@ struct DeviceLimitsExt {
     // VK_EXT_subgroup_size_control (Vulkan 1.3): the range a pipeline stage may ask for, and the stages that may ask
     uint32_t min_subgroup_size = 0, max_subgroup_size = 0, required_subgroup_stages = 0;
     bool subgroup_size_control = false;
+    // most subgroups one compute workgroup may hold: a stage asking for 32 runs at most 32 x this invocations per workgroup
+    uint32_t max_compute_workgroup_subgroups = 0;
     uint32_t max_memory_allocation_count = 0;
 };
 

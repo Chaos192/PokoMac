@@ -180,7 +180,9 @@ void mirror_destroy(PoolGpu* p);
 // The game's shaders come from NVIDIA's 32-wide warps: shuffles, ballots and votes assume 32 invocations per subgroup. For a stage of a
 // game pipeline: a VkPipelineShaderStageRequiredSubgroupSizeCreateInfo asking for 32 (static, shareable) when the GPU's subgroups are not
 // 32 wide and it can be asked for that stage (AMD runs 64 wide by default); null otherwise (NVIDIA, or a stage that cannot ask).
-const void* subgroup32_info(VkShaderStageFlagBits stage);
+// compute_invocations: a compute stage's workgroup size (x * y * z). Vulkan allows the request only when the workgroup fits in
+// maxComputeWorkgroupSubgroups subgroups of 32; a bigger workgroup runs at the driver's width instead (asking anyway is invalid usage).
+const void* subgroup32_info(VkShaderStageFlagBits stage, uint64_t compute_invocations = 0);
 
 // ---- compute results held in the pool copy (nvn_gpu_pool.cpp, "compute out") ----------------------------------------------------
 // A dispatch that binds the pool copy directly (nvn_replay.cpp, compute shadows) writes its result there: the range is "out" until the
@@ -398,7 +400,6 @@ bool tex_was_read_back(Texture* t);
 // Any thread but the render thread. queue_record: queue_submit without the GPU wait (returns the serial once the render thread recorded
 // the job). wait_serial_grace: up to grace_ns for the render thread to flush the serial itself, then wait_serial(serial, UINT64_MAX).
 uint64_t queue_record(std::function<void(struct Frame&)> record);
-uint64_t queue_post(std::function<void(struct Frame&)> record);   // [nvn] readback_defer: returns at once (the serial is reserved, not yet recorded)
 // Candidate-only deferred copies flush in queue order after recording, without a CPU/GPU wait or another present.
 uint64_t queue_readback_post(std::function<void(struct Frame&)> record);
 enum class ReadbackPoll { Pending, Complete, Failed };
@@ -448,9 +449,12 @@ struct PoolChunk {
     uint64_t off = 0;                 // pool offset (from PoolGpu::base) of byte 0 of the import
     VkDeviceSize size = 0;
     bool tried = false;               // import attempted
-    bool failed = false;
-    uint32_t used_at = 0;             // lazy pools: present count of the last bind that resolved to it
-    uint64_t used_serial = 0;         // lazy pools: the submission being recorded at that bind (dropped only once it has completed)
+    bool failed = false;              // the last attempt failed: tried again after a backoff (nvn_gpu_pool.cpp retry_due), never for good
+    uint16_t fails = 0;               // failed attempts in a row
+    uint32_t failed_at = 0;           // present count of the last failed attempt
+    uint32_t fail_since = 0;          // present count of the first failed attempt of the run (the recovery log line)
+    uint32_t used_at = 0;             // present count of the last bind that resolved to it (lazy_drop_idle, oom_drop_idle)
+    uint64_t used_serial = 0;         // the submission being recorded at that bind (dropped only once it has completed)
     // [nvn] pool_copy: buffer = shadow.buffer, mem = VK_NULL_HANDLE. page_copied[k] = serial of the last guest -> shadow copy of page k of
     // the chunk (0: never). land_refs: GPU writes recorded into it that have not landed in guest memory yet (under the landing mutex).
     // cov_*: chunk pages [cov_lo, cov_hi) were all copied in submission cov_serial (the touch's fast path). Render thread except land_refs.
@@ -470,7 +474,7 @@ struct PoolChunk {
 struct PoolGpu {
     uint8_t* base = nullptr;          // aligned start of the pool's imports
     VkDeviceSize size = 0;            // aligned size
-    bool failed = false;
+    bool failed = false;              // cannot be imported at all (no VK_EXT_external_memory_host, no storage): final; a failed chunk is retried
     bool viewed = false;              // imports go through private views of the heap section (the mirror needs that)
     int flags = 0;
     uint64_t stride = 0;              // chunk k starts at k * stride (whole import: stride = size)

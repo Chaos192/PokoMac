@@ -192,11 +192,41 @@ def read_json(path):
 
 
 def write_json(path, value):
-    """Write through a temporary file and rename, so a stop mid-write never leaves half a file behind."""
+    """Write through a temporary file and rename, so a stop mid-write never leaves half a file behind (flushed first: flush())."""
     tmp = path + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
         json.dump(value, f, indent=1)
+    flush_replace(tmp, path)
+
+
+# Power cuts (from Recompia, Dittobyte/Recompia a3b1f351): every file a later run trusts without reading it again (a lifted module's
+# sources before its marker, an object and a cache entry before their rename, pkp before done.json) is flushed to the disk first. A
+# power cut can otherwise keep a rename and a file's size but not its data: an object read as zeros past that point failed the link on
+# every Set up again. Zig's own cache lasts one run, and an object whose end reads as zeros is compiled again (whole_object()).
+def flush(path):
+    """Write path's data to the disk (FlushFileBuffers on Windows, fsync elsewhere). NTFS journals a rename and a file's size
+    at once, its data later: after a power cut a file renamed a moment before can have its size and read as zeros."""
+    with open(path, 'r+b') as f:
+        os.fsync(f.fileno())
+
+
+def flush_replace(tmp, path):
+    """os.replace(tmp, path) once tmp's data is on the disk, so path is never there without it."""
+    flush(tmp)
     os.replace(tmp, path)
+
+
+def whole_object(path):
+    """Whether the object file path is there and does not end in 4 KiB of zero bytes. An object ends with its symbol and string
+    tables, never zeros; a power cut that kept the size but not the data leaves zeros there."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, 'rb') as f:
+            f.seek(max(0, size - 4096))
+            tail = f.read()
+    except OSError:
+        return False
+    return size > 0 and tail.count(0) != len(tail)
 
 
 def nso_short(path):
@@ -329,6 +359,9 @@ def lift(runner, exefs, gen, jobs, missed_dir=None, missed_txt=None, live_patch=
         rc, tail = runner.run(cmd, cwd=RECOMP)
         if rc != 0:
             raise Fail('Translating %s failed (exit %d):\n%s' % (name, rc, tail))
+        for d, _, files in os.walk(out):     # the marker makes the sources trusted (flush())
+            for n in files:
+                flush(os.path.join(d, n))
         open(marker, 'w').write('ok\n')
     progress('lift', len(MODULES), len(MODULES), 'Game code translated')
 
@@ -361,8 +394,8 @@ class ObjCache:
 
     An entry is <key>-<size>.o in the cache folder. key = sha256 of the unit's source bytes, the generated headers next to it,
     the lifter's include/ tree, the compiler (its file hash) and the flags. The compiler or the flags changing gives other keys,
-    so nothing stale is ever hit. An entry is written to a .tmp file and renamed, and a hit must have exactly the size in its
-    name, so a cut-off write or a damaged file is a miss (and is deleted). Hits are copied out, never linked. The folder is
+    so nothing stale is ever hit. An entry is written to a .tmp file, flushed and renamed, and a hit must have exactly the size in
+    its name and be whole_object(), so a cut-off write or a damaged file is a miss (and is deleted). Hits are copied out, never linked. The folder is
     trimmed to the size cap, least recently used first (a hit refreshes the entry's time). Any cache error is a miss."""
 
     def __init__(self, folder, cap_bytes, compiler_id, flags_text, include_hash):
@@ -408,16 +441,16 @@ class ObjCache:
             tmp = dst + '.tmp'
             try:
                 want = int(n[len(key) + 1:-2])
-                if want > 0 and os.path.getsize(src) == want:
+                if want > 0 and os.path.getsize(src) == want and whole_object(src):
                     shutil.copyfile(src, tmp)
                     if os.path.getsize(tmp) == want:
-                        os.replace(tmp, dst)
+                        flush_replace(tmp, dst)
                         os.utime(src)
                         self.hits += 1
                         return True
                     os.remove(tmp)
                 else:
-                    os.remove(src)        # not the size it says: damaged, never used
+                    os.remove(src)        # not the size it says, or its end is zeros: damaged, never used
             except (OSError, ValueError):
                 pass
         self.misses += 1
@@ -434,7 +467,7 @@ class ObjCache:
             if os.path.getsize(tmp) != size:
                 os.remove(tmp)
                 return
-            os.replace(tmp, final)
+            flush_replace(tmp, final)
         except OSError:
             pass
 
@@ -481,7 +514,7 @@ def compile_all(runner, gen, obj, jobs, env, cache=None):
     todo = []
     for name, src in units:
         o = os.path.join(obj, name, os.path.basename(src)[:-4] + '.o')
-        if not os.path.isfile(o):
+        if not whole_object(o):
             todo.append((name, src, o))
     done = total - len(todo)
     for name, _, _, _, _ in MODULES:
@@ -507,7 +540,7 @@ def compile_all(runner, gen, obj, jobs, env, cache=None):
         rc, tail = runner.run(cmd, env=env)
         if rc != 0:
             return 'Compiling %s/%s failed (exit %d):\n%s' % (name, os.path.basename(src), rc, tail)
-        os.replace(tmp, o)
+        flush_replace(tmp, o)
         if cache:
             cache.store(keys[src], o)
         return None
@@ -655,7 +688,7 @@ def link(runner, obj, game, env):
     else:
         clear_high_entropy_va(tmp)
     dst = os.path.join(game, EXE)
-    os.replace(tmp, dst)
+    flush_replace(tmp, dst)                             # done.json then makes it trusted (check())
     progress('link', 1, 1, '%s built' % EXE)
     return dst
 
@@ -840,8 +873,12 @@ def main():
         times['verify'] = round(time.time() - t0, 1)
         runner = Runner(cancel_file)
         env = dict(os.environ)
-        env['ZIG_GLOBAL_CACHE_DIR'] = os.path.join(build, 'zig-cache')
-        env['ZIG_LOCAL_CACHE_DIR'] = os.path.join(build, 'zig-cache')
+        # zig's cache lasts one run, as after linking: a stopped run's can hold an object a power cut left as zeros under a manifest that
+        # survived, which zig hands back as compiled. The objects themselves are kept in obj/ and objcache/
+        zig_cache = os.path.join(build, 'zig-cache')
+        shutil.rmtree(zig_cache, ignore_errors=True)
+        env['ZIG_GLOBAL_CACHE_DIR'] = zig_cache
+        env['ZIG_LOCAL_CACHE_DIR'] = zig_cache
         gen, obj = os.path.join(build, 'lift'), os.path.join(build, 'obj')
         t = time.time()
         missed_dir = os.path.join(build, 'missed')

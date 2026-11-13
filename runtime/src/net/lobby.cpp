@@ -477,7 +477,10 @@ private:
             case kRoomList: {
                 const uint8_t count = in.u8();
                 std::vector<Room> rooms;
-                for (uint8_t i = 0; i < count && in.ok; ++i) rooms.push_back(read_room(in));
+                for (uint8_t i = 0; i < count && in.ok; ++i) {
+                    Room r = read_room(in);
+                    if (in.ok) rooms.push_back(std::move(r));
+                }
                 answer(kWantList, 0, [&] { got_rooms_ = std::move(rooms); });
                 break;
             }
@@ -507,6 +510,7 @@ private:
             }
             case kRoomState: {
                 Room r = read_room(in);
+                if (!in.ok) break;   // malformed, or more nodes than the protocol allows
                 {
                     std::lock_guard<std::mutex> lk(mu_);
                     if (!in_room_ || r.room_id != room_.room_id) break;
@@ -523,7 +527,7 @@ private:
                 d.dst_ip = in.u32();
                 d.dst_port = in.u16();
                 d.data = in.blob();
-                if (in.ok && local_ip() != 0) deliver(d);
+                if (in.ok && d.data.size() <= kMaxDatagram && local_ip() != 0) deliver(d);   // the UDP path drops the same oversize ones
                 break;
             }
             case kLeft: {

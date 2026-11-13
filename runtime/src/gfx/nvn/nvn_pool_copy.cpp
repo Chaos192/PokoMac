@@ -8,8 +8,9 @@
 //
 // The rule that keeps the shadow right without knowing what the CPU writes:
 //  * touch (resolve_in_pool, render thread): every resolve copies the page-rounded range it binds from guest memory into the shadow, unless
-//    that page was copied already in the submission being recorded (page_copied) or a GPU write into it is still in flight (page_gpu above
-//    the completed serial: the shadow holds newer bytes than guest memory then). A bind of unknown size touches to the end of its chunk.
+//    that page was copied already in the submission being recorded (page_copied). On a page with a GPU write still in flight (page_gpu above
+//    the completed serial) the shadow holds newer bytes inside the recorded write ranges only: the rest of the page is copied around them
+//    (pcopy_copy_around). A bind of unknown size touches to the end of its chunk.
 //  * record (note_gpu_write, render thread): every range a command may write in pool memory is recorded with the submission's serial
 //    (LandRec), and its pages' page_gpu set to that serial.
 //  * land (read_completed, any thread; and the nvn-pool-land thread): once the timeline reaches a record's serial, the recorded range is
@@ -142,6 +143,7 @@ struct LandRec {
 std::mutex g_land_mu;
 std::mutex g_landing_mu;
 std::deque<LandRec> g_land;
+std::vector<LandRec> g_landing;                 // the batch a lander took out of g_land and is copying (under g_land_mu; one lander at a time)
 std::atomic<uint64_t> g_land_min{kNone};        // serial of g_land.front() (kNone: empty), the lock-free test of pcopy_land
 thread_local bool t_landing = false;            // a landing on this thread (a nested read_completed returns at once)
 
@@ -381,6 +383,43 @@ bool pcopy_busy(const PoolChunk& c) {
     return c.land_refs != 0;
 }
 
+// Pages [p0, p1) of chunk c hold a GPU write in flight (touch's state 2). The shadow is newer than guest memory only inside the recorded
+// write ranges; every other byte of those pages is the CPU's, and copying none of the page left the GPU reading stale bytes there. A
+// constant buffer the CPU writes can share a 4 KiB page with an UpdateUniformBuffer target or a storage buffer, so a loop count read there
+// could be an older word and run a compute loop for seconds (device lost on AMD, a frozen GPU on NVIDIA: #531, #533). Copies guest ->
+// shadow around every unlanded record of the pool: the queue and the batch being landed (g_landing), whose ranges must keep the shadow's
+// bytes until they are copied out. A record added after the snapshot is a later command's (its GPU write replaces these bytes).
+static uint64_t pcopy_copy_around(PoolGpu* g, PoolChunk* c, uint64_t p0, uint64_t p1) {
+    const uint64_t lo = c->off + p0 * kPage, hi = c->off + p1 * kPage;   // pool offsets
+    std::vector<std::pair<uint64_t, uint64_t>> busy;   // [a, b) pool offsets the GPU may still write
+    {
+        std::lock_guard<std::mutex> lk(g_land_mu);
+        const auto add = [&](const LandRec& r) {
+            if (r.pool == g && r.pool_off < hi && r.pool_off + r.size > lo)
+                busy.emplace_back(std::max(r.pool_off, lo), std::min(r.pool_off + r.size, hi));
+        };
+        for (const LandRec& r : g_land) add(r);
+        for (const LandRec& r : g_landing) add(r);
+    }
+    std::sort(busy.begin(), busy.end());
+    uint8_t* dst = static_cast<uint8_t*>(c->shadow.mapped) - c->off;
+    const uint8_t* src = g->base;
+    uint64_t at = lo, bytes = 0, bad = 0;
+    const auto copy_to = [&](uint64_t end) {
+        if (end > at) {
+            bad += guarded_copy(dst + at, src + at, end - at, true);
+            bytes += end - at;
+        }
+    };
+    for (const auto& [a, b] : busy) {
+        copy_to(a);
+        at = std::max(at, b);
+    }
+    copy_to(hi);
+    if (bad) g_unreadable.fetch_add(bad, std::memory_order_relaxed);
+    return bytes;
+}
+
 void pcopy_touch(PoolGpu* g, PoolChunk* c, uint64_t off, uint64_t size) {
     const uint64_t cend = c->off + c->size;
     if (off < c->off || off >= cend) return;
@@ -392,8 +431,9 @@ void pcopy_touch(PoolGpu* g, PoolChunk* c, uint64_t off, uint64_t size) {
     if (cur && c->cov_serial == cur && p0 >= c->cov_lo && p1 <= c->cov_hi) return;   // all copied in this submission already
     const uint64_t done = completed_serial();
     const uint64_t pbase = c->off / kPage;
-    // 0: copied in this submission; 1: copy; 2: a GPU write is in flight there (the shadow is newer), unless nothing was ever copied into
-    // the page of this chunk (a new span over a page another chunk writes): then guest memory is the better source.
+    // 0: copied in this submission; 1: copy; 2: a GPU write is in flight there (the shadow is newer inside its range: copy around it),
+    // unless nothing was ever copied into the page of this chunk (a new span over a page another chunk writes): then guest memory is the
+    // better source.
     const auto need = [&](uint64_t p) -> int {
         if (cur && c->page_copied[static_cast<size_t>(p)] == cur) return 0;
         if (g->page_gpu[static_cast<size_t>(pbase + p)].load(std::memory_order_acquire) > done && (!rt || c->page_copied[static_cast<size_t>(p)] != 0)) return 2;
@@ -403,24 +443,31 @@ void pcopy_touch(PoolGpu* g, PoolChunk* c, uint64_t off, uint64_t size) {
     const uint8_t* src = g->base + c->off;
     const uint64_t t0 = ft::on() ? ft::now_ns() : 0;
     uint64_t bytes = 0;
-    bool all = true;
     for (uint64_t p = p0; p < p1;) {
         const int n = need(p);
-        if (n != 1) {
-            if (n == 2) all = false;
+        if (n == 0) {
             ++p;
             continue;
         }
         uint64_t q = p + 1;
-        while (q < p1 && need(q) == 1) ++q;
-        const uint64_t bad = guarded_copy(dst + p * kPage, src + p * kPage, (q - p) * kPage, true);
-        if (bad) g_unreadable.fetch_add(bad, std::memory_order_relaxed);
+        while (q < p1 && need(q) == n) ++q;
+        if (n == 2) {
+            bytes += pcopy_copy_around(g, c, p, q);
+        } else {
+            // A chunk's size is not always a page multiple (a span's stride, the last cell of a pool), so the last page of the range
+            // stops at the chunk: a full page there wrote up to 4095 bytes past the shadow's buffer, into the driver's heap, and the
+            // next free aborted the process (HOST EXCEPTION 0xE0000004, libsystem_malloc, from ~CmdList). From Recompia
+            // (Dittobyte/Recompia b445b607).
+            const uint64_t bytes_here = std::min<uint64_t>((q - p) * kPage, c->size - p * kPage);
+            const uint64_t bad = guarded_copy(dst + p * kPage, src + p * kPage, bytes_here, true);
+            if (bad) g_unreadable.fetch_add(bad, std::memory_order_relaxed);
+            bytes += (q - p) * kPage;
+        }
         if (rt)
             for (uint64_t i = p; i < q; ++i) c->page_copied[static_cast<size_t>(i)] = cur ? cur : kOutside;
-        bytes += (q - p) * kPage;
         p = q;
     }
-    if (cur && all) {      // [p0, p1) is current for this submission: widen the fast path's interval
+    if (cur) {      // [p0, p1) is current for this submission: widen the fast path's interval
         if (c->cov_serial == cur && p0 <= c->cov_hi && p1 >= c->cov_lo) {
             c->cov_lo = std::min(c->cov_lo, p0);
             c->cov_hi = std::max(c->cov_hi, p1);
@@ -516,7 +563,8 @@ uint64_t pcopy_land(uint64_t reached) {
         std::lock_guard<std::mutex> landing(g_landing_mu);
         // The records leave the queue now, but g_land_min and land_refs stay as they were until the copy is done: a second caller that tests
         // g_land_min still waits on g_landing_mu, so no serial is published before its bytes landed, and pcopy_busy holds the chunks.
-        std::vector<LandRec> batch;
+        // g_landing shows the batch to pcopy_copy_around from the moment it leaves the queue until its bytes are in guest memory.
+        std::vector<LandRec>& batch = g_landing;
         {
             std::lock_guard<std::mutex> lk(g_land_mu);
             while (!g_land.empty() && g_land.front().serial <= reached) {
@@ -544,6 +592,7 @@ uint64_t pcopy_land(uint64_t reached) {
             std::lock_guard<std::mutex> lk(g_land_mu);
             for (const LandRec& r : batch)
                 if (r.chunk->land_refs) --r.chunk->land_refs;
+            batch.clear();
             land_min_update();
         }
     }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Opt-in diagnostic policy. Matching these fields is not proof that stale data is valid game behaviour.
+// [nvn] readback_defer's eligibility (nvn_gpu_texture.cpp download_texture): a read may be served from the previous read when the texture
+// is the deferred shape, the read repeats the previous one, and nothing changed the storage in between (the stamp).
 #pragma once
 #include <cstdint>
 
@@ -20,9 +21,9 @@ struct Stamp {
     uint64_t sync_epoch = 0;   // a render-thread synchronous read may refresh storage without taking the guest read mutex
     bool operator==(const Stamp&) const = default;
 };
-inline bool eligible(bool enabled, uint32_t selected_texture, bool exact_format_and_size,
-                     bool recent_repeat, bool have_previous, const Stamp& previous, const Stamp& request) {
-    return enabled && selected_texture && request.texture == selected_texture && exact_format_and_size &&
-           recent_repeat && have_previous && request.storage && request.storage_bytes && request.range.fits(1, 1) && previous == request;
+inline bool eligible(bool enabled, bool exact_format_and_size, bool recent_repeat, bool have_previous, const Stamp& previous,
+                     const Stamp& request) {
+    return enabled && exact_format_and_size && recent_repeat && have_previous && request.storage && request.storage_bytes &&
+           request.range.fits(1, 1) && previous == request;
 }
 }  // namespace nxrt::nvn::be::rbdiag

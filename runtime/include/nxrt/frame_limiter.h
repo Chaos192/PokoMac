@@ -94,7 +94,7 @@ struct FrameSnap {
 FrameSnap snap_frame_cap(double cap, double hz);
 
 // While the game loads (a black boot screen, a loading screen: a presented frame with almost no draws) no limiter waits: the loading code
-// advances once per frame, so pacing it at 60 Hz stretches boot and loads. The NVN replay sets it ([display] unpaced_loading, default on).
+// advances once per frame, so pacing it at 60 Hz stretches boot and loads. The NVN replay sets it ([display] unpaced_loading, default off).
 void frame_limiter_set_unpaced(bool on);
 bool frame_limiter_unpaced();   // true only while loading AND no frame limit of the player's own holds
 // A frame limit the player set ([display] fps_limit = a number) holds through loading screens too: on a Mac a player set 60 and saw 110 fps

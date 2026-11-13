@@ -1303,9 +1303,6 @@ uint64_t run_frame_sync(const std::function<void(Frame&)>& fn) {
 uint64_t queue_record(std::function<void(Frame&)> record) {
     return queue_submit(std::move(record), true, false);
 }
-uint64_t queue_post(std::function<void(Frame&)> record) {
-    return queue_submit(std::move(record), false, false);
-}
 uint64_t queue_readback_post(std::function<void(Frame&)> record) {
     return queue_submit(std::move(record), false, false, true);
 }

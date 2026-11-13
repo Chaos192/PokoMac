@@ -790,6 +790,9 @@ void handle_event(const input::Event& e, uint64_t now) {
     }
 }
 
+// Shortest gap between two rumble writes to the pads (30 per second). From Recompia (Dittobyte/Recompia 4d701fd7, #374).
+constexpr uint64_t kRumbleMinGapNs = 1000000000ull / 30;
+
 // Reads every open pad, merges them (buttons OR, the stick with the larger deflection wins) and publishes the result to the source.
 void poll_pads(uint64_t now) {
     G& st = g();
@@ -804,7 +807,12 @@ void poll_pads(uint64_t now) {
     }
     const Ctx cx = st.engine ? st.engine->context() : Ctx::Menu;
     const bool look_ctx = cx == Ctx::Play || cx == Ctx::Alt || cx == Ctx::Inspect;      // the right stick is a look only in play
-    const bool rumble_changed = lo != st.rumble_lo || hi != st.rumble_hi;
+    // Rumble goes to the pads at most 30 times a second, whatever the frame rate. The game sets its vibration every frame, and while it
+    // rumbles (vacuuming, breaking, rolling) the value changes nearly every frame: at 100+ fps one write per change floods a driver that
+    // forwards each write over Bluetooth (BetterJoy's virtual pad stops reading the controller and drops stick and button input, #374).
+    // A change waits for the next slot; the newest value is the one sent.
+    const bool rumble_slot = now - st.last_rumble_ns >= kRumbleMinGapNs;
+    const bool rumble_changed = rumble_slot && (lo != st.rumble_lo || hi != st.rumble_hi);
     const bool rumble_refresh = (lo || hi) && now - st.last_rumble_ns > 100 * kMs;
     const uint32_t quit_combo = st.settings.quit.pad;
     bool quit_held = false, overlay_held = false;

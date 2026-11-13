@@ -12,14 +12,12 @@ static void check(bool condition, const char* description) {
 }
 int main() {
     const Stamp original{286, 7, 0x1000, 4096, {0, 1, 0, 1}, 3};
-    auto allowed = [&](const Stamp& request) { return eligible(true, 286, true, true, true, original, request); };
-    check(allowed(original), "explicit selected texture with matching previous storage can enter experiment");
-    check(!eligible(false, 286, true, true, true, original, original), "disabled experiment stays on the normal path");
-    check(!eligible(true, 0, true, true, true, original, original), "no selected texture means disabled");
-    check(!eligible(true, 287, true, true, true, original, original), "another texture is not implicitly opted in");
-    check(!eligible(true, 286, false, true, true, original, original), "wrong format or extent stays synchronous");
-    check(!eligible(true, 286, true, false, true, original, original), "a first or late read stays synchronous");
-    check(!eligible(true, 286, true, true, false, original, original), "no previous data must never be returned as valid");
+    auto allowed = [&](const Stamp& request) { return eligible(true, true, true, true, original, request); };
+    check(allowed(original), "the deferred shape with matching previous storage is served from the previous read");
+    check(!eligible(false, true, true, true, original, original), "readback_defer off stays on the normal path");
+    check(!eligible(true, false, true, true, original, original), "wrong format or extent stays synchronous");
+    check(!eligible(true, true, false, true, original, original), "a first or late read stays synchronous");
+    check(!eligible(true, true, true, false, original, original), "no previous data must never be returned as valid");
     Stamp request = original; ++request.cpu_generation;
     check(!allowed(request), "CPU write plus completed upload still invalidates older data");
     request = original; ++request.sync_epoch;
@@ -28,19 +26,19 @@ int main() {
     check(!allowed(request), "storage replacement invalidates the old snapshot");
     request = original; request.storage_bytes *= 2;
     check(!allowed(request), "storage size change invalidates the old snapshot");
-    request = original; request.texture = 288;
-    check(!allowed(request), "same extent does not opt in another texture");
+    request = original; request.texture = 287;
+    check(!allowed(request), "another texture of the shape is not served the first one's data");
     request = original; request.range.levels = 0;
     check(!allowed(request), "empty ranges never reuse cached data");
     request = original; request.range.layers = 2;
     check(!allowed(request), "an incompatible range stays synchronous");
     request = original; request.storage = 0;
-    check(!eligible(true, 286, true, true, true, request, request), "null storage is invalid even if stamps match");
+    check(!eligible(true, true, true, true, request, request), "null storage is invalid even if stamps match");
     request = original; request.range.levels = 0;
-    check(!eligible(true, 286, true, true, true, request, request), "matching empty ranges are still invalid");
+    check(!eligible(true, true, true, true, request, request), "matching empty ranges are still invalid");
     check(!Range{0, 0, 0, 1}.fits(1, 1), "zero levels are rejected");
     check(!Range{0, 1, 0, 0}.fits(1, 1), "zero layers are rejected");
     check(!Range{std::numeric_limits<uint32_t>::max() - 1, 3, 0, 1}.fits(std::numeric_limits<uint32_t>::max(), 1), "overflowing level end is rejected");
     check(!Range{0, 1, std::numeric_limits<uint32_t>::max(), 2}.fits(1, std::numeric_limits<uint32_t>::max()), "overflowing layer end is rejected");
-    std::cout << "PASS: " << checks << " eligibility and invalidation checks. GPU synchronization and stale-data gameplay semantics remain untested.\n";
+    std::cout << "PASS: " << checks << " eligibility and invalidation checks.\n";
 }

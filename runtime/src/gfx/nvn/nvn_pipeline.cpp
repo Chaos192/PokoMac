@@ -1030,7 +1030,8 @@ VkPipeline create_compute(const ShaderInfo* cs, const ProgLayout& layout) {
     VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    ci.stage.pNext = subgroup32_info(VK_SHADER_STAGE_COMPUTE_BIT);
+    ci.stage.pNext = subgroup32_info(VK_SHADER_STAGE_COMPUTE_BIT,
+                                     uint64_t{cs->local_size[0]} * cs->local_size[1] * cs->local_size[2]);
     ci.stage.module = m;
     ci.stage.pName = "main";
     ci.layout = layout.layout;
@@ -1376,7 +1377,7 @@ struct PipelineGauges {
 PipelineGauges g_pipeline_gauges;
 }  // namespace
 
-const void* subgroup32_info(VkShaderStageFlagBits stage) {
+const void* subgroup32_info(VkShaderStageFlagBits stage, uint64_t compute_invocations) {
     static const VkPipelineShaderStageRequiredSubgroupSizeCreateInfo k32 = {
         VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO, nullptr, 32};
     // [nvn] subgroup32 = 0: never ask (the driver's own width)
@@ -1393,7 +1394,17 @@ const void* subgroup32_info(VkShaderStageFlagBits stage) {
         NXLOG_W("nvn", "subgroups are %u wide here, the game's shaders assume 32: asking for 32 in stages 0x%x%s", l.subgroup_size, pinned,
                 (game & ~pinned) ? "; the other stages run at the driver's width (Mesa RADV: RADV_PERFTEST=cswave32,pswave32,gewave32 makes them 32 wide)" : "");
     });
-    return needed && can && (l.required_subgroup_stages & stage) ? &k32 : nullptr;
+    if (!needed || !can || !(l.required_subgroup_stages & stage)) return nullptr;
+    // VUID-VkPipelineShaderStageCreateInfo-pNext-02756: the workgroup must fit in maxComputeWorkgroupSubgroups subgroups of 32. A bigger
+    // one asked to run 32 wide is invalid usage, and AMD's Windows driver can end the process on it instead of failing the call (#487)
+    if (stage == VK_SHADER_STAGE_COMPUTE_BIT && compute_invocations > uint64_t{l.max_compute_workgroup_subgroups} * 32) {
+        static std::atomic<uint32_t> skipped{0};
+        if (skipped.fetch_add(1, std::memory_order_relaxed) < 8)
+            NXLOG_W("nvn", "compute workgroup of %llu invocations is over %u subgroups of 32: left at the driver's width",
+                    static_cast<unsigned long long>(compute_invocations), l.max_compute_workgroup_subgroups);
+        return nullptr;
+    }
+    return &k32;
 }
 
 }  // namespace nxrt::nvn::be::gpu

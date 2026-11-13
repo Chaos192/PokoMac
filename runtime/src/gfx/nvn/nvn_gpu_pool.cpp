@@ -180,8 +180,61 @@ void note_import(uint64_t size, double ms) {
             (long long)h.reason[8].get(), (long long)h.reason[9].get(), (long long)h.reason[10].get());
 }
 
-// Imports pool bytes [off, off + size) of g into c. False (c.failed) when it cannot.
+void destroy_chunk(PoolChunk& c);
+
+uint32_t presents_now() { return static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed)); }
+
+// A failed import is tried again, never given up on: a driver refuses to pin more host memory for a while (vkAllocateMemory
+// VK_ERROR_OUT_OF_DEVICE_MEMORY on a GTX 1060, #304), and with no retry every draw reading that chunk bound the dummy buffer until a
+// restart. The next attempt waits kRetryFirst presents after the first failure, twice that after each further one, at most kRetryMax: one
+// attempt per backoff, so a range that keeps failing costs a failing vkAllocateMemory every few seconds, not one per bind.
+constexpr uint32_t kRetryFirst = 30, kRetryMax = 240;
+nxrt::GaugeCounter g_gauge_import_failures("nvn.pool.import.failures");    // failed import attempts (first ones and retries)
+nxrt::GaugeCounter g_gauge_import_recovered("nvn.pool.import.recovered");  // imports that worked on a retry
+// An import ran out of memory: the next lazy_drop_idle drops the idle imports of every pool (oom_drop_idle), so the retry finds the pages
+// they pinned released.
+std::atomic<bool> g_oom_sweep{false};
+
+uint32_t retry_wait(uint16_t fails) { return std::min<uint32_t>(kRetryFirst << std::min<uint32_t>(fails ? fails - 1u : 0u, 8u), kRetryMax); }
+bool retry_due(const PoolChunk& c) { return c.failed && presents_now() - c.failed_at >= retry_wait(c.fails); }
+
+// The end of a failed attempt: c keeps nothing but its range and when it failed (destroy_chunk frees the view, memory or buffer made before
+// the step that failed, so a retry starts clean). A retry's failure is logged at info, at attempts 2, 4, 8, ... (the first one is an error).
+bool import_failed(PoolGpu* g, PoolChunk& c, VkResult r, const char* what, size_t index, size_t count) {
+    const uint64_t off = c.off, size = c.size;
+    const uint16_t fails = c.fails;
+    const uint32_t since = c.failed ? c.fail_since : presents_now();
+    destroy_chunk(c);
+    c.off = off;
+    c.size = size;
+    c.tried = c.failed = true;
+    c.fails = static_cast<uint16_t>(std::min<uint32_t>(fails + 1u, 0xffffu));
+    c.failed_at = presents_now();
+    c.fail_since = since;
+    g_gauge_import_failures.add(1);
+    if (r == VK_ERROR_OUT_OF_DEVICE_MEMORY || r == VK_ERROR_OUT_OF_HOST_MEMORY) g_oom_sweep.store(true, std::memory_order_relaxed);
+    if (fails && !(c.fails & (c.fails - 1)))
+        NXLOG_I(kTag, "pool %p %s %zu of %zu (offset 0x%llx, 0x%llx bytes): retry %u failed (%d), %u presents after the first failure; tried again in %u presents",
+                static_cast<void*>(g->base), what, index, count, static_cast<unsigned long long>(off), static_cast<unsigned long long>(size),
+                static_cast<unsigned>(fails), static_cast<int>(r), c.failed_at - since, retry_wait(c.fails));
+    return false;
+}
+
+// A retry that worked (an import, or a copy pool's shadow): logged once per recovery.
+void import_recovered(const PoolGpu* g, PoolChunk& c, uint16_t fails, uint32_t since, const char* what, size_t index, size_t count) {
+    g_gauge_import_recovered.add(1);
+    NXLOG_I(kTag, "pool %p %s %zu of %zu (offset 0x%llx, 0x%llx bytes) %s on retry %u, %u presents after it first failed", static_cast<const void*>(g->base),
+            what, index, count, static_cast<unsigned long long>(c.off), static_cast<unsigned long long>(c.size), c.is_shadow ? "copied into a shadow" : "imported",
+            static_cast<unsigned>(fails), presents_now() - since);
+    c.fails = 0;
+}
+
+// Imports pool bytes [off, off + size) of g into c, the first time or as a retry (c failed and holds nothing). False (c.failed) when it
+// cannot; the first failure is logged as an error with the pages, the retries by import_failed.
 bool import_range(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size, const char* what, size_t index, size_t count) {
+    const bool first = !c.failed;
+    const uint16_t fails = c.fails;
+    const uint32_t since = c.fail_since;
     c.tried = true;
     c.off = off;
     c.size = size;
@@ -208,9 +261,9 @@ bool import_range(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size, const c
     const auto tm0 = std::chrono::steady_clock::now();
     { NXFT("pool.hostprops"); r = vkGetMemoryHostPointerPropertiesEXT(dev.device(), VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, import_ptr, &hp); }
     if (r != VK_SUCCESS || !hp.memoryTypeBits) {
-        NXLOG_E(kTag, "vkGetMemoryHostPointerPropertiesEXT failed (%d) for %p (%s %zu of %zu)", static_cast<int>(r), reinterpret_cast<void*>(start), what, index, count);
-        c.failed = true;
-        return false;
+        if (first)
+            NXLOG_E(kTag, "vkGetMemoryHostPointerPropertiesEXT failed (%d) for %p (%s %zu of %zu)", static_cast<int>(r), reinterpret_cast<void*>(start), what, index, count);
+        return import_failed(g, c, r, what, index, count);
     }
     uint32_t ty = 0;
     while (!(hp.memoryTypeBits & (1u << ty))) ++ty;
@@ -224,12 +277,13 @@ bool import_range(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size, const c
     { NXFT("pool.alloc"); r = vkAllocateMemory(dev.device(), &mai, nullptr, &c.mem); }
     const auto tm2 = std::chrono::steady_clock::now();
     if (r != VK_SUCCESS) {
-        NXLOG_E(kTag, "importing pool %p %s %zu of %zu (offset 0x%llx, 0x%llx bytes) failed (%d)", static_cast<void*>(g->base), what, index, count,
-                static_cast<unsigned long long>(off), static_cast<unsigned long long>(size), static_cast<int>(r));
-        log_pages(import_ptr, size);
+        if (first) {
+            NXLOG_E(kTag, "importing pool %p %s %zu of %zu (offset 0x%llx, 0x%llx bytes) failed (%d): tried again in %u presents", static_cast<void*>(g->base),
+                    what, index, count, static_cast<unsigned long long>(off), static_cast<unsigned long long>(size), static_cast<int>(r), kRetryFirst);
+            log_pages(import_ptr, size);
+        }
         c.mem = VK_NULL_HANDLE;
-        c.failed = true;
-        return false;
+        return import_failed(g, c, r, what, index, count);
     }
     vk_gauge_memory_allocs().add(1);
     vk_gauge_memory_bytes().add(static_cast<int64_t>(size));
@@ -247,10 +301,11 @@ bool import_range(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size, const c
     else c.buffer = VK_NULL_HANDLE;
     if (r == VK_SUCCESS) r = vkBindBufferMemory(dev.device(), c.buffer, c.mem, 0);
     if (r != VK_SUCCESS) {
-        NXLOG_E(kTag, "buffer over pool %p %s %zu of %zu failed (%d)", static_cast<void*>(g->base), what, index, count, static_cast<int>(r));
-        c.failed = true;
-        return false;
+        if (first) NXLOG_E(kTag, "buffer over pool %p %s %zu of %zu failed (%d)", static_cast<void*>(g->base), what, index, count, static_cast<int>(r));
+        return import_failed(g, c, r, what, index, count);
     }
+    c.failed = false;
+    if (!first) import_recovered(g, c, fails, since, what, index, count);
     counters().pools_imported.fetch_add(1);
     {   // a slow import stalls a vkQueueSubmit2 running beside it (the driver): size and where the time went, to tell page pinning from the rest
         const auto tm3 = std::chrono::steady_clock::now();
@@ -350,31 +405,43 @@ PoolGpu* import_pool(MemoryPool* p) {
         g->stride = size;
         g->clen = size;
         g->chunks.resize(1);
-        if (!import_range(g, g->chunks[0], 0, size, "whole", 0, 1)) {
-            g->failed = true;
-            return g;
-        }
+        import_range(g, g->chunks[0], 0, size, "whole", 0, 1);   // a failure is tried again at a bind (pool_chunk), like a chunk's
     }
     { std::lock_guard<std::mutex> lk(g_live_mu); g_live.insert(g); }
     g_gauge_pools_live.add(1);
     return g;
 }
 
-// Chunk k of g, imported now if it was not tried yet (render thread). Null when it cannot be imported.
+// The bind's mark on an import: oom_drop_idle (and lazy_drop_idle for lazy pools) drops it only once that submission has completed.
+void note_used(PoolChunk& c) {
+    c.used_at = presents_now();
+    c.used_serial = current_serial();
+}
+
+// Chunk k of g, imported now if it was not tried yet or a failed import's retry is due (render thread). Null when it is not imported.
 PoolChunk* pool_chunk(PoolGpu* g, uint64_t k) {
     if (k >= g->chunks.size()) return nullptr;
     PoolChunk& c = g->chunks[static_cast<size_t>(k)];
-    if (!c.tried) {
+    if (!c.tried || retry_due(c)) {
         const uint64_t off = k * g->stride;
-        import_range(g, c, off, std::min<uint64_t>(g->clen, g->size - off), "chunk", static_cast<size_t>(k), g->chunks.size());
+        import_range(g, c, off, std::min<uint64_t>(g->clen, g->size - off), g->chunks.size() == 1 ? "whole" : "chunk", static_cast<size_t>(k), g->chunks.size());
     }
-    return c.failed || !c.buffer ? nullptr : &c;
+    if (c.failed || !c.buffer) return nullptr;
+    note_used(c);
+    return &c;
 }
 
-// An import holding pool bytes [off, off + size) when no chunk does: an existing span, or a new one over the strides the range touches.
-PoolChunk* pool_span(PoolGpu* g, uint64_t off, uint64_t size) {
-    for (PoolChunk& s : g->spans)
-        if (off >= s.off && off + size <= s.off + s.size) return s.failed || !s.buffer ? nullptr : &s;   // a failed span is not tried again
+// An import holding pool bytes [off, off + size) when no chunk does: an existing span, or a new one over the strides the range touches. A
+// failed span keeps its range and is tried again when its retry is due. *made: the span was imported now (new, or a retry that worked).
+PoolChunk* pool_span(PoolGpu* g, uint64_t off, uint64_t size, bool* made = nullptr) {
+    for (size_t i = 0; i < g->spans.size(); ++i) {
+        PoolChunk& s = g->spans[i];
+        if (off < s.off || off + size > s.off + s.size) continue;
+        if (retry_due(s) && import_range(g, s, s.off, s.size, "span", i, g->spans.size()) && made) *made = true;
+        if (s.failed || !s.buffer) return nullptr;
+        note_used(s);
+        return &s;
+    }
     const uint64_t s0 = off / g->stride * g->stride;
     const uint64_t s1 = std::min<uint64_t>((off + size + g->stride - 1) / g->stride * g->stride, g->size);
     const uint64_t maxb = device().limits_ext().max_buffer_size;
@@ -384,19 +451,41 @@ PoolChunk* pool_span(PoolGpu* g, uint64_t off, uint64_t size) {
             static_cast<unsigned long long>((s1 - s0) >> 20), static_cast<unsigned long long>(s0));
     g->spans.emplace_back();
     PoolChunk& s = g->spans.back();
-    if (!import_range(g, s, s0, s1 - s0, "span", g->spans.size() - 1, g->spans.size())) {
-        destroy_chunk(s);              // keeps nothing but the range, so the same range is not tried again
-        s.off = s0;
-        s.size = s1 - s0;
-        s.tried = s.failed = true;
-        return nullptr;
-    }
+    if (!import_range(g, s, s0, s1 - s0, "span", g->spans.size() - 1, g->spans.size())) return nullptr;   // kept: its range, for the retry
+    if (made) *made = true;
+    note_used(s);
     return &s;
+}
+
+// [nvn] pool_lazy (and pool_copy): cells [xo, xo + xs) of g into ext entry x, the first time or as a retry of a failed one; counted when it
+// works. Pages a write watch made read-only (tex_write_watch) go back to read-write first: neither amdgpu (userptr) nor the Windows AMD driver
+// (VK_ERROR_INVALID_EXTERNAL_HANDLE) imports read-only pages. They count as written, so the texture watch uploads its textures there again
+// and arms them after the import, which the import survives (a whole pool's import does the same). [nvn] pool_copy: a shadow instead
+// (read-only pages are fine, nothing is imported); an import only when it cannot be made.
+bool lazy_import_cells(PoolGpu* g, PoolChunk& x, uint64_t xo, uint64_t xs) {
+    const bool retry = x.failed;
+    const uint16_t fails = x.fails;
+    const uint32_t since = x.fail_since;
+    const size_t c0 = static_cast<size_t>(xo / g->stride);
+    bool ok = g->copy && pcopy_alloc(g, x, xo, xs, "copy cell");
+    if (ok && retry) import_recovered(g, x, fails, since, "copy cell", c0, g->cell_ext.size());
+    if (!ok) {
+        std::lock_guard<std::mutex> ilk(tex_arm_import_mutex());   // no arm of the worker in between
+        mem::ww::forget(reinterpret_cast<uint64_t>(g->base) + xo, xs, false);
+        ok = import_range(g, x, xo, xs, "lazy chunk", c0, g->cell_ext.size());
+    }
+    if (!ok) return false;
+    if (!x.is_shadow) {
+        g_lz_imports.fetch_add(1, std::memory_order_relaxed);
+        g_lz_imported_bytes.fetch_add(xs, std::memory_order_relaxed);
+    }
+    g_lz_live_bytes.fetch_add(static_cast<int64_t>(xs), std::memory_order_relaxed);   // live cells, imported or shadows
+    return true;
 }
 
 // [nvn] pool_lazy: the import of a lazy pool holding bytes [off, off + size) (clipped to the pool), imported now when no import holds the
 // cells it touches yet: one import over exactly those cells. A range that starts in one import and runs into cells another import holds
-// gets a span (pool_span). Null: it cannot be imported (a failed import is not tried again). Render thread.
+// gets a span (pool_span). Null: it is not imported (a failed import keeps its cells and is tried again when its retry is due). Render thread.
 PoolChunk* lazy_chunk(PoolGpu* g, uint64_t off, uint64_t size) {
     const uint64_t cell = g->stride;
     const uint64_t end = std::min<uint64_t>(off + std::max<uint64_t>(size, 1), g->size);
@@ -405,6 +494,7 @@ PoolChunk* lazy_chunk(PoolGpu* g, uint64_t off, uint64_t size) {
     const int32_t e = g->cell_ext[c0];
     if (e >= 0) {
         PoolChunk& x = g->ext[static_cast<size_t>(e)];
+        if (retry_due(x)) lazy_import_cells(g, x, x.off, x.size);
         if (x.failed || !x.buffer) return nullptr;
         if (end <= x.off + x.size) c = &x;
     } else {
@@ -416,23 +506,9 @@ PoolChunk* lazy_chunk(PoolGpu* g, uint64_t off, uint64_t size) {
             else { idx = static_cast<int32_t>(g->ext.size()); g->ext.emplace_back(); }
             PoolChunk& x = g->ext[static_cast<size_t>(idx)];
             const uint64_t xo = c0 * cell, xs = std::min<uint64_t>((c1 + 1) * cell, g->size) - xo;
-            // Pages a write watch made read-only (tex_write_watch) go back to read-write first: neither amdgpu (userptr) nor the Windows
-            // AMD driver (VK_ERROR_INVALID_EXTERNAL_HANDLE) imports read-only pages. They count as written, so the texture watch uploads
-            // its textures there again and arms them after the import, which the import survives (a whole pool's import does the same).
-            // [nvn] pool_copy: a shadow instead (read-only pages are fine, nothing is imported); an import only when it cannot be made.
-            bool ok = g->copy && pcopy_alloc(g, x, xo, xs, "copy cell");
-            if (!ok) {
-                std::lock_guard<std::mutex> ilk(tex_arm_import_mutex());   // no arm of the worker in between
-                mem::ww::forget(reinterpret_cast<uint64_t>(g->base) + xo, xs, false);
-                ok = import_range(g, x, xo, xs, "lazy chunk", c0, g->cell_ext.size());
-            }
-            for (size_t k = c0; k <= c1; ++k) g->cell_ext[k] = idx;    // a failure too: not tried again
+            const bool ok = lazy_import_cells(g, x, xo, xs);
+            for (size_t k = c0; k <= c1; ++k) g->cell_ext[k] = idx;    // a failure too: the entry keeps its cells for the retry
             if (!ok) return nullptr;
-            if (!x.is_shadow) {
-                g_lz_imports.fetch_add(1, std::memory_order_relaxed);
-                g_lz_imported_bytes.fetch_add(xs, std::memory_order_relaxed);
-            }
-            g_lz_live_bytes.fetch_add(static_cast<int64_t>(xs), std::memory_order_relaxed);   // live cells, imported or shadows
             c = &x;
         }
     }
@@ -442,23 +518,20 @@ PoolChunk* lazy_chunk(PoolGpu* g, uint64_t off, uint64_t size) {
         if (c && made) g_lz_live_bytes.fetch_add(static_cast<int64_t>(c->size), std::memory_order_relaxed);
     }
     if (!c) {
-        const size_t before = g->spans.size();
+        bool made = false;
         const uint64_t s0 = off / cell * cell, s1 = std::min<uint64_t>((end + cell - 1) / cell * cell, g->size);   // pool_span's range
         {
             std::lock_guard<std::mutex> ilk(tex_arm_import_mutex());
             mem::ww::forget(reinterpret_cast<uint64_t>(g->base) + s0, s1 - s0, false);
-            c = pool_span(g, off, end - off);
+            c = pool_span(g, off, end - off, &made);
         }
-        if (g->spans.size() != before && c) {
+        if (made && c) {
             g_lz_spans.fetch_add(1, std::memory_order_relaxed);
             g_lz_imported_bytes.fetch_add(c->size, std::memory_order_relaxed);
             g_lz_live_bytes.fetch_add(static_cast<int64_t>(c->size), std::memory_order_relaxed);
         }
     }
-    if (c) {
-        c->used_at = static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed));
-        c->used_serial = current_serial();
-    }
+    if (c) note_used(*c);
     return c;
 }
 
@@ -707,16 +780,61 @@ bool pool_drop_chunk_if_live(PoolGpu* g, PoolChunk* c) {
     return true;
 }
 
+// After an import ran out of memory (g_oom_sweep): imports of every pool, chunked and whole ones too, that no bind used for kOomIdle presents
+// and whose last submission has completed are destroyed, so the pages they pinned are free for the retry (retry_due). Same rules as
+// lazy_drop_idle; a dropped chunk is imported again at its next bind (tried is reset). Shadows are not imports and stay (pcopy_evict_for).
+// At most once per kRetryFirst presents; one summary line per 600 presents at most. Render thread, start of a submission.
+constexpr uint32_t kOomIdle = 300;
+void oom_drop_idle(uint32_t now) {
+    static uint32_t last = 0, last_log = 0;
+    static uint64_t n_acc = 0, bytes_acc = 0;
+    if (now - last < kRetryFirst || !g_oom_sweep.exchange(false, std::memory_order_relaxed)) return;
+    last = now;
+    const uint64_t done = poll_completed();
+    const uint64_t cur = current_serial();
+    const auto idle_now = [&](const PoolChunk& c) {
+        return c.buffer && !c.failed && !c.is_shadow && now - c.used_at > kOomIdle && c.used_serial <= done && c.used_serial < cur;
+    };
+    uint64_t n = 0, bytes = 0;
+    const auto count = [&](const PoolChunk& c) { ++n; bytes += c.size; };
+    {
+        std::lock_guard<std::mutex> lk(g_live_mu);
+        for (PoolGpu* g : g_live) {
+            for (PoolChunk& c : g->chunks)
+                if (idle_now(c)) { count(c); destroy_chunk(c); }
+            for (size_t i = 0; i < g->ext.size(); ++i)
+                if (idle_now(g->ext[i])) { count(g->ext[i]); pool_drop_ext(g, i); }
+            for (auto it = g->spans.begin(); it != g->spans.end();) {
+                if (!idle_now(*it)) { ++it; continue; }
+                count(*it);
+                if (g->lazy) pool_drop_span(g, *it);   // the lazy statistics count lazy pools' spans only
+                else destroy_chunk(*it);
+                if (g->copy) ++it;                     // the empty slot stays (pcopy_span reuses it)
+                else it = g->spans.erase(it);
+            }
+        }
+    }
+    n_acc += n;
+    bytes_acc += bytes;
+    if (n_acc && now - last_log >= 600) {
+        last_log = now;
+        NXLOG_I(kTag, "an import ran out of memory: dropped %llu idle imports (%llu MiB) unused for %u presents or more, so the retry has room",
+                static_cast<unsigned long long>(n_acc), static_cast<unsigned long long>(bytes_acc >> 20), kOomIdle);
+        n_acc = bytes_acc = 0;
+    }
+}
+
 // [nvn] pool_lazy: imports of lazy pools no bind resolved to for [nvn] pool_lazy_idle presents, whose last submission has completed, are
 // destroyed (their cells are imported again at the next bind). Their pages leave every later submission's BO list. Nothing outside one
 // submission keeps a pool buffer except texel buffer views, which destroy_chunk forgets. Checked every 64 presents, and a summary line every
 // 1200. Render thread, start of a submission (mirror_begin_submit), before anything of it is recorded.
 // [nvn] pool_copy: the same for shadows, after [nvn] pool_copy_idle presents and only once every GPU write into them has landed
-// (pcopy_busy). One log line per drop (both modes).
+// (pcopy_busy). One log line per drop (both modes). Any mode: the out-of-memory sweep first (oom_drop_idle).
 void lazy_drop_idle() {
+    const uint32_t now = presents_now();
+    oom_drop_idle(now);
     const bool copy = pool_copy_on();
     if (!lazy_on() && !copy) return;
-    const uint32_t now = static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed));
     static uint32_t last = 0, last_log = 0;
     const uint32_t idle = copy ? pool_copy_idle() : lazy_idle();
     if (now - last < (idle ? std::min<uint32_t>(64, idle) : 64)) return;
@@ -916,8 +1034,6 @@ uint64_t mirror_cap_bytes() {
     static const uint64_t b = mirror_budget();
     return b;
 }
-
-uint32_t presents_now() { return static_cast<uint32_t>(counters().presents.load(std::memory_order_relaxed)); }
 
 bool bit_get(const std::vector<uint64_t>& v, uint64_t i) { return (v[static_cast<size_t>(i >> 6)] >> (i & 63)) & 1; }
 void bit_put(std::vector<uint64_t>& v, uint64_t i, bool on) {

@@ -4733,7 +4733,7 @@ void run_list(const CmdList& list, int depth) {
 
 }  // namespace
 
-// [display] unpaced_loading (default on): the limiter stops waiting while the game loads, since its loading code advances once per
+// [display] unpaced_loading (default off): the limiter stops waiting while the game loads, since its loading code advances once per
 // presented frame. Loading = presented frames with fewer than 16 draws (boot's black screen draws 3: exposure, bloom, tone map; the
 // loading screen a few more) AND the game still stalling: a present gap over 100 ms in the last 1.5 s. A light screen that presents
 // steadily (the title screen, a menu) is paced again within 1.5 s, so it does not run at 1000 fps; so is any frame with 16+ draws.
@@ -4743,11 +4743,13 @@ void run_list(const CmdList& list, int depth) {
 // menu, a fade) is never unpaced just for being light, and a frame with 16+ draws is always paced.
 // The detection always runs: its result (`want`) is also the loading gate of the compile paths (replay_loading, [nvn] gpl_gate = state).
 // Only the limiter action depends on [display] unpaced_loading.
+// Off by default: a loading screen's animations also advance once per presented frame, so they fast-forwarded above 60 fps, and an
+// unpaced frame skips the limiter's 60 fps ceiling (the event hold, #144 #297) too. The gain was small: under a second on a world load (#48).
 static bool g_loading = true;      // the detector's current `want`; loading until the first present (render thread)
 bool replay_loading() { return g_loading; }
 
 void note_frame_for_pacing() {
-    static const bool on = nxrt::config_get_bool("display", "unpaced_loading", true);
+    static const bool on = nxrt::config_get_bool("display", "unpaced_loading", false);
     using clk = std::chrono::steady_clock;
     static uint64_t last_p = 0, last_d = 0;
     static int low = 0;
