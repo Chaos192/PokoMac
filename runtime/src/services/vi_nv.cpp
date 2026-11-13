@@ -1,1331 +1,1267 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Portions Copyright (c) 2026 Chaos192
-// vi:u, vi:s, vi:m (the display services and the binder driver of a layer's buffer queue) and nvdrv, nvdrv:a, nvdrv:s, nvdrv:t (the
-// nvhost devices), as far as the SDK uses them before NVN is handed to our graphics bootstrap (S3c).
+// Display and GPU driver services (S3c): vi:u / vi:s / vi:m (the display, its layers and its vsync event) and nvdrv / nvdrv:a / nvdrv:s /
+// nvdrv:t (the NV driver's device files), for the SDK's own nn::vi and nvn start-up code.
 //
-// Adapted from ScarletNX src/nx/hle/services/vi.swipc, vi.c, nvdrv.swipc and nvdrv.c (GPL-3.0-or-later; vi.c takes its parcel and
-// buffer-queue layouts from Eden and yuzu, GPL-2.0-or-later) and from Ryujinx src/Ryujinx.HLE/HOS/Services/{Vi,Nv,SurfaceFlinger}
-// (MIT). Command ids and layouts were also checked against https://switchbrew.org/wiki/NV_services and Display_services.
+// No frame passes through here: the game's NVN calls are answered by the host NVN front end, which presents on the host. So the layer's
+// buffer queue (IGraphicBufferProducer, answered inside TransactParcel) holds no buffers, channel submissions are accepted and never run,
+// and no syncpoint moves. What the display does see comes the other way: the front end calls victl::note_present() after each present (the
+// layer's frame history, nn::vi::ListFrameHistory / GetLatestFrameNumber), and frame_rate::note_present calls the present hook installed
+// here (the vsync event ticks on every present while the frame rate is unlimited).
 //
-// Not here, left to the GPU back end: nvhost channel submission (SUBMIT_GPFIFO only answers success), fences beyond success, presentation.
+// Command ids, layouts and values: https://switchbrew.org/wiki/Display_services (DisplayInfo, DisplayName, the native window parcel),
+// https://switchbrew.org/wiki/Nvnflinger_services (the binder parcel) and https://switchbrew.org/wiki/NV_services (device paths, ioctl
+// words, NvError, the GM20B characteristics). Facts taken from Ryujinx (MIT): src/Ryujinx.HLE/HOS/Services/Vi (result codes, scaling
+// mode values), SurfaceFlinger (transaction codes, status values, query attributes, NoVSyncCapability, buffer state Queued) and Nv
+// (NvResult, the address space regions, the 56-bit GPU time, 192 syncpoints, 64 ctrl events). No code from either.
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstring>
-#include <functional>
+#include <deque>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
+#include "nxrt/frame_rate.h"
 #include "nxrt/gauge.h"
+#include "nxrt/kernel.h"
 #include "nxrt/log.h"
 #include "nxrt/services_api.h"
+#include "nxrt/vblank.h"
 #include "services_internal.h"
 
 namespace nxrt::services {
+
 namespace {
 
-constexpr const char* kTagVi = "vi";
-constexpr const char* kTagNv = "nvdrv";
+// vi results (module 114): 1 for a bad argument, 7 for something that is not there.
+const uint32_t kViInvalidArgument = res(114, 1);   // 0x272
+const uint32_t kViNotFound = res(114, 7);          // 0xE72
 
-// Horizon results of the vi module (114): operation failed 0x272, not found 0xE72 (ScarletNX vi.c RC(114,1), RC(114,7)).
-constexpr uint32_t kViOperationFailed = 0x272;
-constexpr uint32_t kViNotFound = 0xE72;
-
-// NvError values the nvdrv replies carry (Ryujinx Nv/Types/NvResult.cs; Switchbrew NV_services uses the same numbers).
-constexpr uint32_t kNvOk = 0;
-constexpr uint32_t kNvNotImplemented = 1;
-constexpr uint32_t kNvNotSupported = 2;
-constexpr uint32_t kNvNotInitialized = 3;
-constexpr uint32_t kNvInvalidParameter = 4;
-constexpr uint32_t kNvInsufficientMemory = 6;
-constexpr uint32_t kNvInvalidSize = 10;
-constexpr uint32_t kNvInvalidValue = 11;
-constexpr uint32_t kNvFileOperationFailed = 0x30003;
-constexpr uint32_t kNvNotAvailableInProduction = 0x30006;
-constexpr uint32_t kSyncptCount = 192;   // the Tegra X1's hardware syncpoints
-
-// android::status_t values the buffer queue answers with (as uint32 words in the reply parcel)
-constexpr uint32_t kBqOk = 0;
-constexpr uint32_t kBqEBusy = static_cast<uint32_t>(-16);
-constexpr uint32_t kBqNoInit = static_cast<uint32_t>(-19);
-constexpr uint32_t kBqBadValue = static_cast<uint32_t>(-22);
-
-constexpr uint32_t kLayerSlots = 8;        // a layer's binder id is its slot + 1
-constexpr uint64_t kStrayLayerBase = 0x10000;
-constexpr uint32_t kNativeWindowSize = 0x3c;
-
-// ============================================================ shared helpers
-
-// A byte span the nvdrv ioctl code reads and writes (a guest buffer, or a copy of one)
-struct Arg {
-    uint8_t* p = nullptr;
-    uint64_t n = 0;
-    uint32_t u32(uint64_t off) const {
-        uint32_t v = 0;
-        if (p && off + 4 <= n) std::memcpy(&v, p + off, 4);
-        return v;
-    }
-    uint64_t u64(uint64_t off) const {
-        uint64_t v = 0;
-        if (p && off + 8 <= n) std::memcpy(&v, p + off, 8);
-        return v;
-    }
-    void put32(uint64_t off, uint32_t v) const {
-        if (p && off + 4 <= n) std::memcpy(p + off, &v, 4);
-    }
-    void put64(uint64_t off, uint64_t v) const {
-        if (p && off + 8 <= n) std::memcpy(p + off, &v, 8);
-    }
+struct Size2 {
+    uint32_t w, h;
 };
+// The display follows the console's operation mode, read at each call.
+Size2 display_size() { return amctl::docked() ? Size2{1920, 1080} : Size2{1280, 720}; }
 
-Arg arg_of(const ipc::Buffer& b) { return Arg{buf_mut(b), b.size}; }
+void put32(uint8_t* p, size_t off, uint32_t v) { std::memcpy(p + off, &v, 4); }
+void put64(uint8_t* p, size_t off, uint64_t v) { std::memcpy(p + off, &v, 8); }
 
-// The NUL-terminated string a guest buffer holds (at most the buffer's size).
-std::string c_string(const ipc::Buffer& b) {
-    std::string s;
-    if (!b.addr) return s;
-    const char* p = reinterpret_cast<const char*>(static_cast<uintptr_t>(b.addr));
-    s.assign(p, strnlen(p, static_cast<size_t>(b.size)));
-    return s;
-}
+// ======================================================================================================================================
+// vi state: the layer slots, the layer id counter and the vsync event (one lock); the frame history (its own lock)
+// ======================================================================================================================================
+constexpr int kSlots = 8;
+constexpr uint64_t kFirstLayerId = 0x10000;
 
-// Logs a binder or nvdrv condition once per code (a game may call DequeueBuffer in a loop).
-void warn_once(uint32_t code, const char* what) {
-    static std::atomic<uint32_t> seen{0};
-    const uint32_t bit = 1u << (code & 31);
-    if (!(seen.fetch_or(bit) & bit)) NXLOG_W(kTagVi, "binder transaction %u %s", code, what);
-}
-
-// Registers a command that is accepted and does nothing (logged at Debug).
-void accept_cmd(ipc::Service& s, uint32_t id, const char* name, const char* tag) {
-    s.add_cmd(id, name, [name, tag](ipc::Request&, ipc::Response&) -> uint32_t {
-        NXLOG_D(tag, "%s accepted, nothing done", name);
-        return 0;
-    });
-}
-
-// ============================================================ vi: displays and layers
-
-// nn::vi::DisplayName ids: the names Switchbrew lists, in its order ("Default" is display 0).
-bool display_id_of(const char* name40, uint64_t* id) {
-    static const char* const names[] = {"Default", "External", "Edid", "Internal", "Null"};
-    for (uint64_t i = 0; i < 5; ++i) {
-        if (std::strncmp(name40, names[i], 0x40) == 0) {
-            *id = i;
-            return true;
-        }
-    }
-    return false;
-}
-
-// The DisplayName a command carries as its first 0x40 raw bytes.
-bool display_from_raw(const ipc::Request& r, uint64_t* id) {
-    char nm[0x41] = {};
-    if (r.in) std::memcpy(nm, r.in, std::min<size_t>(0x40, r.in_size));
-    return display_id_of(nm, id);
-}
-
-// The docked and handheld resolutions (amctl::docked). The "Default" display always reports 1080p (Switchbrew Display_services).
-void display_size(uint32_t* w, uint32_t* h) {
-    *w = amctl::docked() ? 1920 : 1280;
-    *h = amctl::docked() ? 1080 : 720;
-}
-
-struct Layer {
+struct LayerSlot {
     bool used = false;
-    uint64_t layer_id = 0;
+    uint64_t id = 0;
     bool connected = false;
-    uint32_t buffer_count = 2;
+    int32_t buffer_count = 2;
     uint32_t width = 0, height = 0;
-    ServiceEvent event;   // signalled when a buffer comes free: never, since nothing is ever queued (see DequeueBuffer)
+    ServiceEvent event;
 };
 
-struct ViState {
+struct Vi {
     std::mutex mu;
-    Layer layers[kLayerSlots];
-    uint64_t next_stray = kStrayLayerBase;
+    LayerSlot slot[kSlots];
+    uint64_t next_layer_id = kFirstLayerId;
+    uint32_t binder_codes_logged = 0;   // a warning per unknown transaction code (folded into 32 bits)
+    // the vsync event and its thread
     ServiceEvent vsync;
-    bool vsync_on = false;
-    bool vsync_stop = false;
-    std::condition_variable cv;
-    std::thread th;
+    bool vsync_started = false;
+    std::thread vsync_thread;
+    std::atomic<bool> vsync_running{false};
+    std::atomic<bool> vsync_stop{false};
+    std::mutex wait_mu;
+    std::condition_variable wait_cv;
 };
-ViState& vi() {
-    static ViState s;
-    return s;
+Vi& vi() {
+    static Vi* v = new Vi;   // never destroyed: the vsync thread may still run at exit
+    return *v;
 }
 
-// The display's vsync: a host thread signals the event at 60 Hz. Started by the first GetDisplayVsyncEvent, stopped by vi_nv_reset().
-void vsync_main() {
-    ViState& s = vi();
-    // the cheats overlay's speed hack scales the period (kernel::time_scale; at 1.0 the wait is the 16667 us it always was)
-    auto period = [] {
-        const double k = kernel::time_scale();
-        return k == 1.0 ? std::chrono::microseconds(16667) : std::chrono::microseconds(static_cast<int64_t>(16667.0 / k));
-    };
-    std::unique_lock<std::mutex> lk(s.mu);
-    while (!s.vsync_stop) {
-        s.cv.wait_for(lk, period(), [&] { return s.vsync_stop; });
-        if (s.vsync_stop) break;
-        s.vsync.signal();
+// binder id = slot + 1; 0 when no slot is free. Called with vi().mu held.
+uint32_t open_layer(Vi& v, uint64_t id) {
+    for (int i = 0; i < kSlots; ++i)
+        if (v.slot[i].used && v.slot[i].id == id) return static_cast<uint32_t>(i + 1);
+    for (int i = 0; i < kSlots; ++i) {
+        LayerSlot& s = v.slot[i];
+        if (s.used) continue;
+        const Size2 d = display_size();
+        s.used = true;
+        s.id = id;
+        s.connected = false;
+        s.buffer_count = 2;
+        s.width = d.w;
+        s.height = d.h;
+        s.event = ServiceEvent();
+        return static_cast<uint32_t>(i + 1);
     }
-}
-
-void vsync_stop_and_join() {
-    ViState& s = vi();
-    std::thread t;
-    {
-        std::lock_guard<std::mutex> g(s.mu);
-        if (!s.vsync_on) return;
-        s.vsync_stop = true;
-        s.cv.notify_all();
-        t = std::move(s.th);
-    }
-    if (t.joinable()) t.join();
-    std::lock_guard<std::mutex> g(s.mu);
-    s.vsync_on = false;
-    s.vsync_stop = false;
-}
-
-// Caller holds vi().mu. Layer lookups: a binder id is the slot + 1; nullptr when no layer is open there.
-Layer* layer_by_binder(int32_t binder) {
-    if (binder < 1 || binder > static_cast<int32_t>(kLayerSlots)) return nullptr;
-    Layer& l = vi().layers[binder - 1];
-    return l.used ? &l : nullptr;
-}
-
-// Caller holds vi().mu. Opens (or finds) the layer; returns its binder id, 0 when every slot is taken.
-uint32_t layer_open_locked(uint64_t layer_id) {
-    ViState& s = vi();
-    int free_slot = -1;
-    for (uint32_t i = 0; i < kLayerSlots; ++i) {
-        if (s.layers[i].used && s.layers[i].layer_id == layer_id) return i + 1;
-        if (!s.layers[i].used && free_slot < 0) free_slot = static_cast<int>(i);
-    }
-    if (free_slot < 0) return 0;
-    Layer& l = s.layers[free_slot];
-    display_size(&l.width, &l.height);
-    l.used = true;
-    l.layer_id = layer_id;
-    l.connected = false;
-    l.buffer_count = 2;
-    l.event = ServiceEvent();
-    return static_cast<uint32_t>(free_slot) + 1;
-}
-
-// Caller holds vi().mu. CloseLayer and DestroyStrayLayer.
-void layer_close_locked(uint64_t layer_id) {
-    ViState& s = vi();
-    for (uint32_t i = 0; i < kLayerSlots; ++i) {
-        Layer& l = s.layers[i];
-        if (!l.used || l.layer_id != layer_id) continue;
-        l.used = false;
-        l.connected = false;
-        l.event = ServiceEvent();
-        return;
-    }
-    NXLOG_W(kTagVi, "closing layer %llx, which isn't open", static_cast<unsigned long long>(layer_id));
-}
-
-// The native window a layer hands back: a parcel of one flattened binder (Switchbrew Display_services "NativeWindow"): header
-// (data size 0x28 at 0, data offset 0x10, objects size 4 at 8, objects offset 0x38 at 0xC), data (0x2 at 0x10, the process word 1
-// at 0x14, the binder id as u64 at 0x18, "dispdrv\0" at 0x28), and an empty object list. Returns the size the parcel needs.
-uint32_t native_window(const ipc::Buffer& out, uint32_t binder, int64_t* size) {
-    if (!binder) return kViOperationFailed;
-    uint8_t p[kNativeWindowSize] = {};
-    const uint32_t words[] = {0x28, 0x10, 4, 0x38, 2, 1};
-    std::memcpy(p, words, sizeof words);
-    const uint64_t id = binder;
-    std::memcpy(p + 0x18, &id, 8);
-    std::memcpy(p + 0x28, "dispdrv", 8);
-    *size = static_cast<int64_t>(sizeof p);
-    if (out.size < sizeof p) {
-        NXLOG_W(kTagVi, "native window buffer of 0x%llx bytes, 0x%x are needed", static_cast<unsigned long long>(out.size),
-                static_cast<unsigned>(sizeof p));
-        return 0;
-    }
-    buf_write(out, p, sizeof p);
     return 0;
 }
 
-// ---- the binder driver of a layer's buffer queue (IHOSBinderDriver) ----
+void close_layer(Vi& v, uint64_t id) {
+    for (LayerSlot& s : v.slot) {
+        if (!s.used || s.id != id) continue;
+        s.used = false;
+        s.connected = false;
+        s.event = ServiceEvent();
+        return;
+    }
+    NXLOG_W("vi", "close of layer %llu, which is not open", static_cast<unsigned long long>(id));
+}
 
-// A parcel's reader: the header, the interface token (strict policy, then the descriptor as a length and UTF-16 units with a NUL,
-// padded to 4), then the call's words.
-struct ParcelIn {
-    const uint8_t* d = nullptr;
-    uint64_t n = 0, pos = 0;
-    void open(const uint8_t* data, uint64_t size) {
-        d = data;
-        n = size;
+LayerSlot* layer_of_binder(Vi& v, int32_t binder) {
+    if (binder < 1 || binder > kSlots) return nullptr;
+    LayerSlot& s = v.slot[binder - 1];
+    return s.used ? &s : nullptr;
+}
+
+// The native window parcel OpenLayer / CreateStrayLayer hand out (0x3C bytes): a flattened binder object named "dispdrv".
+constexpr uint64_t kNativeWindowSize = 0x3C;
+void write_native_window(const ipc::Buffer& b, uint32_t binder) {
+    if (!b.addr || b.size < kNativeWindowSize) {
+        NXLOG_W("vi", "native window buffer of %llu bytes (0x3C needed): not written", static_cast<unsigned long long>(b.size));
+        return;
+    }
+    uint8_t p[kNativeWindowSize] = {};
+    put32(p, 0x00, 0x28);   // data size
+    put32(p, 0x04, 0x10);   // data offset
+    put32(p, 0x08, 4);      // objects size
+    put32(p, 0x0C, 0x38);   // objects offset
+    put32(p, 0x10, 2);      // flattened binder type
+    put32(p, 0x14, 1);
+    put64(p, 0x18, binder);
+    std::memcpy(p + 0x28, "dispdrv", 8);
+    buf_write(b, p, kNativeWindowSize);
+}
+
+// ---- the frame history ---------------------------------------------------------------------------------------------------------------
+struct Presented {
+    uint64_t frame;
+    int64_t queue_ns, present_ns;
+};
+struct History {
+    std::mutex mu;
+    uint64_t frames = 0;
+    std::deque<Presented> last;   // oldest first, at most kKept
+};
+constexpr size_t kKept = 8;
+History& history() {
+    static History* h = new History;
+    return *h;
+}
+
+constexpr uint64_t kNsPerSec = 1000000000ull;
+uint64_t ticks_to_ns(uint64_t t, uint64_t hz) { return hz ? (t / hz) * kNsPerSec + (t % hz) * kNsPerSec / hz : 0; }
+uint64_t ns_to_ticks(int64_t ns, uint64_t hz) {
+    if (ns < 0) return 0;
+    const uint64_t u = static_cast<uint64_t>(ns);
+    return (u / kNsPerSec) * hz + (u % kNsPerSec) * hz / kNsPerSec;
+}
+
+// ---- the vsync event -----------------------------------------------------------------------------------------------------------------
+// Its rate without the speed hack: the frame rate's vsync rate, or with none (unlimited) the host screen's refresh, else 60.
+double event_hz() {
+    const double hz = frame_rate::vsync_hz();
+    if (hz > 0) return hz;
+    vblank::Screen s;
+    if (vblank::screen(&s) && s.period) return 1e9 / static_cast<double>(s.period);
+    return 60.0;
+}
+
+double tick_rate() {
+    const double r = event_hz() * kernel::time_scale();
+    return r > 0 ? r : 60.0;
+}
+
+void vsync_main(ServiceEvent ev) {
+    log_set_thread_name("vi vsync");
+    Vi& v = vi();
+    constexpr uint64_t kEarly = 200000;   // a wake within 0.2 ms of the deadline is the tick
+    uint64_t deadline = vblank::now_ns() + static_cast<uint64_t>(1e9 / tick_rate());
+    vblank::Ticks ticks;
+    int mode = -1;   // 1: on the screen's refreshes, 0: on its own clock
+    while (!v.vsync_stop.load()) {
+        uint64_t now = vblank::now_ns();
+        if (deadline > now + kEarly) {
+            std::unique_lock<std::mutex> lk(v.wait_mu);
+            v.wait_cv.wait_for(lk, std::chrono::nanoseconds(deadline - now), [&v] { return v.vsync_stop.load(); });
+            continue;
+        }
+        ev.signal();
+        const double rate = tick_rate();
+        vblank::Screen s;
+        const bool have_screen = vblank::screen(&s) && s.period;
+        const bool on_screen = kernel::time_scale() == 1.0 && have_screen && rate <= 1.02 * (1e9 / static_cast<double>(s.period));
+        if (static_cast<int>(on_screen) != mode) {
+            mode = on_screen ? 1 : 0;
+            ticks = vblank::Ticks{};
+            if (on_screen)
+                NXLOG_I("vi", "vsync event: %.2f Hz on the %s screen refresh (%.2f Hz, %u refreshes a tick)", rate, vblank::source_name(),
+                        1e9 / static_cast<double>(s.period), vblank::refreshes_per_tick(s, rate));
+            else
+                NXLOG_I("vi", "vsync event: %.2f Hz on its own clock", rate);
+        }
+        now = vblank::now_ns();
+        if (on_screen) {
+            deadline = vblank::next_tick(ticks, s, rate, now);
+        } else {
+            uint64_t period = static_cast<uint64_t>(1e9 / rate);
+            if (!period) period = 1;
+            deadline += period;
+            if (deadline <= now) deadline += ((now - deadline) / period + 1) * period;   // missed ticks are skipped
+        }
+    }
+}
+
+// frame_rate::note_present, while the frame rate is unlimited: every present is a tick.
+void present_hook() {
+    Vi& v = vi();
+    if (!v.vsync_running.load() || v.vsync_stop.load()) return;
+    ServiceEvent ev;
+    {
+        std::lock_guard<std::mutex> lk(v.mu);
+        ev = v.vsync;
+    }
+    ev.signal();
+}
+
+uint32_t vsync_handle() {
+    Vi& v = vi();
+    std::lock_guard<std::mutex> lk(v.mu);
+    if (!v.vsync_started) {
+        v.vsync_started = true;
+        v.vsync_stop = false;
+        v.vsync_running = true;
+        v.vsync_thread = std::thread(vsync_main, v.vsync);
+        frame_rate::set_present_hook(&present_hook);
+    }
+    return v.vsync.new_handle();
+}
+
+// ======================================================================================================================================
+// vi services
+// ======================================================================================================================================
+using H = ipc::Handler;
+
+uint32_t ok(ipc::Request&, ipc::Response&) { return 0; }
+
+// IManagerDisplayService's events: a new one per call, never signalled.
+uint32_t fresh_event(ipc::Request&, ipc::Response& rsp) {
+    ServiceEvent e;
+    const uint32_t h = e.new_handle();
+    if (!h) return kViInvalidArgument;
+    rsp.out_copy.push_back(h);
+    return 0;
+}
+
+// ---- IHOSBinderDriver: the layer's IGraphicBufferProducer --------------------------------------------------------------------------
+constexpr uint32_t kStatusOk = 0;
+constexpr uint32_t kStatusBusy = static_cast<uint32_t>(-16);
+constexpr uint32_t kStatusNoInit = static_cast<uint32_t>(-19);
+constexpr uint32_t kStatusBadValue = static_cast<uint32_t>(-22);
+
+// The request parcel's words after its interface token; reads past the buffer (at most its first 0x10000 bytes) give 0.
+class ParcelIn {
+public:
+    explicit ParcelIn(const ipc::Buffer& b) : p_(buf_ptr(b)), size_(std::min<uint64_t>(b.size, 0x10000)) {
         uint32_t off = 0;
-        if (n >= 8) std::memcpy(&off, d + 4, 4);
-        pos = off < n ? off : n;
-        u32();                                       // strict policy
-        const uint32_t len = u32();
-        if (len < 0x100) pos += (((len + 1) * 2) + 3) & ~3u;
-        if (pos > n) pos = n;
+        std::memcpy(&off, p_ + 4, 4);
+        pos_ = off;
     }
     uint32_t u32() {
         uint32_t v = 0;
-        if (pos + 4 <= n) std::memcpy(&v, d + pos, 4);
-        pos += 4;
+        if (pos_ < size_ && size_ - pos_ >= 4) std::memcpy(&v, p_ + pos_, 4);
+        pos_ += 4;
         return v;
     }
-};
-
-struct ParcelOut {
-    std::vector<uint8_t> d;
-    void u32(uint32_t v) {
-        const size_t o = d.size();
-        d.resize(o + 4);
-        std::memcpy(d.data() + o, &v, 4);
+    void skip_token() {
+        u32();   // strict mode policy
+        const uint32_t len = u32();
+        if (len < 0x100) pos_ += (((static_cast<uint64_t>(len) + 1) * 2 + 3) & ~3ull);   // UTF-16 name and its NUL, padded to 4
     }
+
+private:
+    const uint8_t* p_;
+    uint64_t size_;
+    uint64_t pos_ = 0;
 };
 
-// The reply: the header (data size, data offset 16, no objects, objects offset after the data) and the data.
-void reply_parcel(const ipc::Buffer& reply, const std::vector<uint8_t>& data) {
-    const uint32_t hdr[4] = {static_cast<uint32_t>(data.size()), 16, 0, static_cast<uint32_t>(16 + data.size())};
-    std::vector<uint8_t> out(16 + data.size());
-    std::memcpy(out.data(), hdr, 16);
-    if (!data.empty()) std::memcpy(out.data() + 16, data.data(), data.size());
-    if (out.size() > reply.size)
-        NXLOG_W(kTagVi, "binder reply of %llu bytes doesn't fit the game's %llu", static_cast<unsigned long long>(out.size()),
-                static_cast<unsigned long long>(reply.size));
-    buf_write(reply, out.data(), out.size());
+void query(const LayerSlot& l, uint32_t what, std::vector<uint32_t>& w) {
+    switch (what) {
+        case 0: case 6: w = {l.width, kStatusOk}; return;      // width, default width
+        case 1: case 7: w = {l.height, kStatusOk}; return;     // height, default height
+        case 2: w = {1, kStatusOk}; return;                    // format RGBA8888
+        case 3: w = {1, kStatusOk}; return;                    // min undequeued buffers
+        case 9: case 10: case 11: w = {0, kStatusOk}; return;  // consumer running behind, consumer usage bits, sticky transform
+        case 12: w = {static_cast<uint32_t>(l.buffer_count), kStatusOk}; return;
+        default: w = {0, kStatusBadValue}; return;
+    }
 }
 
-// One TransactParcel: the layer's buffer queue answers each IGraphicBufferProducer code. The queue never holds a buffer (the game's
-// buffers are not presented here), so DequeueBuffer answers -EBUSY and RequestBuffer / QueueBuffer answer NO_INIT. Outputs come
-// first and the status word last, except GetBufferHistory, which answers the status and then a count of 0 (Ryujinx).
-uint32_t binder_call(int32_t binder, uint32_t code, const ipc::Buffer& parcel, const ipc::Buffer& reply) {
-    if (parcel.size < 16) return kViOperationFailed;
-    ParcelIn in;
-    in.open(buf_ptr(parcel), parcel.size < 0x10000 ? parcel.size : 0x10000);
-    ParcelOut out;
-    bool history = false;
-    uint32_t status = kBqOk;
-    {
-        ViState& s = vi();
-        std::lock_guard<std::mutex> g(s.mu);
-        Layer* l = layer_by_binder(binder);
-        if (!l) return kViNotFound;
-        switch (code) {
-        case 1:   // RequestBuffer: a null graphic buffer
-            out.u32(0);
-            status = kBqNoInit;
-            warn_once(code, "RequestBuffer: no buffer in the queue, NO_INIT");
-            break;
-        case 2: {   // SetBufferCount(i32)
-            const int32_t count = static_cast<int32_t>(in.u32());
-            if (count < 1) status = kBqBadValue;
-            else l->buffer_count = static_cast<uint32_t>(count);
-            break;
-        }
-        case 3:   // DequeueBuffer: no free slot (-EBUSY) and no slot number
-            out.u32(static_cast<uint32_t>(-1));
-            status = kBqEBusy;
-            warn_once(code, "DequeueBuffer: no free buffer, -EBUSY");
-            break;
-        case 4:
-        case 5:
-        case 6:
-        case 8:
-        case 13:
-        case 14: break;   // DetachBuffer, DetachNextBuffer, AttachBuffer, CancelBuffer, AllocateBuffers, SetPreallocatedBuffer: accepted
-        case 7:   // QueueBuffer: nothing was dequeued
-            status = kBqNoInit;
-            warn_once(code, "QueueBuffer: nothing dequeued, NO_INIT");
-            break;
-        case 9: {   // Query(u32 what) -> i32 value
-            const uint32_t what = in.u32();
-            uint32_t v = 0;
-            bool known = true;
-            switch (what) {
-            case 0: v = l->width; break;                                    // Width
-            case 1: v = l->height; break;                                   // Height
-            case 2: v = 1; break;                                           // Format: RGBA8888
-            case 3: v = 1; break;                                           // MinUnqueuedBuffers
-            case 6: v = l->width; break;                                    // DefaultWidth
-            case 7: v = l->height; break;                                   // DefaultHeight
-            case 9:
-            case 10:
-            case 11: v = 0; break;                                          // ConsumerRunningBehind, ConsumerUsageBits, StickyTransform
-            case 12: v = l->buffer_count; break;                            // MaxBufferCountAsync
-            default: known = false; break;
+void buffer_history(int32_t want, std::vector<uint32_t>& w) {
+    if (want <= 0) {
+        w = {kStatusBadValue, 0};
+        return;
+    }
+    History& h = history();
+    std::lock_guard<std::mutex> lk(h.mu);
+    const size_t n = std::min<size_t>({static_cast<size_t>(want), h.last.size(), kKept});
+    w = {kStatusOk, static_cast<uint32_t>(n)};
+    for (size_t i = 0; i < n; ++i) {
+        const Presented& f = h.last[h.last.size() - 1 - i];
+        const uint64_t q = static_cast<uint64_t>(f.queue_ns), p = static_cast<uint64_t>(f.present_ns);
+        const uint32_t rec[8] = {static_cast<uint32_t>(f.frame), static_cast<uint32_t>(f.frame >> 32), static_cast<uint32_t>(q),
+                                 static_cast<uint32_t>(q >> 32), static_cast<uint32_t>(p), static_cast<uint32_t>(p >> 32), 2, 0};
+        w.insert(w.end(), rec, rec + 8);
+    }
+}
+
+uint32_t transact(ipc::Request& req, ipc::Response&) {
+    const int32_t binder = req.arg<int32_t>(0);
+    const uint32_t code = req.arg<uint32_t>(4);
+    const ipc::Buffer in = req.in_buf(0), out = req.out_buf(0);
+    if (!in.addr || in.size < 16) return kViInvalidArgument;
+    Vi& v = vi();
+    std::lock_guard<std::mutex> lk(v.mu);
+    LayerSlot* l = layer_of_binder(v, binder);
+    if (!l) return kViNotFound;
+    ParcelIn rd(in);
+    rd.skip_token();
+    std::vector<uint32_t> w;
+    switch (code) {
+        case 1: w = {0, kStatusNoInit}; break;                        // RequestBuffer: no buffer
+        case 2: {                                                     // SetBufferCount
+            const int32_t n = static_cast<int32_t>(rd.u32());
+            if (n < 1) {
+                w = {kStatusBadValue};
+            } else {
+                l->buffer_count = n;
+                w = {kStatusOk};
             }
-            out.u32(v);
-            if (!known) status = kBqBadValue;
             break;
         }
-        case 10:   // Connect(bool has_listener, u32 api, bool controlled): QueueBufferOutput {width, height, transform hint, pending}
+        case 3: w = {0xFFFFFFFFu, kStatusBusy}; break;                // DequeueBuffer: slot -1
+        case 7: w = {kStatusNoInit}; break;                           // QueueBuffer
+        case 9: query(*l, rd.u32(), w); break;                        // Query
+        case 10:                                                      // Connect: width, height, NoVSyncCapability, no pending buffers
             l->connected = true;
-            out.u32(l->width);
-            out.u32(l->height);
-            out.u32(0x10);   // NoVSyncCapability, as Ryujinx answers
-            out.u32(0);
+            w = {l->width, l->height, 0x10, 0, kStatusOk};
             break;
-        case 11:   // Disconnect(u32 api)
-            if (!l->connected) status = kBqNoInit;
+        case 11:                                                      // Disconnect
+            w = {l->connected ? kStatusOk : kStatusNoInit};
             l->connected = false;
             break;
-        case 17:   // GetBufferHistory: status, then a count of 0
-            history = true;
+        case 17: buffer_history(static_cast<int32_t>(rd.u32()), w); break;   // GetBufferHistory
+        case 4: case 5: case 6: case 8: case 13: case 14:             // Detach / DetachNext / Attach / Cancel / Allocate / SetPreallocated
+            w = {kStatusOk};
             break;
         default:
-            warn_once(code, "is not implemented: answered with success");
+            if (!(v.binder_codes_logged & (1u << (code & 31)))) {
+                v.binder_codes_logged |= 1u << (code & 31);
+                NXLOG_W("vi", "binder transaction code %u answered OK", code);
+            }
+            w = {kStatusOk};
             break;
-        }
     }
-    if (history) {
-        out.u32(status);
-        out.u32(0);
-    } else {
-        out.u32(status);
-    }
-    reply_parcel(reply, out.d);
+    const uint32_t data = static_cast<uint32_t>(4 * w.size());
+    std::vector<uint8_t> reply(16 + data);
+    put32(reply.data(), 0, data);
+    put32(reply.data(), 4, 0x10);
+    put32(reply.data(), 8, 0);
+    put32(reply.data(), 12, 0x10 + data);
+    if (data) std::memcpy(reply.data() + 16, w.data(), data);
+    if (out.addr && out.size < reply.size())
+        NXLOG_W("vi", "binder reply of %zu bytes cut to the %llu-byte buffer", reply.size(), static_cast<unsigned long long>(out.size));
+    buf_write(out, reply.data(), reply.size());
     return 0;
 }
 
-// vsync: the first request starts the 60 Hz thread; each request is a new handle onto the one event.
-uint32_t vsync_new_handle() {
-    ViState& s = vi();
-    std::lock_guard<std::mutex> g(s.mu);
-    if (!s.vsync_on) {
-        s.vsync_on = true;
-        s.vsync_stop = false;
-        s.th = std::thread(vsync_main);
-        NXLOG_I(kTagVi, "display vsync: 60 Hz event started");
-    }
-    return s.vsync.new_handle();
-}
-
-uint32_t vsync_handle(ipc::Response& rsp) {
-    const uint32_t h = vsync_new_handle();
-    if (!h) return kViOperationFailed;
-    rsp.out_copy.push_back(h);
-    return 0;
-}
-
-// An unsignalled event handle (hotplug, mode changed, texture presenting): nothing here raises them.
-uint32_t fresh_event_handle(ipc::Response& rsp) {
-    ServiceEvent ev;
-    const uint32_t h = ev.new_handle();
-    if (!h) return kViOperationFailed;
-    rsp.out_copy.push_back(h);
-    return 0;
-}
-
-// The Default display's DisplayInfo (0x60 bytes): name at 0, has-limited-layers at 0x40, layer count max at 0x48, the 1080p size at
-// 0x50 and 0x58 (Switchbrew Display_services; the layer count of 1 is ScarletNX's value).
-void write_display_info(const ipc::Buffer& out) {
-    uint8_t info[0x60] = {};
-    std::memcpy(info, "Default", 8);
-    info[0x40] = 1;
-    const uint64_t one = 1, w = 1920, h = 1080;
-    std::memcpy(info + 0x48, &one, 8);
-    std::memcpy(info + 0x50, &w, 8);
-    std::memcpy(info + 0x58, &h, 8);
-    buf_write(out, info, sizeof info);
-}
-
-std::shared_ptr<ipc::Service> make_binder_driver();   // forward: the IHOSBinderDriver interface
-
-void setup_binder_driver(ipc::Service& s) {
-    s.add_cmd(0, "TransactParcel", [](ipc::Request& r, ipc::Response&) -> uint32_t {
-        return binder_call(r.arg<int32_t>(0), r.arg<uint32_t>(4), r.in_buf(0), r.out_buf(0));
-    });
-    accept_cmd(s, 1, "AdjustRefcount", kTagVi);
-    s.add_cmd(2, "GetNativeHandle", [](ipc::Request& r, ipc::Response& rsp) -> uint32_t {
-        std::lock_guard<std::mutex> g(vi().mu);
-        Layer* l = layer_by_binder(r.arg<int32_t>(0));
-        if (!l) return kViNotFound;
-        const uint32_t h = l->event.new_handle();
-        if (!h) return kViOperationFailed;
-        rsp.out_copy.push_back(h);
-        return 0;
-    });
-    s.add_cmd(3, "TransactParcelAuto", [](ipc::Request& r, ipc::Response&) -> uint32_t {
-        return binder_call(r.arg<int32_t>(0), r.arg<uint32_t>(4), r.in_buf(0), r.out_buf(0));
+std::shared_ptr<ipc::Service> make_binder() {
+    return make_iface("nns::hosbinder::IHOSBinderDriver", [](ipc::Service& s) {
+        s.add_cmd(0, "TransactParcel", transact);
+        s.add_cmd(1, "AdjustRefcount", ok);
+        s.add_cmd(2, "GetNativeHandle", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            Vi& v = vi();
+            std::lock_guard<std::mutex> lk(v.mu);
+            LayerSlot* l = layer_of_binder(v, req.arg<int32_t>(0));
+            if (!l) return kViNotFound;
+            const uint32_t h = l->event.new_handle();
+            if (!h) return kViInvalidArgument;
+            rsp.out_copy.push_back(h);
+            return 0;
+        });
+        s.add_cmd(3, "TransactParcelAuto", transact);
     });
 }
 
-std::shared_ptr<ipc::Service> make_binder_driver() {
-    return make_iface("nns::hosbinder::IHOSBinderDriver", setup_binder_driver);
-}
-
-std::shared_ptr<ipc::Service> make_system_display();    // forward
-std::shared_ptr<ipc::Service> make_manager_display();   // forward
-
-void setup_system_display(ipc::Service& s) {
-    s.add_cmd(1200, "GetZOrderCountMin", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push<int64_t>(1);
-        return 0;
-    });
-    s.add_cmd(1202, "GetZOrderCountMax", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push<int64_t>(255);
-        return 0;
-    });
-    s.add_cmd(1203, "GetDisplayLogicalResolution", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        uint32_t w = 0, h = 0;
-        display_size(&w, &h);
-        rsp.push<int32_t>(static_cast<int32_t>(w));
-        rsp.push<int32_t>(static_cast<int32_t>(h));
-        return 0;
-    });
-    // DisplayModeInfo: width, height, refresh rate (f32), unknown (u32)
-    s.add_cmd(3200, "GetDisplayMode", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        uint32_t w = 0, h = 0;
-        display_size(&w, &h);
-        rsp.push<uint32_t>(w);
-        rsp.push<uint32_t>(h);
-        rsp.push<float>(60.0f);
-        rsp.push<uint32_t>(0);
-        return 0;
-    });
-}
-
+// ---- ISystemDisplayService / IManagerDisplayService -----------------------------------------------------------------------------------
 std::shared_ptr<ipc::Service> make_system_display() {
-    return make_iface("nn::visrv::sf::ISystemDisplayService", setup_system_display);
-}
-
-void setup_manager_display(ipc::Service& s) {
-    s.add_cmd(2010, "CreateManagedLayer", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        uint64_t layer = 0;
-        {
-            std::lock_guard<std::mutex> g(vi().mu);
-            layer = vi().next_stray++;
-        }
-        rsp.push<uint64_t>(layer);
-        return 0;
-    });
-    s.add_cmd(2300, "AcquireLayerTexturePresentingEvent", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        return fresh_event_handle(rsp);
-    });
-    s.add_cmd(2302, "GetDisplayHotplugEvent", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        return fresh_event_handle(rsp);
-    });
-    s.add_cmd(2303, "GetDisplayModeChangedEvent", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        return fresh_event_handle(rsp);
+    return make_iface("nn::visrv::sf::ISystemDisplayService", [](ipc::Service& s) {
+        s.add_cmd(1200, "GetZOrderCountMin", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.push<int64_t>(1);
+            return 0;
+        });
+        s.add_cmd(1202, "GetZOrderCountMax", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.push<int64_t>(255);
+            return 0;
+        });
+        s.add_cmd(1203, "GetDisplayLogicalResolution", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            const Size2 d = display_size();
+            rsp.push<int32_t>(static_cast<int32_t>(d.w));
+            rsp.push<int32_t>(static_cast<int32_t>(d.h));
+            return 0;
+        });
+        s.add_cmd(3200, "GetDisplayMode", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            const Size2 d = display_size();
+            rsp.push<uint32_t>(d.w);
+            rsp.push<uint32_t>(d.h);
+            rsp.push<float>(static_cast<float>(event_hz()));
+            rsp.push<uint32_t>(0);
+            return 0;
+        });
     });
 }
 
 std::shared_ptr<ipc::Service> make_manager_display() {
-    return make_iface("nn::visrv::sf::IManagerDisplayService", setup_manager_display);
-}
-
-void setup_app_display(ipc::Service& s) {
-    s.add_cmd(100, "GetRelayService", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push_object(make_binder_driver());
-        return 0;
-    });
-    s.add_cmd(101, "GetSystemDisplayService", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push_object(make_system_display());
-        return 0;
-    });
-    s.add_cmd(102, "GetManagerDisplayService", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push_object(make_manager_display());
-        return 0;
-    });
-    s.add_cmd(103, "GetIndirectDisplayTransactionService", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push_object(make_binder_driver());
-        return 0;
-    });
-    s.add_cmd(1000, "ListDisplays", [](ipc::Request& r, ipc::Response& rsp) -> uint32_t {
-        write_display_info(r.out_buf(0));
-        rsp.push<uint64_t>(1);
-        return 0;
-    });
-    s.add_cmd(1010, "OpenDisplay", [](ipc::Request& r, ipc::Response& rsp) -> uint32_t {
-        uint64_t id = 0;
-        if (!display_from_raw(r, &id)) return kViOperationFailed;
-        rsp.push<uint64_t>(id);
-        return 0;
-    });
-    s.add_cmd(1011, "OpenDefaultDisplay", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push<uint64_t>(0);
-        return 0;
-    });
-    accept_cmd(s, 1020, "CloseDisplay", kTagVi);
-    accept_cmd(s, 1101, "SetDisplayEnabled", kTagVi);
-    s.add_cmd(1102, "GetDisplayResolution", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        uint32_t w = 0, h = 0;
-        display_size(&w, &h);
-        rsp.push<int64_t>(w);
-        rsp.push<int64_t>(h);
-        return 0;
-    });
-    s.add_cmd(2020, "OpenLayer", [](ipc::Request& r, ipc::Response& rsp) -> uint32_t {
-        uint64_t display = 0;
-        if (!display_from_raw(r, &display)) return kViOperationFailed;
-        const uint64_t layer = r.arg<uint64_t>(0x40);   // the AppletResourceUserId that follows is not needed here
-        uint32_t binder = 0;
-        {
-            std::lock_guard<std::mutex> g(vi().mu);
-            binder = layer_open_locked(layer);
-        }
-        int64_t size = 0;
-        const uint32_t err = native_window(r.out_buf(0), binder, &size);
-        if (err) return err;
-        rsp.push<int64_t>(size);
-        return 0;
-    });
-    s.add_cmd(2021, "CloseLayer", [](ipc::Request& r, ipc::Response&) -> uint32_t {
-        std::lock_guard<std::mutex> g(vi().mu);
-        layer_close_locked(r.arg<uint64_t>(0));
-        return 0;
-    });
-    s.add_cmd(2030, "CreateStrayLayer", [](ipc::Request& r, ipc::Response& rsp) -> uint32_t {
-        (void)r.arg<uint32_t>(0);   // layer flags, and the display at 8 (only one display exists)
-        uint64_t layer = 0;
-        uint32_t binder = 0;
-        {
-            std::lock_guard<std::mutex> g(vi().mu);
-            layer = vi().next_stray++;
-            binder = layer_open_locked(layer);
-        }
-        int64_t size = 0;
-        const uint32_t err = native_window(r.out_buf(0), binder, &size);
-        if (err) return err;
-        rsp.push<uint64_t>(layer);
-        rsp.push<int64_t>(size);
-        return 0;
-    });
-    s.add_cmd(2031, "DestroyStrayLayer", [](ipc::Request& r, ipc::Response&) -> uint32_t {
-        std::lock_guard<std::mutex> g(vi().mu);
-        layer_close_locked(r.arg<uint64_t>(0));
-        return 0;
-    });
-    accept_cmd(s, 2101, "SetLayerScalingMode", kTagVi);
-    s.add_cmd(2102, "ConvertScalingMode", [](ipc::Request& r, ipc::Response& rsp) -> uint32_t {
-        // nn::vi::ScalingMode (None, Freeze, ScaleToWindow, ScaleAndCrop, PreserveAspectRatio) to Android's values
-        static const uint64_t android[] = {3, 0, 1, 2, 4};
-        const uint32_t mode = r.arg<uint32_t>(0);
-        if (mode >= sizeof android / sizeof android[0]) return kViOperationFailed;
-        rsp.push<uint64_t>(android[mode]);
-        return 0;
-    });
-    s.add_cmd(2460, "GetIndirectLayerImageRequiredMemoryInfo", [](ipc::Request& r, ipc::Response& rsp) -> uint32_t {
-        const int64_t w = r.arg<int64_t>(0), h = r.arg<int64_t>(8);
-        const int64_t block = 0x20000;
-        rsp.push<int64_t>((w * h * 4 + block - 1) / block * block);
-        rsp.push<int64_t>(0x1000);
-        return 0;
-    });
-    s.add_cmd(5202, "GetDisplayVsyncEvent", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        return vsync_handle(rsp);
-    });
-    s.add_cmd(5203, "GetDisplayVsyncEventForDebug", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        return vsync_handle(rsp);
+    return make_iface("nn::visrv::sf::IManagerDisplayService", [](ipc::Service& s) {
+        s.add_cmd(2010, "CreateManagedLayer", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            Vi& v = vi();
+            std::lock_guard<std::mutex> lk(v.mu);
+            rsp.push<uint64_t>(v.next_layer_id++);
+            return 0;
+        });
+        s.add_cmd(2300, "AcquireLayerTexturePresentingEvent", fresh_event);
+        s.add_cmd(2302, "GetDisplayHotplugEvent", fresh_event);
+        s.add_cmd(2303, "GetDisplayModeChangedEvent", fresh_event);
     });
 }
 
-std::shared_ptr<ipc::Service> make_app_display() {
-    return make_iface("nn::visrv::sf::IApplicationDisplayService", setup_app_display);
+// ---- IApplicationDisplayService ----------------------------------------------------------------------------------------------------------
+// The display a DisplayName (the first 0x40 raw bytes, up to the first NUL) names; -1 for none.
+int64_t display_id(const ipc::Request& req) {
+    char name[0x41] = {};
+    if (req.in) std::memcpy(name, req.in, std::min<size_t>(req.in_size, 0x40));
+    static const char* const kNames[] = {"Default", "External", "Edid", "Internal", "Null"};
+    for (int64_t i = 0; i < 5; ++i)
+        if (std::strcmp(name, kNames[i]) == 0) return i;
+    return -1;
 }
 
-// vi:u, vi:s and vi:m. GetDisplayService takes a policy word the display ignores; the proxy-name variants take an 8-byte name first.
-void setup_vi_u(ipc::Service& s) {
-    auto open = [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push_object(make_app_display());
-        return 0;
-    };
-    s.add_cmd(0, "GetDisplayService", open);
-    s.add_cmd(1, "GetDisplayServiceWithProxyNameExchange", open);
+uint32_t vsync_event(ipc::Request&, ipc::Response& rsp) {
+    const uint32_t h = vsync_handle();
+    if (!h) return kViInvalidArgument;
+    rsp.out_copy.push_back(h);
+    return 0;
 }
 
-void setup_vi_s(ipc::Service& s) {
-    auto open = [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push_object(make_app_display());
-        return 0;
-    };
-    s.add_cmd(1, "GetDisplayService", open);
-    s.add_cmd(3, "GetDisplayServiceWithProxyNameExchange", open);
+std::shared_ptr<ipc::Service> make_display_service() {
+    return make_iface("nn::visrv::sf::IApplicationDisplayService", [](ipc::Service& s) {
+        s.add_cmd(100, "GetRelayService", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.push_object(make_binder());
+            return 0;
+        });
+        s.add_cmd(101, "GetSystemDisplayService", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.push_object(make_system_display());
+            return 0;
+        });
+        s.add_cmd(102, "GetManagerDisplayService", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.push_object(make_manager_display());
+            return 0;
+        });
+        s.add_cmd(103, "GetIndirectDisplayTransactionService", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.push_object(make_binder());
+            return 0;
+        });
+        s.add_cmd(1000, "ListDisplays", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            uint8_t info[0x60] = {};
+            std::memcpy(info, "Default", 7);
+            info[0x40] = 1;              // has a layer limit
+            put64(info, 0x48, 1);        // at most one layer
+            put64(info, 0x50, 1920);
+            put64(info, 0x58, 1080);
+            buf_write(req.out_buf(0), info, sizeof info);
+            rsp.push<uint64_t>(1);
+            return 0;
+        });
+        s.add_cmd(1010, "OpenDisplay", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            const int64_t id = display_id(req);
+            if (id < 0) return kViInvalidArgument;
+            rsp.push<uint64_t>(static_cast<uint64_t>(id));
+            return 0;
+        });
+        s.add_cmd(1011, "OpenDefaultDisplay", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.push<uint64_t>(0);
+            return 0;
+        });
+        s.add_cmd(1020, "CloseDisplay", ok);
+        s.add_cmd(1101, "SetDisplayEnabled", ok);
+        s.add_cmd(1102, "GetDisplayResolution", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            const Size2 d = display_size();
+            rsp.push<int64_t>(d.w);
+            rsp.push<int64_t>(d.h);
+            return 0;
+        });
+        s.add_cmd(2020, "OpenLayer", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            if (display_id(req) < 0) return kViInvalidArgument;
+            const uint64_t id = req.arg<uint64_t>(0x40);
+            Vi& v = vi();
+            std::lock_guard<std::mutex> lk(v.mu);
+            const uint32_t binder = open_layer(v, id);
+            if (!binder) return kViInvalidArgument;
+            write_native_window(req.out_buf(0), binder);
+            rsp.push<int64_t>(static_cast<int64_t>(kNativeWindowSize));
+            return 0;
+        });
+        s.add_cmd(2021, "CloseLayer", [](ipc::Request& req, ipc::Response&) -> uint32_t {
+            Vi& v = vi();
+            std::lock_guard<std::mutex> lk(v.mu);
+            close_layer(v, req.arg<uint64_t>(0));
+            return 0;
+        });
+        s.add_cmd(2030, "CreateStrayLayer", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            Vi& v = vi();
+            std::lock_guard<std::mutex> lk(v.mu);
+            const uint64_t id = v.next_layer_id++;
+            const uint32_t binder = open_layer(v, id);
+            if (!binder) return kViInvalidArgument;
+            write_native_window(req.out_buf(0), binder);
+            rsp.push<uint64_t>(id);
+            rsp.push<int64_t>(static_cast<int64_t>(kNativeWindowSize));
+            return 0;
+        });
+        s.add_cmd(2031, "DestroyStrayLayer", [](ipc::Request& req, ipc::Response&) -> uint32_t {
+            Vi& v = vi();
+            std::lock_guard<std::mutex> lk(v.mu);
+            close_layer(v, req.arg<uint64_t>(0));
+            return 0;
+        });
+        s.add_cmd(2101, "SetLayerScalingMode", ok);
+        s.add_cmd(2102, "ConvertScalingMode", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            static const uint64_t kMap[] = {3, 0, 1, 2, 4};
+            const uint32_t mode = req.arg<uint32_t>(0);
+            if (mode >= 5) return kViInvalidArgument;
+            rsp.push<uint64_t>(kMap[mode]);
+            return 0;
+        });
+        s.add_cmd(2460, "GetIndirectLayerImageRequiredMemoryInfo", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            // RGBA8, rounded up to 0x20000 (in signed 64 bits, wrapping like the hardware; the division rounds toward zero)
+            const uint64_t product = static_cast<uint64_t>(req.arg<int64_t>(0)) * static_cast<uint64_t>(req.arg<int64_t>(8)) * 4u;
+            const int64_t biased = static_cast<int64_t>(product + 0x1FFFFu);
+            rsp.push<int64_t>((biased / 0x20000) * 0x20000);
+            rsp.push<int64_t>(0x1000);
+            return 0;
+        });
+        s.add_cmd(5202, "GetDisplayVsyncEvent", vsync_event);
+        s.add_cmd(5203, "GetDisplayVsyncEventForDebug", vsync_event);
+    });
 }
 
-void setup_vi_m(ipc::Service& s) {
-    auto open = [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push_object(make_app_display());
-        return 0;
-    };
-    s.add_cmd(2, "GetDisplayService", open);
-    s.add_cmd(3, "GetDisplayServiceWithProxyNameExchange", open);
+uint32_t open_display_service(ipc::Request&, ipc::Response& rsp) {
+    rsp.push_object(make_display_service());
+    return 0;
 }
 
-// ============================================================ nvdrv: devices, handles, address spaces
+std::shared_ptr<ipc::Service> make_root(const char* name, uint32_t plain, uint32_t exchange) {
+    return make_iface(name, [plain, exchange](ipc::Service& s) {
+        s.add_cmd(plain, "GetDisplayService", open_display_service);
+        s.add_cmd(exchange, "GetDisplayServiceWithProxyNameExchange", open_display_service);
+    });
+}
 
-enum class Dev { NvMap, Ctrl, CtrlGpu, AsGpu, Gpu, Other };
+// ======================================================================================================================================
+// nvdrv: one process-wide driver state for all four names
+// ======================================================================================================================================
+// NvError
+constexpr uint32_t kNvOk = 0;
+constexpr uint32_t kNvNotImplemented = 1;
+constexpr uint32_t kNvNotSupported = 2;
+constexpr uint32_t kNvNotInitialized = 3;
+constexpr uint32_t kNvBadParameter = 4;
+constexpr uint32_t kNvNoMemory = 6;
+constexpr uint32_t kNvBadSize = 10;
+constexpr uint32_t kNvBadValue = 11;
+constexpr uint32_t kNvFileOperationFailed = 0x30003;
+constexpr uint32_t kNvNotInProduction = 0x30006;
 
-struct NvMapObj {
+enum class Dev { NvMap, Ctrl, CtrlGpu, AsGpu, Channel, Other };
+const char* dev_name(Dev d) {
+    switch (d) {
+        case Dev::NvMap: return "nvmap";
+        case Dev::Ctrl: return "nvhost-ctrl";
+        case Dev::CtrlGpu: return "nvhost-ctrl-gpu";
+        case Dev::AsGpu: return "nvhost-as-gpu";
+        case Dev::Channel: return "nvhost-gpu";
+        default: return "other";
+    }
+}
+
+struct NvFile {
+    Dev dev = Dev::Other;
+    std::map<uint32_t, ServiceEvent> events;
+    uint64_t user_data = 0;
+    uint32_t syncpoint = 0;
+    uint32_t big_page = 0x20000;
+    std::map<uint64_t, uint64_t> ranges;   // as-gpu: start -> size, reservations and mappings alike
+};
+
+struct NvMapObject {
     uint32_t size = 0, align = 0, heap = 0, flags = 0, kind = 0;
     uint64_t addr = 0;
     bool allocated = false;
     uint32_t refs = 1;
 };
 
-struct NvFile {
-    Dev dev = Dev::Other;
-    std::map<uint32_t, std::shared_ptr<ServiceEvent>> events;   // QueryEvent: one event per slot or id
-    uint64_t user_data = 0;                                     // gpu channel: SET_USER_DATA
-    uint32_t syncpt = 0;                                        // gpu channel: its syncpoint (ALLOC_GPFIFO_EX2)
-    uint64_t big_page = 0x20000;                                // as-gpu: INITIALIZE_EX
-    std::map<uint64_t, uint64_t> ranges;                        // as-gpu: start -> size of each reservation and mapping
-};
-
-struct NvState {
+struct Nv {
     std::mutex mu;
     bool initialized = false;
-    uint32_t next_fd = 1;
+    int32_t next_fd = 1;
     uint32_t next_handle = 1;
-    uint32_t next_syncpt = 1;
-    std::map<uint32_t, std::shared_ptr<NvFile>> files;
-    std::map<uint32_t, NvMapObj> maps;
-    std::set<uint64_t> seen;     // ioctls logged once at Info
-    std::set<uint64_t> warned;   // unhandled ioctls warned once
-    bool submit_logged = false;
+    uint32_t next_syncpoint = 1;
+    std::map<int32_t, NvFile> files;
+    std::map<uint32_t, NvMapObject> objects;
+    std::set<std::pair<int, uint32_t>> warned;   // (device, command word) answered by nobody
+    bool submit_warned = false;
 };
-NvState& nv() {
-    static NvState s;
-    return s;
+Nv& nv() {
+    static Nv* n = new Nv;   // never destroyed: the gauges read it
+    return *n;
 }
 
-// ---- gauges (include/nxrt/gauge.h): the nvdrv tables, counted under the state lock ----
-// Removes its gauge when this file's statics are torn down.
-struct GaugeHook {
-    const char* name;
-    GaugeHook(const char* n, std::function<int64_t()> f) : name(n) { nxrt::gauge_register(n, std::move(f)); }
-    ~GaugeHook() { nxrt::gauge_unregister(name); }
+struct NvGauges {
+    NvGauges() {
+        gauge_register("nv.files", [] {
+            Nv& n = nv();
+            std::lock_guard<std::mutex> lk(n.mu);
+            return static_cast<int64_t>(n.files.size());
+        });
+        gauge_register("nv.nvmap_objects", [] {
+            Nv& n = nv();
+            std::lock_guard<std::mutex> lk(n.mu);
+            return static_cast<int64_t>(n.objects.size());
+        });
+    }
+    ~NvGauges() {
+        gauge_unregister("nv.files");
+        gauge_unregister("nv.nvmap_objects");
+    }
 };
-GaugeHook gauge_nv_files("nv.files", [] {   // open nvdrv device files (nvmap, gpu channels, as-gpu, ...)
-    NvState& s = nv();
-    std::lock_guard<std::mutex> lk(s.mu);
-    return static_cast<int64_t>(s.files.size());
-});
-GaugeHook gauge_nv_maps("nv.nvmap_objects", [] {   // nvmap allocations alive (removed when the last reference is freed)
-    NvState& s = nv();
-    std::lock_guard<std::mutex> lk(s.mu);
-    return static_cast<int64_t>(s.maps.size());
-});
+NvGauges g_nv_gauges;
 
-struct DevEntry {
-    const char* path;
-    Dev dev;
-    bool debug_only;   // the debug and profiler devices answer NotSupported (debug mode is off on a retail console)
-};
-constexpr DevEntry kDevices[] = {
-    {"/dev/nvmap", Dev::NvMap, false},
-    {"/dev/nvhost-ctrl", Dev::Ctrl, false},
-    {"/dev/nvhost-ctrl-gpu", Dev::CtrlGpu, false},
-    {"/dev/nvhost-as-gpu", Dev::AsGpu, false},
-    {"/dev/nvhost-gpu", Dev::Gpu, false},
-    {"/dev/nvhost-nvdec", Dev::Other, false},
-    {"/dev/nvhost-nvjpg", Dev::Other, false},
-    {"/dev/nvhost-vic", Dev::Other, false},
-    {"/dev/nvdisp-ctrl", Dev::Other, false},
-    {"/dev/nvsched-ctrl-gpu", Dev::Other, false},
-    {"/dev/nvhost-dbg-gpu", Dev::Other, true},
-    {"/dev/nvhost-prof-gpu", Dev::Other, true},
+// An ioctl's argument block: `size` bytes; a field that does not fit reads 0 and is not written.
+struct Args {
+    std::vector<uint8_t> b;
+    template <typename T>
+    T get(size_t off) const {
+        T v{};
+        if (off + sizeof(T) <= b.size()) std::memcpy(&v, b.data() + off, sizeof(T));
+        return v;
+    }
+    template <typename T>
+    void put(size_t off, T v) {
+        if (off + sizeof(T) <= b.size()) std::memcpy(b.data() + off, &v, sizeof(T));
+    }
 };
 
-const char* dev_name(Dev d) {
-    switch (d) {
-    case Dev::NvMap: return "nvmap";
-    case Dev::Ctrl: return "nvhost-ctrl";
-    case Dev::CtrlGpu: return "nvhost-ctrl-gpu";
-    case Dev::AsGpu: return "nvhost-as-gpu";
-    case Dev::Gpu: return "nvhost-gpu";
-    default: return "other";
+// What a handler answered: an NvError, or nobody took the command.
+struct Answer {
+    bool taken;
+    uint32_t err;
+};
+constexpr Answer kUntaken{false, 0};
+Answer done(uint32_t err = kNvOk) { return {true, err}; }
+
+// ---- /dev/nvmap ---------------------------------------------------------------------------------------------------------------------------
+Answer nvmap_ioctl(Nv& n, uint32_t nr, Args& a) {
+    auto find = [&n](uint32_t h) -> NvMapObject* {
+        auto it = n.objects.find(h);
+        return it == n.objects.end() ? nullptr : &it->second;
+    };
+    switch (nr) {
+        case 0x01: {   // CREATE
+            const uint32_t size = a.get<uint32_t>(0);
+            if (!size) return done(kNvBadValue);
+            NvMapObject o;
+            o.size = static_cast<uint32_t>((static_cast<uint64_t>(size) + 0xFFF) & ~0xFFFull);
+            const uint32_t h = n.next_handle++;
+            if (!n.next_handle) n.next_handle = 1;
+            n.objects[h] = o;
+            a.put<uint32_t>(4, h);
+            return done();
+        }
+        case 0x03: {   // FROM_ID (the id is the handle)
+            const uint32_t id = a.get<uint32_t>(0);
+            NvMapObject* o = find(id);
+            if (!o) return done(kNvBadValue);
+            ++o->refs;
+            a.put<uint32_t>(4, id);
+            return done();
+        }
+        case 0x04: {   // ALLOC
+            NvMapObject* o = find(a.get<uint32_t>(0));
+            if (!o) return done(kNvBadValue);
+            uint32_t align = a.get<uint32_t>(0xC);
+            if (align & (align - 1)) return done(kNvBadValue);
+            if (align < 0x1000) align = 0x1000;
+            o->align = align;
+            if (!o->allocated) {
+                o->heap = a.get<uint32_t>(4);
+                o->flags = a.get<uint32_t>(8);
+                o->kind = a.get<uint8_t>(0x10);
+                o->addr = a.get<uint64_t>(0x18);
+                o->allocated = true;
+            }
+            a.put<uint32_t>(0xC, align);
+            return done();
+        }
+        case 0x05: {   // FREE
+            const uint32_t h = a.get<uint32_t>(0);
+            NvMapObject* o = find(h);
+            if (!o) return done(kNvBadValue);
+            if (o->refs) --o->refs;
+            const uint32_t size = o->size;
+            if (!o->refs) {
+                a.put<uint64_t>(8, o->addr);
+                a.put<uint32_t>(0x14, 0);
+                n.objects.erase(h);
+            } else {
+                a.put<uint64_t>(8, 0);
+                a.put<uint32_t>(0x14, 1);   // not freed yet
+            }
+            a.put<uint32_t>(0x10, size);
+            return done();
+        }
+        case 0x09: {   // PARAM
+            NvMapObject* o = find(a.get<uint32_t>(0));
+            if (!o) return done(kNvBadValue);
+            uint32_t value = 0;
+            switch (a.get<uint32_t>(4)) {
+                case 1: value = o->size; break;
+                case 2: value = o->align; break;
+                case 4: value = 0x40000000; break;   // heap
+                case 5: value = o->kind; break;
+                case 6: value = 0; break;            // compression
+                default: return done(kNvBadValue);
+            }
+            a.put<uint32_t>(8, value);
+            return done();
+        }
+        case 0x0E: {   // GET_ID
+            const uint32_t h = a.get<uint32_t>(4);
+            if (!find(h)) return done(kNvBadValue);
+            a.put<uint32_t>(0, h);
+            return done();
+        }
+        case 0x02: case 0x06: case 0x07: case 0x08: case 0x0A: case 0x0B: case 0x0C: case 0x0D: case 0x0F: case 0x10: case 0x11:
+            return done(kNvNotSupported);
+        default: return kUntaken;
     }
 }
 
-// The as-gpu regions (Ryujinx AddressSpaceContext): small pages below 16 GiB, big pages above it.
-struct Region {
+// ---- /dev/nvhost-ctrl ---------------------------------------------------------------------------------------------------------------------
+constexpr uint32_t kSyncpoints = 192;
+Answer ctrl_ioctl(uint32_t nr, Args& a) {
+    const bool bad_id = a.get<uint32_t>(0) >= kSyncpoints;
+    switch (nr) {
+        case 0x14: case 0x1A:   // SYNCPT_READ, SYNCPT_READ_MAX: nothing ever advances
+            if (bad_id) return done(kNvBadValue);
+            a.put<uint32_t>(4, 0);
+            return done();
+        case 0x15: case 0x16:   // SYNCPT_INCR, SYNCPT_WAIT (reached at once)
+            return done(bad_id ? kNvBadValue : kNvOk);
+        case 0x19:              // SYNCPT_WAITEX
+            if (bad_id) return done(kNvBadValue);
+            a.put<uint32_t>(0xC, 0);
+            return done();
+        case 0x1B: return done(kNvNotInProduction);   // GET_CONFIG
+        case 0x1C: case 0x1F: case 0x20: case 0x21: return done();   // event slots: no bookkeeping
+        case 0x1D: case 0x1E:   // SYNCPT_WAIT_EVENT(_EX)
+            a.put<uint32_t>(0xC, 0);
+            return done();
+        default: return kUntaken;
+    }
+}
+
+// ---- /dev/nvhost-ctrl-gpu -----------------------------------------------------------------------------------------------------------------
+// The GM20B's GpuCharacteristics (0xA0 bytes).
+void gpu_characteristics(uint8_t* p) {
+    std::memset(p, 0, 0xA0);
+    const std::pair<size_t, uint32_t> words[] = {
+        {0x00, 0x120},   {0x04, 0xB},     {0x08, 0xA1},    {0x0C, 1},       {0x20, 2},       {0x24, 0x20},    {0x28, 0x20000},
+        {0x2C, 0x20000}, {0x30, 0x1B},    {0x34, 0x30000}, {0x38, 1},       {0x3C, 0x503},   {0x40, 0x503},   {0x44, 0x80},
+        {0x48, 0x28},    {0x58, 0x902D},  {0x5C, 0xB197},  {0x60, 0xB1C0},  {0x64, 0xB06F},  {0x68, 0xA140},  {0x6C, 0xB0B5},
+        {0x70, 1},       {0x78, 2},       {0x7C, 1},       {0x84, 1},       {0x88, 0x21D70},
+    };
+    for (const auto& w : words) put32(p, w.first, w.second);
+    put64(p, 0x10, 0x40000);          // L2 cache size
+    put64(p, 0x50, 0x55);             // flags
+    put64(p, 0x90, 0x6230326D67ull);  // "gm20b"
+}
+
+uint64_t gpu_time_ns() {
+    static const auto start = std::chrono::steady_clock::now();
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+    return static_cast<uint64_t>(ns) & ((1ull << 56) - 1);
+}
+
+Answer ctrl_gpu_ioctl(uint32_t nr, Args& a, const ipc::Buffer& inline_out) {
+    switch (nr) {
+        case 0x01: a.put<uint32_t>(0, 1); return done();   // ZCULL_GET_CTX_SIZE
+        case 0x02: {                                        // ZCULL_GET_INFO
+            static const uint32_t kInfo[10] = {0x20, 0x20, 0x400, 0x800, 0x20, 0x20, 0xC0, 0x20, 0x40, 0x10};
+            for (int i = 0; i < 10; ++i) a.put<uint32_t>(4 * i, kInfo[i]);
+            return done();
+        }
+        case 0x03: return done();   // ZBC_SET_TABLE
+        case 0x05: {                // GET_CHARACTERISTICS
+            uint8_t c[0xA0];
+            gpu_characteristics(c);
+            a.put<uint64_t>(0, 0xA0);
+            if (a.b.size() >= 0xB0) std::memcpy(a.b.data() + 0x10, c, 0xA0);
+            if (inline_out.addr && inline_out.size >= 0xA0) buf_write(inline_out, c, 0xA0);
+            return done();
+        }
+        case 0x06:                  // GET_TPC_MASKS
+            if (a.get<uint32_t>(0)) {
+                a.put<uint32_t>(0x10, 3);
+                const uint32_t mask = 3;
+                if (inline_out.addr && inline_out.size >= 4) buf_write(inline_out, &mask, 4);
+            }
+            return done();
+        case 0x1C: a.put<uint64_t>(0, gpu_time_ns()); return done();   // GET_GPU_TIME
+        default: return kUntaken;
+    }
+}
+
+// ---- /dev/nvhost-as-gpu -------------------------------------------------------------------------------------------------------------------
+struct VaRegion {
     uint64_t start, limit, page;
 };
-constexpr Region kRegions[2] = {{0x100000000ull, 0x400000000ull, 0x1000}, {0x400000000ull, 0x2000000000ull, 0x10000}};
+constexpr VaRegion kSmallPages{0x100000000ull, 0x400000000ull, 0x1000};
+constexpr VaRegion kBigPages{0x400000000ull, 0x2000000000ull, 0x10000};
+const VaRegion& region_for(uint64_t page) { return page == 0x10000 ? kBigPages : kSmallPages; }
 
-const Region& region_for(uint64_t page) { return page == 0x10000 ? kRegions[1] : kRegions[0]; }
-
-// The first run of `size` bytes in [lo, hi) that no range of `ranges` covers, aligned to `align`; 0 when there is none.
-uint64_t find_gap(const std::map<uint64_t, uint64_t>& ranges, uint64_t lo, uint64_t hi, uint64_t size, uint64_t align) {
-    if (align == 0) align = 1;
-    uint64_t cand = (lo + align - 1) / align * align;
-    for (const auto& [start, len] : ranges) {
-        if (start + len <= cand) continue;
-        if (cand + size <= start) break;
-        cand = (start + len + align - 1) / align * align;
+bool align_up(uint64_t x, uint64_t align, uint64_t* out) {
+    if (!align) align = 1;
+    const uint64_t r = x % align;
+    if (!r) {
+        *out = x;
+        return true;
     }
-    return cand + size <= hi ? cand : 0;
-}
-
-bool range_free(const std::map<uint64_t, uint64_t>& ranges, uint64_t start, uint64_t size) {
-    for (const auto& [s, len] : ranges)
-        if (s < start + size && start < s + len) return false;
+    const uint64_t add = align - r;
+    if (x > UINT64_MAX - add) return false;
+    *out = x + add;
     return true;
 }
 
-// The ioctl-number fields (Linux _IOC layout, Switchbrew NV_services): direction (bit 30 copies in, bit 31 copies out), size, type, nr.
-void log_ioctl(const NvFile& f, uint32_t cmd, uint32_t size, uint32_t dir, bool first) {
-    if (first)
-        NXLOG_I(kTagNv, "ioctl %s cmd %08x (type %02x nr %02x) size %u dir %u", dev_name(f.dev), cmd, (cmd >> 8) & 0xFF, cmd & 0xFF,
-                size, dir);
-    NXLOG_T(kTagNv, "ioctl %s cmd %08x size %u", dev_name(f.dev), cmd, size);
+bool overlaps_any(const NvFile& f, uint64_t addr, uint64_t size) {
+    const uint64_t end = addr + size < addr ? UINT64_MAX : addr + size;
+    for (const auto& r : f.ranges) {
+        const uint64_t r_end = r.first + r.second < r.first ? UINT64_MAX : r.first + r.second;
+        if (r.first < end && addr < r_end) return true;
+    }
+    return false;
 }
 
-// ---- nvmap (type 0x01)
+bool fits(const VaRegion& g, uint64_t addr, uint64_t size) { return addr >= g.start && addr <= g.limit && size <= g.limit - addr; }
 
-uint32_t nvmap_ioctl(uint32_t nr, Arg a, bool& handled) {
-    NvState& s = nv();
+bool place_fixed(const NvFile& f, const VaRegion& g, uint64_t addr, uint64_t size) {
+    return fits(g, addr, size) && !overlaps_any(f, addr, size);
+}
+
+// The lowest address of the region, aligned, where the range overlaps nothing the file holds.
+bool place_first_fit(const NvFile& f, const VaRegion& g, uint64_t align, uint64_t size, uint64_t* out) {
+    uint64_t cand = 0;
+    if (!align_up(g.start, align, &cand)) return false;
+    for (const auto& r : f.ranges) {
+        const uint64_t end = cand + size < cand ? UINT64_MAX : cand + size;
+        if (r.first >= end) break;
+        const uint64_t r_end = r.first + r.second < r.first ? UINT64_MAX : r.first + r.second;
+        if (r_end > cand && !align_up(r_end, align, &cand)) return false;
+    }
+    if (!fits(g, cand, size)) return false;
+    *out = cand;
+    return true;
+}
+
+Answer as_gpu_ioctl(Nv& n, NvFile& f, uint32_t nr, Args& a) {
     switch (nr) {
-    case 0x01: {   // CREATE {u32 size; out u32 handle}: size rounded up to a page
-        const uint32_t size = a.u32(0);
-        if (!size) return kNvInvalidValue;
-        NvMapObj m;
-        m.size = static_cast<uint32_t>((static_cast<uint64_t>(size) + 0xFFF) & ~static_cast<uint64_t>(0xFFF));
-        const uint32_t h = s.next_handle++;
-        if (s.next_handle == 0) s.next_handle = 1;
-        s.maps[h] = m;
-        a.put32(4, h);
-        return kNvOk;
-    }
-    case 0x03: {   // FROM_ID {u32 id; out u32 handle}: the id is the handle
-        auto it = s.maps.find(a.u32(0));
-        if (it == s.maps.end()) return kNvInvalidValue;
-        it->second.refs++;
-        a.put32(4, it->first);
-        return kNvOk;
-    }
-    case 0x04: {   // ALLOC {u32 handle, heap, flags; u32 align (inout); u8 kind at 16; u64 addr at 24}
-        auto it = s.maps.find(a.u32(0));
-        if (it == s.maps.end()) return kNvInvalidValue;
-        NvMapObj& m = it->second;
-        uint32_t align = a.u32(12);
-        if (align & (align - 1)) return kNvInvalidValue;
-        if (align < 0x1000) align = 0x1000;
-        if (!m.allocated) {
-            m.allocated = true;
-            m.heap = a.u32(4);
-            m.flags = a.u32(8);
-            m.kind = a.u32(16) & 0xFF;
-            m.addr = a.u64(24);
+        case 0x01: return done();   // BIND_CHANNEL
+        case 0x02: {                // ALLOC_SPACE
+            const uint64_t page = a.get<uint32_t>(4);
+            const uint64_t size = static_cast<uint64_t>(a.get<uint32_t>(0)) * page;
+            if (!size) return done(kNvBadValue);
+            const VaRegion& g = region_for(page);
+            const uint64_t want = a.get<uint64_t>(0x10);
+            uint64_t addr = want;
+            const bool placed = (a.get<uint32_t>(8) & 1) ? place_fixed(f, g, want, size) : place_first_fit(f, g, want ? want : page, size, &addr);
+            if (!placed) {
+                a.put<uint64_t>(0x10, 0);
+                return done(kNvNoMemory);
+            }
+            f.ranges[addr] = size;
+            a.put<uint64_t>(0x10, addr);
+            return done();
         }
-        m.align = align;
-        a.put32(12, align);
-        return kNvOk;
-    }
-    case 0x05: {   // FREE {u32 handle; pad; out u64 address at 8, u32 size at 16, u32 flags at 20}: flags 1 = not freed yet
-        auto it = s.maps.find(a.u32(0));
-        if (it == s.maps.end()) return kNvInvalidValue;
-        NvMapObj& m = it->second;
-        if (m.refs > 0) m.refs--;
-        const bool freed = m.refs == 0;
-        a.put64(8, freed ? m.addr : 0);
-        a.put32(16, m.size);
-        a.put32(20, freed ? 0 : 1);
-        if (freed) s.maps.erase(it);
-        return kNvOk;
-    }
-    case 0x09: {   // PARAM {u32 handle, param; out u32 result}: 1 size, 2 align, 4 heap, 5 kind, 6 compr
-        auto it = s.maps.find(a.u32(0));
-        if (it == s.maps.end()) return kNvInvalidValue;
-        const NvMapObj& m = it->second;
-        uint32_t v = 0;
-        switch (a.u32(4)) {
-        case 1: v = m.size; break;
-        case 2: v = m.align; break;
-        case 4: v = 0x40000000; break;
-        case 5: v = m.kind; break;
-        case 6: v = 0; break;
-        default: return kNvInvalidValue;   // Base (3) and anything else
+        case 0x03: {                // FREE_SPACE
+            auto it = f.ranges.find(a.get<uint64_t>(0));
+            if (it == f.ranges.end()) return done(kNvBadValue);
+            f.ranges.erase(it);
+            return done();
         }
-        a.put32(8, v);
-        return kNvOk;
-    }
-    case 0x0e: {   // GET_ID {out u32 id; u32 handle}
-        const uint32_t h = a.u32(4);
-        if (s.maps.find(h) == s.maps.end()) return kNvInvalidValue;
-        a.put32(0, h);
-        return kNvOk;
-    }
-    case 0x02:
-    case 0x06:
-    case 0x07:
-    case 0x08:
-    case 0x0a:
-    case 0x0b:
-    case 0x0c:
-    case 0x0d:
-    case 0x0f:
-    case 0x10:
-    case 0x11: return kNvNotSupported;   // CLAIM, MMAP, WRITE, READ, PIN, UNPIN, CACHE, IVC, RESERVE: NotSupported on the console
-    default:
-        handled = false;
-        return kNvOk;
+        case 0x05:                  // UNMAP_BUFFER
+            f.ranges.erase(a.get<uint64_t>(0));
+            return done();
+        case 0x06: {                // MAP_BUFFER_EX
+            auto it = n.objects.find(a.get<uint32_t>(8));
+            if (it == n.objects.end()) return done(kNvBadValue);
+            const NvMapObject& o = it->second;
+            const uint64_t mapping = a.get<uint64_t>(0x18);
+            const uint64_t size = mapping ? mapping : o.size;
+            uint64_t page = a.get<uint32_t>(0xC);
+            if (!page) page = o.align ? o.align : 0x1000;
+            const VaRegion& g = region_for(page);
+            const uint64_t want = a.get<uint64_t>(0x20);
+            uint64_t addr = want;
+            const bool placed = (a.get<uint32_t>(0) & 1) ? place_fixed(f, g, want, size) : place_first_fit(f, g, page, size, &addr);
+            if (!placed) {
+                a.put<uint64_t>(0x20, 0);
+                return done(kNvBadValue);
+            }
+            f.ranges[addr] = size;
+            a.put<uint64_t>(0x20, addr);
+            return done();
+        }
+        case 0x08: {                // GET_VA_REGIONS
+            const uint32_t entries = std::min<uint32_t>(a.get<uint32_t>(8) / 24, 2);
+            const VaRegion* regions[2] = {&kSmallPages, &kBigPages};
+            for (uint32_t i = 0; i < entries; ++i) {
+                const VaRegion& g = *regions[i];
+                const size_t at = 0x10 + 24 * i;
+                a.put<uint64_t>(at, g.start);
+                a.put<uint32_t>(at + 8, static_cast<uint32_t>(g.page));
+                a.put<uint32_t>(at + 12, 0);
+                a.put<uint64_t>(at + 16, (g.limit - g.start) / g.page);
+            }
+            a.put<uint32_t>(8, 48);
+            return done();
+        }
+        case 0x09: {                // INITIALIZE_EX
+            const uint32_t big = a.get<uint32_t>(8);
+            f.big_page = big ? big : 0x20000;
+            return done();
+        }
+        default: return kUntaken;
     }
 }
 
-// ---- nvhost-ctrl (type 0x00)
-
-uint32_t ctrl_ioctl(uint32_t nr, Arg a, bool& handled) {
+// ---- /dev/nvhost-gpu (a channel) ----------------------------------------------------------------------------------------------------------
+Answer channel_ioctl(Nv& n, NvFile& f, uint32_t type, uint32_t nr, Args& a) {
+    if (type == 0x47) {
+        if (nr != 0x14) return kUntaken;
+        f.user_data = a.get<uint64_t>(0);   // SET_USER_DATA
+        return done();
+    }
+    if (type != 0x48) return kUntaken;
     switch (nr) {
-    case 0x14:   // SYNCPT_READ {u32 id; out u32 value}: zeros
-        if (a.u32(0) >= kSyncptCount) return kNvInvalidValue;
-        a.put32(4, 0);
-        return kNvOk;
-    case 0x15:   // SYNCPT_INCR {u32 id}
-        if (a.u32(0) >= kSyncptCount) return kNvInvalidValue;
-        return kNvOk;
-    case 0x16:   // SYNCPT_WAIT {u32 id, thresh; i32 timeout}: the threshold counts as reached
-        if (a.u32(0) >= kSyncptCount) return kNvInvalidValue;
-        return kNvOk;
-    case 0x19:   // SYNCPT_WAITEX {u32 id, thresh; i32 timeout; out u32 value at 12}
-        if (a.u32(0) >= kSyncptCount) return kNvInvalidValue;
-        a.put32(12, 0);
-        return kNvOk;
-    case 0x1a:   // SYNCPT_READ_MAX {u32 id; out u32 max}
-        if (a.u32(0) >= kSyncptCount) return kNvInvalidValue;
-        a.put32(4, 0);
-        return kNvOk;
-    case 0x1b:   // GET_CONFIG: a retail console answers NotAvailableInProduction (Switchbrew; Ryujinx's note on the same ioctl)
-        return kNvNotAvailableInProduction;
-    case 0x1c:   // SYNCPT_CLEAR_EVENT_WAIT {u32 slot}
-    case 0x1f:   // SYNCPT_ALLOC_EVENT {u32 slot}
-    case 0x20:   // SYNCPT_FREE_EVENT {u32 slot}
-    case 0x21:   // SYNCPT_FREE_EVENT_BATCH {u64 mask}
-        return kNvOk;
-    case 0x1d:   // SYNCPT_WAIT_EVENT {u32 id, thresh; i32 timeout; out u32 value at 12}
-    case 0x1e:   // SYNCPT_WAIT_EVENT_EX, the same layout
-        a.put32(12, 0);
-        return kNvOk;
-    default:
-        handled = false;
-        return kNvOk;
+        case 0x01: return done();   // SET_NVMAP_FD
+        case 0x08: case 0x1B:       // SUBMIT_GPFIFO(2): the host NVN front end draws; nothing runs here
+            if (!n.submit_warned) {
+                n.submit_warned = true;
+                NXLOG_W("nvdrv", "channel submissions are accepted and not executed (the host NVN front end renders)");
+            }
+            return done();
+        case 0x09: a.put<uint64_t>(8, a.get<uint32_t>(0)); return done();   // ALLOC_OBJ_CTX: the object id is the class
+        case 0x16: std::fill(a.b.begin(), a.b.end(), 0); return done();     // the error notifier: no error
+        case 0x1A:                  // ALLOC_GPFIFO_EX2: the channel's syncpoint in the fence
+            if (!f.syncpoint) f.syncpoint = n.next_syncpoint++;
+            a.put<uint32_t>(0xC, f.syncpoint);
+            a.put<uint32_t>(0x10, 0);
+            return done();
+        default: return kUntaken;
     }
 }
 
-// ---- nvhost-ctrl-gpu (type 0x47): the values of a Tegra X1 (GM20B), the same words Ryujinx and ScarletNX report
-
-void write_characteristics(uint8_t* c) {   // 0xA0 bytes: GpuCharacteristics, 64-bit fields as low word then high word
-    static const uint32_t words[40] = {
-        0x120, 0xB, 0xA1, 1,                      // arch, impl, rev, GPC count
-        0x40000, 0, 0, 0,                         // L2 cache size, on-board video memory (u64s)
-        2, 0x20, 0x20000, 0x20000,                // TPCs per GPC, bus type, big page size, compression page size
-        0x1B, 0x30000, 1, 0x503,                  // PDE coverage bits, available big page sizes, GPC mask, SM version
-        0x503, 0x80, 0x28, 0,                     // SPA version, warp count, GPU VA bits, reserved
-        0x55, 0,                                  // flags (u64)
-        0x902D, 0xB197, 0xB1C0, 0xB06F,           // 2D, 3D, compute, GPFIFO classes
-        0xA140, 0xB0B5,                           // inline-to-memory, DMA copy classes
-        1, 0, 2, 1,                               // FBPs, FBP enable mask, LTCs per FBP, LTSs per LTC
-        0, 1, 0x21D70, 0,                         // textures per TPC, GPCs, ROP L2 enable masks
-        0x30326D67, 0x62,                         // chip name "gm20b" (u64)
-        0, 0,                                     // compression bit store base (u64)
-    };
-    std::memcpy(c, words, sizeof words);
-}
-
-uint32_t ctrlgpu_ioctl(uint32_t nr, Arg a, Arg xout, bool& handled) {
-    switch (nr) {
-    case 0x01:   // ZCULL_GET_CTX_SIZE {out u32 size}
-        a.put32(0, 1);
-        return kNvOk;
-    case 0x02: {   // ZCULL_GET_INFO: ten u32s
-        static const uint32_t info[10] = {0x20, 0x20, 0x400, 0x800, 0x20, 0x20, 0xC0, 0x20, 0x40, 0x10};
-        for (uint32_t i = 0; i < 10; ++i) a.put32(i * 4, info[i]);
-        return kNvOk;
-    }
-    case 0x03:   // ZBC_SET_TABLE: accepted
-        return kNvOk;
-    case 0x05: {   // GET_CHARACTERISTICS {u64 buf_size at 0, u64 buf_addr at 8, GpuCharacteristics at 16}; also copied to an inline out
-        uint8_t c[0xA0];
-        write_characteristics(c);
-        a.put64(0, sizeof c);
-        if (a.p && a.n >= 16 + sizeof c) std::memcpy(a.p + 16, c, sizeof c);
-        if (xout.p && xout.n >= sizeof c) std::memcpy(xout.p, c, sizeof c);
-        return kNvOk;
-    }
-    case 0x06: {   // GET_TPC_MASKS {u32 mask_buf_size; pad; u64 mask_buf_addr; out u32 mask at 16}
-        if (a.u32(0) != 0) {
-            const uint32_t mask = 3;   // TPC 0 and 1 present
-            a.put32(16, mask);
-            if (xout.p && xout.n >= 4) std::memcpy(xout.p, &mask, 4);
-        }
-        return kNvOk;
-    }
-    case 0x1c: {   // GET_GPU_TIME {out u64 timestamp; reserved}: nanoseconds since the first call, 56 bits as the device has them
-        static const auto t0 = std::chrono::steady_clock::now();
-        const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
-        a.put64(0, static_cast<uint64_t>(ns) & 0xFFFFFFFFFFFFFFull);
-        return kNvOk;
-    }
-    default:
-        handled = false;
-        return kNvOk;
-    }
-}
-
-// ---- nvhost-as-gpu (type 0x41): a simple address space, first fit in the regions, reservations and mappings in one map
-
-uint32_t as_ioctl(NvFile& f, uint32_t nr, Arg a, bool& handled) {
-    NvState& s = nv();
-    switch (nr) {
-    case 0x01:   // BIND_CHANNEL {i32 fd}
-        return kNvOk;
-    case 0x02: {   // ALLOC_SPACE {u32 pages, page_size, flags; u32 pad; u64 offset at 16 (the alignment when not fixed)}
-        const uint64_t pages = a.u32(0), page = a.u32(4), size = pages * page;
-        const uint32_t flags = a.u32(8);
-        const uint64_t want = a.u64(16);
-        if (!size) return kNvInvalidValue;
-        const Region& rg = region_for(page);
-        uint64_t got = 0;
-        if (flags & 1) {   // FIXED_OFFSET
-            if (want >= rg.start && want + size <= rg.limit && range_free(f.ranges, want, size)) got = want;
-        } else {
-            got = find_gap(f.ranges, rg.start, rg.limit, size, want ? want : page);
-        }
-        if (!got) {
-            a.put64(16, 0);
-            NXLOG_W(kTagNv, "ALLOC_SPACE of 0x%llx bytes has no room", static_cast<unsigned long long>(size));
-            return kNvInsufficientMemory;
-        }
-        f.ranges[got] = size;
-        a.put64(16, got);
-        return kNvOk;
-    }
-    case 0x03: {   // FREE_SPACE {u64 offset; u32 pages, page_size}
-        const uint64_t off = a.u64(0);
-        auto it = f.ranges.find(off);
-        if (it == f.ranges.end()) return kNvInvalidValue;
-        f.ranges.erase(it);
-        return kNvOk;
-    }
-    case 0x05:   // UNMAP_BUFFER {u64 offset}: unknown offsets are accepted, as Ryujinx does
-        f.ranges.erase(a.u64(0));
-        return kNvOk;
-    case 0x06: {   // MAP_BUFFER_EX {u32 flags; i32 kind; u32 nvmap; i32 page_size; u64 buffer_off; u64 map_size; u64 offset at 32}
-        const uint32_t flags = a.u32(0), handle = a.u32(8), page_arg = a.u32(12);
-        const uint64_t map_size_arg = a.u64(24), want = a.u64(32);
-        auto it = s.maps.find(handle);
-        if (it == s.maps.end()) return kNvInvalidValue;
-        const NvMapObj& m = it->second;
-        const uint64_t size = map_size_arg ? map_size_arg : m.size;
-        const uint64_t page = page_arg ? page_arg : (m.align ? m.align : 0x1000);
-        const Region& rg = region_for(page);
-        uint64_t va = 0;
-        if (flags & 1) {
-            if (want >= rg.start && want + size <= rg.limit && range_free(f.ranges, want, size)) va = want;
-        } else {
-            va = find_gap(f.ranges, rg.start, rg.limit, size, page);
-        }
-        if (!va) {
-            a.put64(32, 0);
-            return kNvInvalidValue;
-        }
-        f.ranges[va] = size;
-        a.put64(32, va);
-        return kNvOk;
-    }
-    case 0x08: {   // GET_VA_REGIONS {u64; u32 buffer_size at 8; pad; {u64 offset, u32 page, u32 pad, u64 pages} x2 at 16}
-        const uint32_t entries = std::min<uint32_t>(a.u32(8) / 24, 2);
-        for (uint32_t i = 0; i < entries; ++i) {
-            const uint64_t base = 16 + 24 * static_cast<uint64_t>(i);
-            const Region& rg = kRegions[i];
-            a.put64(base, rg.start);
-            a.put32(base + 8, static_cast<uint32_t>(rg.page));
-            a.put32(base + 12, 0);
-            a.put64(base + 16, (rg.limit - rg.start) / rg.page);
-        }
-        a.put32(8, 48);
-        return kNvOk;
-    }
-    case 0x09: {   // INITIALIZE_EX {u32 flags, i32 as_fd, u32 big_page_size at 8, ...}
-        const uint32_t big = a.u32(8);
-        f.big_page = big ? big : 0x20000;
-        return kNvOk;
-    }
-    default:
-        handled = false;
-        return kNvOk;
-    }
-}
-
-// ---- nvhost-gpu (type 0x48 the channel, 0x47 SET_USER_DATA): the channel's bookkeeping; submission is the GPU back end's
-
-uint32_t gpu_ioctl(NvFile& f, uint32_t nr, Arg a, bool& handled) {
-    NvState& s = nv();
-    switch (nr) {
-    case 0x01:   // SET_NVMAP_FD {i32}
-        return kNvOk;
-    case 0x08:   // SUBMIT_GPFIFO
-    case 0x1b:   // SUBMIT_GPFIFO through Ioctl2: answered, never run here
-        if (!s.submit_logged) {
-            s.submit_logged = true;
-            NXLOG_W(kTagNv, "SUBMIT_GPFIFO accepted and not run: the GPU back end owns command submission");
-        }
-        return kNvOk;
-    case 0x09:   // ALLOC_OBJ_CTX {u32 class, flags; out u64 object id at 8}: the id is the class number, as ScarletNX answers
-        a.put64(8, a.u32(0));
-        return kNvOk;
-    case 0x16:   // GET_ERROR_NOTIFIER: nothing has gone wrong, so the notifier is all zeros
-        if (a.p) std::memset(a.p, 0, static_cast<size_t>(a.n));
-        return kNvOk;
-    case 0x1a:   // ALLOC_GPFIFO_EX2 {u32 entries, jobs, flags; NvFence {u32 id at 12, u32 value at 16}; reserved}
-        if (!f.syncpt) f.syncpt = s.next_syncpt++;
-        a.put32(12, f.syncpt);
-        a.put32(16, 0);
-        return kNvOk;
-    default:
-        handled = false;
-        return kNvOk;
-    }
-}
-
-// Dispatch on the device, then on the command word's type and number. xout is the inline output of Ioctl3 (empty otherwise).
-uint32_t dispatch(NvFile& f, uint32_t cmd, Arg a, Arg xout, bool& handled) {
-    const uint32_t type = (cmd >> 8) & 0xFF, nr = cmd & 0xFF;
-    handled = true;
+Answer dispatch(Nv& n, NvFile& f, uint32_t cmd, Args& a, const ipc::Buffer& inline_out) {
+    const uint32_t nr = cmd & 0xFF, type = (cmd >> 8) & 0xFF;
     switch (f.dev) {
-    case Dev::NvMap:
-        if (type == 0x01) return nvmap_ioctl(nr, a, handled);
-        break;
-    case Dev::Ctrl:
-        if (type == 0x00) return ctrl_ioctl(nr, a, handled);
-        break;
-    case Dev::CtrlGpu:
-        if (type == 0x47) return ctrlgpu_ioctl(nr, a, xout, handled);
-        break;
-    case Dev::AsGpu:
-        if (type == 0x41) return as_ioctl(f, nr, a, handled);
-        break;
-    case Dev::Gpu:
-        if (type == 0x48) return gpu_ioctl(f, nr, a, handled);
-        if (type == 0x47 && nr == 0x14) {   // SET_USER_DATA {u64}
-            f.user_data = a.u64(0);
-            return kNvOk;
-        }
-        break;
-    default: break;
+        case Dev::NvMap: return type == 0x01 ? nvmap_ioctl(n, nr, a) : kUntaken;
+        case Dev::Ctrl: return type == 0x00 ? ctrl_ioctl(nr, a) : kUntaken;
+        case Dev::CtrlGpu: return type == 0x47 ? ctrl_gpu_ioctl(nr, a, inline_out) : kUntaken;
+        case Dev::AsGpu: return type == 0x41 ? as_gpu_ioctl(n, f, nr, a) : kUntaken;
+        case Dev::Channel: return channel_ioctl(n, f, type, nr, a);
+        default: return kUntaken;
     }
-    handled = false;
-    return kNvOk;
 }
 
-// Ioctl, Ioctl2 and Ioctl3 share this: the command's direction and size decide what is copied in and out (as Ryujinx's
-// GetIoctlArgument checks it). xout is Ioctl3's inline output buffer, read and written in place; Ioctl2's inline input is unused.
-uint32_t ioctl_call(uint32_t fd, uint32_t cmd, const ipc::Buffer& in, const ipc::Buffer& out, const ipc::Buffer& xout) {
-    NvState& s = nv();
-    std::lock_guard<std::mutex> g(s.mu);
-    if (!s.initialized) return kNvNotInitialized;
-    if (static_cast<int32_t>(fd) < 0) return kNvInvalidParameter;
-    auto it = s.files.find(fd);
-    if (it == s.files.end()) return kNvNotImplemented;
-    NvFile& f = *it->second;
-
-    const uint32_t dir = cmd >> 30, size = (cmd >> 16) & 0x3FFF;
-    const bool rd = dir & 1, wr = dir & 2;
-    const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(f.dev)) << 32) | cmd;
-    log_ioctl(f, cmd, size, dir, s.seen.insert(key).second);
-    if ((wr && size > out.size) || (rd && size > in.size)) {
-        NXLOG_W(kTagNv, "ioctl size inconsistency on cmd %08x", cmd);
-        return kNvInvalidSize;
-    }
-    std::vector<uint8_t> v(size, 0);
-    if (rd) buf_read(in, v.data(), size);
-    bool handled = false;
-    uint32_t err = dispatch(f, cmd, Arg{v.data(), size}, arg_of(xout), handled);
-    if (!handled) {
-        if (s.warned.insert(key).second)
-            NXLOG_W(kTagNv, "UNHANDLED IOCTL on %s: cmd %08x (type %02x nr %02x size %u), answered with zeros", dev_name(f.dev), cmd,
-                    (cmd >> 8) & 0xFF, cmd & 0xFF, size);
-        std::fill(v.begin(), v.end(), 0);
-        err = kNvOk;
-    }
-    if (wr) buf_write(out, v.data(), size);
-    return err;
-}
-
-// Open(buffer path) -> (i32 fd, u32 error)
-uint32_t nv_open(ipc::Request& r, ipc::Response& rsp) {
-    NvState& s = nv();
-    std::lock_guard<std::mutex> g(s.mu);
-    if (!s.initialized) {
-        rsp.push<int32_t>(-1);
-        rsp.push<uint32_t>(kNvNotInitialized);
-        return 0;
-    }
-    const std::string path = c_string(r.in_buf(0));
-    for (const DevEntry& e : kDevices) {
-        if (path != e.path) continue;
-        if (e.debug_only) {
-            rsp.push<int32_t>(-1);
-            rsp.push<uint32_t>(kNvNotSupported);
-            return 0;
-        }
-        const uint32_t fd = s.next_fd++;
-        auto file = std::make_shared<NvFile>();
-        file->dev = e.dev;
-        s.files[fd] = file;
-        rsp.push<uint32_t>(fd);
-        rsp.push<uint32_t>(kNvOk);
-        return 0;
-    }
-    NXLOG_W(kTagNv, "cannot find device \"%s\"", path.c_str());
-    rsp.push<int32_t>(-1);
-    rsp.push<uint32_t>(kNvFileOperationFailed);
-    return 0;
-}
-
-uint32_t nv_close(ipc::Request& r, ipc::Response& rsp) {
-    NvState& s = nv();
-    std::lock_guard<std::mutex> g(s.mu);
+uint32_t ioctl(ipc::Request& req, ipc::Response& rsp, const ipc::Buffer& inline_out) {
+    const int32_t fd = req.arg<int32_t>(0);
+    const uint32_t cmd = req.arg<uint32_t>(4);
+    const ipc::Buffer in = req.in_buf(0), out = req.out_buf(0);
+    Nv& n = nv();
+    std::lock_guard<std::mutex> lk(n.mu);
     uint32_t err = kNvOk;
-    const int32_t fd = static_cast<int32_t>(r.arg<uint32_t>(0));
-    if (!s.initialized) err = kNvNotInitialized;
-    else if (fd < 0) err = kNvInvalidParameter;
-    else {
-        auto it = s.files.find(static_cast<uint32_t>(fd));
-        if (it == s.files.end()) err = kNvNotImplemented;
-        else s.files.erase(it);
+    auto it = n.files.find(fd);
+    const uint64_t size = (cmd >> 16) & 0x3FFF;
+    const bool copy_in = (cmd >> 30) & 1, copy_out = (cmd >> 31) & 1;
+    if (!n.initialized) {
+        err = kNvNotInitialized;
+    } else if (fd < 0) {
+        err = kNvBadParameter;
+    } else if (it == n.files.end()) {
+        err = kNvNotImplemented;
+    } else if ((copy_out && size > out.size) || (copy_in && size > in.size)) {
+        err = kNvBadSize;
+    } else {
+        Args a;
+        a.b.assign(static_cast<size_t>(size), 0);
+        if (copy_in) buf_read(in, a.b.data(), size);
+        const Answer r = dispatch(n, it->second, cmd, a, inline_out);
+        if (r.taken) {
+            err = r.err;
+        } else {
+            std::fill(a.b.begin(), a.b.end(), 0);
+            if (n.warned.insert({static_cast<int>(it->second.dev), cmd}).second)
+                NXLOG_W("nvdrv", "%s ioctl 0x%08X not handled: answered with zeros", dev_name(it->second.dev), cmd);
+        }
+        if (copy_out) buf_write(out, a.b.data(), size);
     }
     rsp.push<uint32_t>(err);
     return 0;
 }
 
-// QueryEvent(fd, id) -> (u32 error, copy handle). The ctrl device keys its events by slot, the gpu ones by id.
-uint32_t nv_query_event(uint32_t fd, uint32_t id, ipc::Response& rsp) {
-    NvState& s = nv();
-    std::lock_guard<std::mutex> g(s.mu);
-    if (!s.initialized) return kNvNotInitialized;
-    auto it = s.files.find(fd);
-    if (it == s.files.end()) return kNvNotImplemented;
-    NvFile& f = *it->second;
-    uint32_t key = 0;
-    switch (f.dev) {
-    case Dev::Ctrl: {
-        const uint32_t slot = (id >> 28) == 1 ? (id & 0xFFFF) : (id & 0xFF);
-        if (slot >= 64) return kNvInvalidValue;
-        key = slot;
-        break;
+Dev device_for(const std::string& path, bool* known, bool* debug_only) {
+    static const std::pair<const char*, Dev> kPaths[] = {
+        {"/dev/nvmap", Dev::NvMap},           {"/dev/nvhost-ctrl", Dev::Ctrl},       {"/dev/nvhost-ctrl-gpu", Dev::CtrlGpu},
+        {"/dev/nvhost-as-gpu", Dev::AsGpu},   {"/dev/nvhost-gpu", Dev::Channel},     {"/dev/nvhost-nvdec", Dev::Other},
+        {"/dev/nvhost-nvjpg", Dev::Other},    {"/dev/nvhost-vic", Dev::Other},       {"/dev/nvdisp-ctrl", Dev::Other},
+        {"/dev/nvsched-ctrl-gpu", Dev::Other},
+    };
+    *known = *debug_only = false;
+    for (const auto& p : kPaths) {
+        if (path == p.first) {
+            *known = true;
+            return p.second;
+        }
     }
-    case Dev::CtrlGpu:
-        if (id != 1 && id != 2) return kNvInvalidValue;   // ErrorEvent, SemaphoreEvent
-        key = id;
-        break;
-    case Dev::Gpu:
-        if (id < 1 || id > 3) return kNvInvalidValue;     // BptIntEvent, BptPauseEvent, ErrorNotifierEvent
-        key = id;
-        break;
-    default: return kNvNotSupported;
-    }
-    auto& ev = f.events[key];
-    if (!ev) ev = std::make_shared<ServiceEvent>();
-    const uint32_t h = ev->new_handle();
-    if (!h) return kNvInsufficientMemory;
-    rsp.out_copy.push_back(h);
-    return kNvOk;
+    *debug_only = path == "/dev/nvhost-dbg-gpu" || path == "/dev/nvhost-prof-gpu";
+    return Dev::Other;
 }
 
-void setup_nvdrv(ipc::Service& s) {
-    s.add_cmd(0, "Open", [](ipc::Request& r, ipc::Response& rsp) -> uint32_t { return nv_open(r, rsp); });
-    s.add_cmd(1, "Ioctl", [](ipc::Request& r, ipc::Response& rsp) -> uint32_t {
-        rsp.push<uint32_t>(ioctl_call(r.arg<uint32_t>(0), r.arg<uint32_t>(4), r.in_buf(0), r.out_buf(0), ipc::Buffer{}));
-        return 0;
-    });
-    s.add_cmd(2, "Close", [](ipc::Request& r, ipc::Response& rsp) -> uint32_t { return nv_close(r, rsp); });
-    s.add_cmd(3, "Initialize", [](ipc::Request& r, ipc::Response& rsp) -> uint32_t {
-        // (u32 size, process and transfer memory handles): the handles are not used, as Ryujinx does
-        (void)r;
-        std::lock_guard<std::mutex> g(nv().mu);
-        nv().initialized = true;
-        rsp.push<uint32_t>(kNvOk);
-        return 0;
-    });
-    s.add_cmd(4, "QueryEvent", [](ipc::Request& r, ipc::Response& rsp) -> uint32_t {
-        rsp.push<uint32_t>(nv_query_event(r.arg<uint32_t>(0), r.arg<uint32_t>(4), rsp));
-        return 0;
-    });
-    s.add_cmd(6, "GetStatus", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        std::lock_guard<std::mutex> g(nv().mu);
-        if (!nv().initialized) {
-            rsp.push<uint32_t>(kNvNotInitialized);
+std::shared_ptr<ipc::Service> make_nvdrv() {
+    return make_iface("nns::nvdrv::INvDrvServices", [](ipc::Service& s) {
+        s.add_cmd(0, "Open", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            const ipc::Buffer b = req.in_buf(0);
+            std::string path;
+            if (b.addr) {
+                const char* p = reinterpret_cast<const char*>(buf_ptr(b));
+                size_t len = 0;
+                while (len < b.size && p[len]) ++len;
+                path.assign(p, len);
+            }
+            Nv& n = nv();
+            std::lock_guard<std::mutex> lk(n.mu);
+            int32_t fd = -1;
+            uint32_t err = kNvOk;
+            bool known = false, debug_only = false;
+            const Dev dev = device_for(path, &known, &debug_only);
+            if (!n.initialized) {
+                err = kNvNotInitialized;
+            } else if (debug_only) {
+                err = kNvNotSupported;
+            } else if (!known) {
+                err = kNvFileOperationFailed;
+                NXLOG_W("nvdrv", "Open of unknown device '%s'", path.c_str());
+            } else {
+                fd = n.next_fd++;
+                n.files[fd].dev = dev;
+                NXLOG_D("nvdrv", "Open %s -> fd %d", path.c_str(), fd);
+            }
+            rsp.push<int32_t>(fd);
+            rsp.push<uint32_t>(err);
             return 0;
-        }
-        for (int i = 0; i < 8; ++i) rsp.push<uint32_t>(0);   // NvDrvStatus: four u32s and 0x10 reserved bytes, all zero, then the error
-        rsp.push<uint32_t>(kNvOk);
-        return 0;
-    });
-    s.add_cmd(7, "SetAruidWithoutCheck", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push<uint32_t>(kNvOk);
-        return 0;
-    });
-    s.add_cmd(8, "SetAruid", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push<uint32_t>(kNvOk);
-        return 0;
-    });
-    s.add_cmd(9, "DumpStatus", [](ipc::Request&, ipc::Response&) -> uint32_t {
-        NXLOG_D(kTagNv, "DumpStatus");
-        return 0;
-    });
-    s.add_cmd(11, "Ioctl2", [](ipc::Request& r, ipc::Response& rsp) -> uint32_t {
-        rsp.push<uint32_t>(ioctl_call(r.arg<uint32_t>(0), r.arg<uint32_t>(4), r.in_buf(0), r.out_buf(0), ipc::Buffer{}));
-        return 0;
-    });
-    s.add_cmd(12, "Ioctl3", [](ipc::Request& r, ipc::Response& rsp) -> uint32_t {
-        rsp.push<uint32_t>(ioctl_call(r.arg<uint32_t>(0), r.arg<uint32_t>(4), r.in_buf(0), r.out_buf(0), r.out_buf(1)));
-        return 0;
-    });
-    s.add_cmd(13, "SetGraphicsFirmwareMemoryMarginEnabled", [](ipc::Request&, ipc::Response&) -> uint32_t {
-        NXLOG_D(kTagNv, "SetGraphicsFirmwareMemoryMarginEnabled accepted");
-        return 0;
+        });
+        s.add_cmd(1, "Ioctl", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t { return ioctl(req, rsp, ipc::Buffer{}); });
+        s.add_cmd(2, "Close", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            const int32_t fd = req.arg<int32_t>(0);
+            Nv& n = nv();
+            std::lock_guard<std::mutex> lk(n.mu);
+            uint32_t err = kNvOk;
+            if (!n.initialized) err = kNvNotInitialized;
+            else if (fd < 0) err = kNvBadParameter;
+            else if (!n.files.erase(fd)) err = kNvNotImplemented;
+            rsp.push<uint32_t>(err);
+            return 0;
+        });
+        s.add_cmd(3, "Initialize", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            Nv& n = nv();
+            std::lock_guard<std::mutex> lk(n.mu);
+            n.initialized = true;
+            rsp.push<uint32_t>(kNvOk);
+            return 0;
+        });
+        s.add_cmd(4, "QueryEvent", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            const int32_t fd = req.arg<int32_t>(0);
+            const uint32_t id = req.arg<uint32_t>(4);
+            Nv& n = nv();
+            std::lock_guard<std::mutex> lk(n.mu);
+            uint32_t err = kNvOk, h = 0;
+            auto it = n.files.find(fd);
+            if (!n.initialized) {
+                err = kNvNotInitialized;
+            } else if (it == n.files.end()) {
+                err = kNvNotImplemented;
+            } else {
+                NvFile& f = it->second;
+                uint32_t key = id;
+                switch (f.dev) {
+                    case Dev::Ctrl:
+                        key = (id >> 28) == 1 ? (id & 0xFFFF) : (id & 0xFF);
+                        if (key >= 64) err = kNvBadValue;
+                        break;
+                    case Dev::CtrlGpu: if (id != 1 && id != 2) err = kNvBadValue; break;   // error, semaphore
+                    case Dev::Channel: if (id < 1 || id > 3) err = kNvBadValue; break;     // bpt int, bpt pause, error notifier
+                    default: err = kNvNotSupported; break;
+                }
+                if (!err) {
+                    h = f.events[key].new_handle();
+                    if (!h) err = kNvNoMemory;
+                }
+            }
+            rsp.push<uint32_t>(err);
+            if (!err) rsp.out_copy.push_back(h);
+            return 0;
+        });
+        s.add_cmd(6, "GetStatus", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            Nv& n = nv();
+            std::lock_guard<std::mutex> lk(n.mu);
+            if (!n.initialized) {
+                rsp.push<uint32_t>(kNvNotInitialized);
+                return 0;
+            }
+            for (int i = 0; i < 8; ++i) rsp.push<uint32_t>(0);   // NvDrvStatus
+            rsp.push<uint32_t>(kNvOk);
+            return 0;
+        });
+        const H aruid = [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.push<uint32_t>(kNvOk);
+            return 0;
+        };
+        s.add_cmd(7, "SetAruidWithoutCheck", aruid);
+        s.add_cmd(8, "SetAruid", aruid);
+        s.add_cmd(9, "DumpStatus", ok);
+        s.add_cmd(11, "Ioctl2", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t { return ioctl(req, rsp, ipc::Buffer{}); });
+        s.add_cmd(12, "Ioctl3", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t { return ioctl(req, rsp, req.out_buf(1)); });
+        s.add_cmd(13, "SetGraphicsFirmwareMemoryMarginEnabled", ok);
     });
 }
 
 }  // namespace
 
-// ============================================================ registration
+// ======================================================================================================================================
+// entry points
+// ======================================================================================================================================
+namespace victl {
+void note_present() {
+    const uint64_t now = ticks_to_ns(kernel::system_tick(), kernel::tick_hz());
+    History& h = history();
+    std::lock_guard<std::mutex> lk(h.mu);
+    ++h.frames;
+    h.last.push_back({h.frames, static_cast<int64_t>(now), static_cast<int64_t>(now)});
+    while (h.last.size() > kKept) h.last.pop_front();
+}
+
+uint64_t frames_presented() {
+    History& h = history();
+    std::lock_guard<std::mutex> lk(h.mu);
+    return h.frames;
+}
+
+int frame_history(uint64_t* out, int max) {
+    if (max <= 0) return 0;
+    const uint64_t hz = kernel::tick_hz();
+    History& h = history();
+    std::lock_guard<std::mutex> lk(h.mu);
+    const int n = static_cast<int>(std::min<size_t>(static_cast<size_t>(max), h.last.size()));
+    for (int i = 0; i < n; ++i) {
+        const Presented& f = h.last[h.last.size() - 1 - static_cast<size_t>(i)];
+        uint64_t* e = out + 5 * i;
+        e[0] = 2;   // shown
+        e[1] = f.frame;
+        e[2] = ns_to_ticks(f.queue_ns, hz);
+        e[3] = e[4] = ns_to_ticks(f.present_ns, hz);
+    }
+    return n;
+}
+}  // namespace victl
+
+namespace viapi {
+uint32_t display_vsync_handle() { return vsync_handle(); }
+}  // namespace viapi
 
 void register_vi_nv() {
-    add("vi:u", [] { return make_iface("nn::visrv::sf::IApplicationRootService", setup_vi_u); });
-    add("vi:s", [] { return make_iface("nn::visrv::sf::ISystemRootService", setup_vi_s); });
-    add("vi:m", [] { return make_iface("nn::visrv::sf::IManagerRootService", setup_vi_m); });
-    for (const char* name : {"nvdrv", "nvdrv:a", "nvdrv:s", "nvdrv:t"})
-        add(name, [] { return make_iface("nns::nvdrv::INvDrvServices", setup_nvdrv); });
+    add("vi:u", [] { return make_root("nn::visrv::sf::IApplicationRootService", 0, 1); });
+    add("vi:s", [] { return make_root("nn::visrv::sf::ISystemRootService", 1, 3); });
+    add("vi:m", [] { return make_root("nn::visrv::sf::IManagerRootService", 2, 3); });
+    for (const char* name : {"nvdrv", "nvdrv:a", "nvdrv:s", "nvdrv:t"}) add(name, [] { return make_nvdrv(); });
 }
 
 void vi_nv_reset() {
-    vsync_stop_and_join();
+    Vi& v = vi();
+    std::thread t;
     {
-        ViState& s = vi();
-        std::lock_guard<std::mutex> g(s.mu);
-        for (Layer& l : s.layers) {
-            l.used = false;
-            l.connected = false;
-            l.layer_id = 0;
-            l.event = ServiceEvent();
+        std::lock_guard<std::mutex> lk(v.mu);
+        if (v.vsync_started) {
+            v.vsync_stop = true;
+            t = std::move(v.vsync_thread);
         }
-        s.next_stray = kStrayLayerBase;
-        s.vsync = ServiceEvent();
     }
     {
-        NvState& n = nv();
-        std::lock_guard<std::mutex> g(n.mu);
-        n.initialized = false;
-        n.next_fd = 1;
-        n.next_handle = 1;
-        n.next_syncpt = 1;
-        n.files.clear();
-        n.maps.clear();
-        n.seen.clear();
-        n.warned.clear();
-        n.submit_logged = false;
+        std::lock_guard<std::mutex> lk(v.wait_mu);
+        v.wait_cv.notify_all();
     }
+    if (t.joinable()) t.join();
+    {
+        History& h = history();
+        std::lock_guard<std::mutex> lk(h.mu);
+        h.frames = 0;
+        h.last.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lk(v.mu);
+        v.vsync_started = false;
+        v.vsync_running = false;
+        v.vsync_stop = false;
+        for (LayerSlot& s : v.slot) {
+            s.used = false;
+            s.connected = false;
+            s.id = 0;
+            s.event = ServiceEvent();
+        }
+        v.next_layer_id = kFirstLayerId;
+        v.vsync = ServiceEvent();
+    }
+    Nv& n = nv();
+    std::lock_guard<std::mutex> lk(n.mu);
+    n.initialized = false;
+    n.next_fd = 1;
+    n.next_handle = 1;
+    n.next_syncpoint = 1;
+    n.files.clear();
+    n.objects.clear();
+    n.warned.clear();
+    n.submit_warned = false;
 }
-
-namespace viapi {
-uint32_t display_vsync_handle() { return vsync_new_handle(); }
-}  // namespace viapi
 
 }  // namespace nxrt::services

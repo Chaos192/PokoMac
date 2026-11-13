@@ -122,6 +122,9 @@ int program_index_now();                 // this program's index in its applicat
 uint64_t program_id_now();               // [process] program_id if set, else [title] program_id, else the game's title id; read from the config on every call
 const TitleProfile& profile();           // loaded from the config on first use
 void profile_reload();                   // tests: re-read the config
+// nn::settings::operator==(Language, LanguageCode) and its reverse answered on the host, either spelling of one Chinese script equal
+// (settings.cpp, AnySwitch's). Idempotent; the settings service calls it.
+void install_language_compare_hooks();
 const char* language_code(Language l);   // "en-US", "ja", ... (the 8-byte LanguageCode string)
 uint64_t language_code_u64(Language l);  // the same string as the little-endian u64 the settings services return
 

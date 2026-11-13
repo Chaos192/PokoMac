@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Copyright (c) 2026 Chaos192
 // nxrt_ipc_replay: replays a request script against the service library and writes every answer, so two builds of a service (an old
 // and a new implementation) can be compared on the same requests (tools/services/ipc_diff/ipc_diff.py builds both and compares).
 //
@@ -13,8 +14,50 @@
 //   api <what> ...                     a C++ entry point of a service file (state a request cannot reach), answered with an "A" line:
 //     api hle <name> <x0> <x1>           the HLE handler registered as <name> (hle_lookup), x0 / x1: null, u32:<hex> or bytes:<hex> (a
 //                                        pointer to those bytes); prints x0 and x1 after the call
+//     api lang_hooks                     services::install_language_compare_hooks()
 //     api accuid                         accapi::user_uid
-//     (PokoMac: AnySwitch's lang_hooks, face_set, face_get and face_provider are not here; PokoMac has none of those entry points)
+//     api face_set <style> <names>       shared_font_set_face (names: 18 comma-separated prompt names, "-" for an empty one)
+//     api face_get                       shared_font_face
+//     api face_provider                  shared_font_set_face_provider with a fixed face (style "xbox")
+//     api vi_present                     victl::note_present (a presented frame)
+//     api vi_frames                      victl::frames_presented
+//     api vi_history <max>               victl::frame_history (status and frame number of each entry; how its times relate)
+//     api vi_vsync                       viapi::display_vsync_handle (whether a handle came back)
+//     api am_docked <0|1>                amctl::set_docked
+//     api am_focus <0|1>                 amctl::set_focus
+//     api am_applet <0|1>                amctl::applet_open (a library applet answered on the host opens / closes)
+//     api am_state                       amctl::docked and amctl::in_focus
+//     api am_exit_hook                   amctl::set_exit_hook: a hand-off's exit becomes an "H exit <code> <why>" line, the call returns
+//     api file <path>                    a file a service wrote (the hand-off): its size and bytes (a hash above 4 KiB), or none
+//     api file_rm <path>                 removes that file
+//     api sleep_ms <n>                   waits n ms (a state that ages: the Joy-Con 2 mouse feed)
+//     api tmem                           every transfer memory the script made (hm=t / hc=t): its size and contents hash
+//   hid (hid.cpp; the sampler thread samples nothing while background sampling is off, so the shared memory changes only on hid_sample):
+//     api hid_bg <0|1>                   hid_set_background_sampling (reset turns it on again: send hid_bg 0 after every reset)
+//     api hid_sample [n]                 hid_sample_once, n times (default 1)
+//     api hid_shm                        hid_shared_memory_for_tests: the block's hash, or none
+//     api hid_live                       hid_sampler_live
+//     api hid_mode_changed               hid_mode_changed
+//     api hid_signal <index>             hid_signal_style_event
+//     api hid_sets                       hid_supported_sets and nxrt::hid::supported_player_mask
+//     api hid_read | hid_raw             hid_read_input | hid_read_raw_input: every connected slot, touch, keyboard, mouse, sampled_buttons
+//     api hid_src none|manual            the input source: none, or a fresh scripted one (nothing connected) the lines below change
+//     api hid_pad <slot> <connected> <style> <buttons hex> <lx> <ly> <rx> <ry>
+//     api hid_six <slot> <at_rest> <accel x y z> <gyro x y z> <angle x y z> [<direction 9 floats>]
+//     api hid_color <slot> <body hex> <buttons hex>
+//     api hid_touch <count> [<id>:<x>:<y>:<dx>:<dy>:<angle> ...]
+//     api hid_kbd <connected> <modifiers hex> <keys0..3 hex>
+//     api hid_mouse <connected> <x> <y> <dx> <dy> <wheel dx> <wheel dy> <buttons hex>
+//     api hid_vib_sink <0|1>             a vibration sink: every value hid forwards is a "V <slot> <hand> <4 floats as hex bits>" line
+//     api hid_bench_open <max>           hid_applet_open (hid_sdk.cpp: the controller applet opens)
+//     api hid_bench_close <max>          hid_applet_close: the players, player 1's npad id, the bench mask
+//     api hid_bench                      hid_bench_mask
+//     api web_hold <0|1>                 webview::set_input_held, with a host whose pad() is a "W pad <buttons> <lx> <ly>" line (0: no host)
+//     api jc2_mode off|auto|on           nxrt::hid::jc2_mouse_set_mode
+//     api jc2_feed <u> <v> <buttons> <wheel x> <wheel y> <focused> <captured>   nxrt::hid::jc2_mouse_feed
+//     api jc2_request <0|1>              nxrt::hid::jc2_mouse_request
+//     api jc2_space <w> <h>              nxrt::hid::jc2_mouse_set_pointer_space
+//     api jc2_state                      the mode's name, jc2_mouse_wants_pointer, jc2_mouse_active, jc2_mouse_listed
 // In a Q line's raw data and input buffers the 8 bytes 4b4b4b4b4b4b4b4b ("KKKKKKKK") stand for the address of a 1 MiB sample area
 // (filled with a fixed pattern at start), so a generated request can point at guest memory (an AudioOutBuffer's samples).
 // A Q line may end in as=<sid>,<sid> to name the objects its reply returns (generated scripts); a recorded script names them in its A
@@ -44,15 +87,21 @@
 #include <unordered_map>
 #include <vector>
 
+#include "../../src/services/hid_sdk.h"
+#include "../../src/services/hid_shm.h"
 #include "nxrt/abi.h"
 #include "nxrt/config.h"
 #include "nxrt/dispatch.h"
+#include "nxrt/input_source.h"
 #include "nxrt/ipc.h"
+#include "nxrt/jc2_mouse.h"
 #include "nxrt/kernel.h"
 #include "nxrt/log.h"
 #include "nxrt/memory.h"
 #include "nxrt/services.h"
 #include "nxrt/services_api.h"
+#include "nxrt/shared_font.h"
+#include "nxrt/webview.h"
 
 namespace {
 
@@ -159,6 +208,7 @@ struct State {
     std::vector<std::shared_ptr<kernel::KSharedMemory>> shm_list;
     std::vector<uint64_t> shm_hash;
     std::vector<std::vector<uint8_t>> shm_copy;   // the contents last reported (a compare is much cheaper than a hash)
+    std::vector<std::shared_ptr<kernel::KTransferMemory>> tmems;   // every transfer memory the script made (api tmem)
 };
 State g;
 
@@ -265,6 +315,7 @@ uint32_t make_handle(const std::string& d, std::vector<std::shared_ptr<kernel::K
             if (p) std::memset(p, 0, size);
             t->addr = reinterpret_cast<uint64_t>(p);
             keep.push_back(t);
+            g.tmems.push_back(t);
             return kernel::handle_add(t);
         }
         case 'S': {
@@ -440,6 +491,228 @@ void state_tail(std::string& s) {
 }
 
 
+nxrt::services::ButtonFace g_provider_face;
+nxrt::services::ButtonFace provider_face() { return g_provider_face; }
+
+void am_exit_hook(int code, const char* why) { emit("H exit " + std::to_string(code) + " " + (why ? why : "")); }
+
+// ---- hid ----------------------------------------------------------------------------------------------------------------------
+std::shared_ptr<nxrt::hid::ManualInputSource> g_hid_src;   // the scripted input source (api hid_src manual)
+
+uint32_t float_bits(float f) {
+    uint32_t u;
+    std::memcpy(&u, &f, 4);
+    return u;
+}
+
+void vib_sink(uint32_t slot, int hand, const nxrt::hid::VibrationValue& v, void*) {
+    std::string s;
+    appendf(s, "V %u %d %08x %08x %08x %08x", slot, hand, float_bits(v.amp_low), float_bits(v.freq_low), float_bits(v.amp_high),
+            float_bits(v.freq_high));
+    emit(s);
+}
+
+struct ReplayWebHost : nxrt::webview::Host {
+    bool open(const nxrt::webview::Page&, nxrt::webview::Events) override { return false; }
+    void show() override {}
+    void send(const std::string&) override {}
+    void close() override {}
+    void pad(uint64_t buttons, int32_t lx, int32_t ly) override {
+        std::string s;
+        appendf(s, "W pad %llx %d %d", static_cast<unsigned long long>(buttons), lx, ly);
+        emit(s);
+    }
+};
+ReplayWebHost g_web_host;
+
+// What one input read gave: every connected slot, the touch count, the keyboard, the mouse and the buttons hid published.
+void snapshot_text(std::string& s, const nxrt::hid::InputSnapshot& in) {
+    for (uint32_t i = 0; i < nxrt::hid::kNpadSlots; ++i) {
+        const nxrt::hid::NpadInput& p = in.npad[i];
+        if (!p.connected) continue;
+        appendf(s, " p%u:%u:%llx:%d,%d,%d,%d:%d", i, static_cast<unsigned>(p.style), static_cast<unsigned long long>(p.buttons), p.left.x,
+                p.left.y, p.right.x, p.right.y, p.six_axis.at_rest ? 1 : 0);
+    }
+    appendf(s, " t=%u k=%d:%x:%llx,%llx,%llx,%llx m=%d:%d,%d,%d,%d,%d,%d:%x sb=%llx", in.touch.count, in.keyboard_connected ? 1 : 0,
+            in.keyboard.modifiers, static_cast<unsigned long long>(in.keyboard.keys[0]), static_cast<unsigned long long>(in.keyboard.keys[1]),
+            static_cast<unsigned long long>(in.keyboard.keys[2]), static_cast<unsigned long long>(in.keyboard.keys[3]),
+            in.mouse.connected ? 1 : 0, in.mouse.x, in.mouse.y, in.mouse.dx, in.mouse.dy, in.mouse.wheel_dx, in.mouse.wheel_dy,
+            in.mouse.buttons, static_cast<unsigned long long>(nxrt::hid::sampled_buttons()));
+}
+
+// The api lines that change the scripted source: a copy of its snapshot, changed, put back. False for an unknown line.
+bool hid_source_line(const std::string& what, std::istringstream& is) {
+    if (!g_hid_src) return what == "hid_pad" || what == "hid_six" || what == "hid_color" || what == "hid_touch" || what == "hid_kbd" ||
+                           what == "hid_mouse";
+    nxrt::hid::InputSnapshot snap = g_hid_src->get();
+    auto hex = [&]() -> uint64_t {
+        std::string t;
+        is >> t;
+        return std::strtoull(t.c_str(), nullptr, 16);
+    };
+    auto num = [&]() -> int64_t {
+        std::string t;
+        is >> t;
+        return std::strtoll(t.c_str(), nullptr, 10);
+    };
+    auto flt = [&]() -> float {
+        std::string t;
+        is >> t;
+        return std::strtof(t.c_str(), nullptr);
+    };
+    if (what == "hid_pad" || what == "hid_six" || what == "hid_color") {
+        const int64_t slot = num();
+        if (slot < 0 || slot >= static_cast<int64_t>(nxrt::hid::kNpadSlots)) return true;
+        nxrt::hid::NpadInput& p = snap.npad[slot];
+        if (what == "hid_pad") {
+            p.connected = num() != 0;
+            p.style = static_cast<nxrt::hid::NpadStyle>(num());
+            p.buttons = hex();
+            p.left.x = static_cast<int32_t>(num());
+            p.left.y = static_cast<int32_t>(num());
+            p.right.x = static_cast<int32_t>(num());
+            p.right.y = static_cast<int32_t>(num());
+        } else if (what == "hid_six") {
+            p.six_axis.at_rest = num() != 0;
+            for (float& f : p.six_axis.accel) f = flt();
+            for (float& f : p.six_axis.gyro) f = flt();
+            for (float& f : p.six_axis.angle) f = flt();
+            if (is >> std::ws && !is.eof())
+                for (float& f : p.six_axis.direction) f = flt();
+        } else {
+            p.color_body = static_cast<uint32_t>(hex());
+            p.color_buttons = static_cast<uint32_t>(hex());
+        }
+    } else if (what == "hid_touch") {
+        snap.touch = nxrt::hid::TouchInput{};
+        snap.touch.count = static_cast<uint32_t>(num());
+        std::string f;
+        for (uint32_t k = 0; k < 16 && (is >> f); ++k) {
+            const std::vector<std::string> v = split(f, ':');
+            if (v.size() != 6) break;
+            nxrt::hid::TouchFinger& t = snap.touch.fingers[k];
+            t.id = static_cast<uint32_t>(std::strtoul(v[0].c_str(), nullptr, 10));
+            t.x = static_cast<uint32_t>(std::strtoul(v[1].c_str(), nullptr, 10));
+            t.y = static_cast<uint32_t>(std::strtoul(v[2].c_str(), nullptr, 10));
+            t.diameter_x = static_cast<uint32_t>(std::strtoul(v[3].c_str(), nullptr, 10));
+            t.diameter_y = static_cast<uint32_t>(std::strtoul(v[4].c_str(), nullptr, 10));
+            t.angle = static_cast<int32_t>(std::strtol(v[5].c_str(), nullptr, 10));
+        }
+    } else if (what == "hid_kbd") {
+        snap.keyboard_connected = num() != 0;
+        snap.keyboard.modifiers = static_cast<uint32_t>(hex());
+        for (uint64_t& k : snap.keyboard.keys) k = hex();
+    } else if (what == "hid_mouse") {
+        snap.mouse.connected = num() != 0;
+        snap.mouse.x = static_cast<int32_t>(num());
+        snap.mouse.y = static_cast<int32_t>(num());
+        snap.mouse.dx = static_cast<int32_t>(num());
+        snap.mouse.dy = static_cast<int32_t>(num());
+        snap.mouse.wheel_dx = static_cast<int32_t>(num());
+        snap.mouse.wheel_dy = static_cast<int32_t>(num());
+        snap.mouse.buttons = static_cast<uint32_t>(hex());
+    } else {
+        return false;
+    }
+    g_hid_src->set(snap);
+    return true;
+}
+
+// The hid api lines; false when `what` is none of them.
+bool replay_hid(const std::string& what, std::istringstream& is, std::string& s) {
+    namespace sv = nxrt::services;
+    namespace hid = nxrt::hid;
+    if (what == "hid_bg") {
+        int on = 0;
+        is >> on;
+        sv::hid_set_background_sampling(on != 0);
+    } else if (what == "hid_sample") {
+        int n = 1;
+        is >> n;
+        for (int i = 0; i < n && i < 100000; ++i) sv::hid_sample_once();
+    } else if (what == "hid_shm") {
+        const uint8_t* p = sv::hid_shared_memory_for_tests();
+        if (!p) s += " none";
+        else appendf(s, " %016llx", static_cast<unsigned long long>(fnv(p, sv::hidshm::kSize)));
+    } else if (what == "hid_live") {
+        appendf(s, " %d", sv::hid_sampler_live() ? 1 : 0);
+    } else if (what == "hid_mode_changed") {
+        sv::hid_mode_changed();
+    } else if (what == "hid_signal") {
+        uint32_t i = 0;
+        is >> i;
+        sv::hid_signal_style_event(i);
+    } else if (what == "hid_sets") {
+        uint32_t styles = 0xEEEEEEEE, mask = 0xEEEEEEEE;
+        sv::hid_supported_sets(&styles, &mask);
+        appendf(s, " styles=%x mask=%x players=%x", styles, mask, hid::supported_player_mask());
+    } else if (what == "hid_read" || what == "hid_raw") {
+        hid::InputSnapshot in;
+        if (what == "hid_read") sv::hid_read_input(&in);
+        else sv::hid_read_raw_input(&in);
+        snapshot_text(s, in);
+    } else if (what == "hid_src") {
+        std::string kind;
+        is >> kind;
+        g_hid_src = kind == "manual" ? std::make_shared<hid::ManualInputSource>() : nullptr;
+        hid::set_input_source(g_hid_src);
+    } else if (what == "hid_vib_sink") {
+        int on = 0;
+        is >> on;
+        hid::set_vibration_sink(on ? &vib_sink : nullptr, nullptr);
+    } else if (what == "hid_bench_open") {
+        int max = 0;
+        is >> max;
+        sv::hid_applet_open(max);
+        appendf(s, " mask=%x", sv::hid_bench_mask());
+    } else if (what == "hid_bench_close") {
+        int max = 0;
+        is >> max;
+        uint32_t sel = 0xEEEEEEEE;
+        const int n = sv::hid_applet_close(max, &sel);
+        appendf(s, " players=%d sel=%x mask=%x", n, sel, sv::hid_bench_mask());
+    } else if (what == "hid_bench") {
+        appendf(s, " mask=%x", sv::hid_bench_mask());
+    } else if (what == "web_hold") {
+        int on = 0;
+        is >> on;
+        nxrt::webview::set_host(on ? &g_web_host : nullptr);
+        nxrt::webview::set_input_held(on != 0);
+    } else if (what == "jc2_mode") {
+        std::string m;
+        is >> m;
+        hid::jc2_mouse_set_mode(m == "off" ? hid::Jc2MouseMode::Off : m == "on" ? hid::Jc2MouseMode::On : hid::Jc2MouseMode::Auto);
+    } else if (what == "jc2_feed") {
+        hid::HostMouse m;
+        std::string t[7];
+        for (std::string& x : t) is >> x;
+        m.u = std::strtof(t[0].c_str(), nullptr);
+        m.v = std::strtof(t[1].c_str(), nullptr);
+        m.buttons = static_cast<uint32_t>(std::strtoul(t[2].c_str(), nullptr, 16));
+        m.wheel_x = std::strtof(t[3].c_str(), nullptr);
+        m.wheel_y = std::strtof(t[4].c_str(), nullptr);
+        m.focused = t[5] == "1";
+        m.captured = t[6] == "1";
+        hid::jc2_mouse_feed(m);
+    } else if (what == "jc2_request") {
+        int on = 0;
+        is >> on;
+        hid::jc2_mouse_request(on != 0);
+    } else if (what == "jc2_space") {
+        int w = 0, h = 0;
+        is >> w >> h;
+        hid::jc2_mouse_set_pointer_space(w, h);
+    } else if (what == "jc2_state") {
+        appendf(s, " mode=%s wants=%d active=%d listed=%d", hid::jc2_mouse_mode_name(hid::jc2_mouse_mode()), hid::jc2_mouse_wants_pointer() ? 1 : 0,
+                hid::jc2_mouse_active() ? 1 : 0, hid::jc2_mouse_listed() ? 1 : 0);
+    } else if (hid_source_line(what, is)) {
+        if (!g_hid_src) s += " no-source";
+    } else {
+        return false;
+    }
+    return true;
+}
+
 // A pointer argument of `api hle`: kept alive in `keep` until the call returned.
 uint64_t hle_arg(const std::string& a, std::vector<std::vector<uint8_t>>& keep) {
     if (a == "null") return 0;
@@ -480,12 +753,90 @@ void replay_api(const std::string& line) {
             fn(&c);
             appendf(s, " %s x0=%llx x1%s", name.c_str(), static_cast<unsigned long long>(c.x[0]), c.x[1] == in1 ? "=same" : "=changed");
         }
+    } else if (what == "lang_hooks") {
+        nxrt::services::install_language_compare_hooks();
     } else if (what == "accuid") {
         uint64_t hi = 0, lo = 0;
         nxrt::services::accapi::user_uid(&hi, &lo);
         appendf(s, " %016llx %016llx", static_cast<unsigned long long>(hi), static_cast<unsigned long long>(lo));
         nxrt::services::accapi::user_uid(nullptr, nullptr);
-    } else {
+    } else if (what == "face_set" || what == "face_provider") {
+        nxrt::services::ButtonFace f;
+        std::string style = "xbox", names;
+        if (what == "face_set") is >> style >> names;
+        else names = "xbox/b,xbox/a,xbox/y,xbox/x,xbox/lb,xbox/rb,xbox/lt,xbox/rt,-,-,xbox/menu,xbox/view,-,-,-,-,-,-";
+        f.style = style;
+        const std::vector<std::string> v = split(names, ',');
+        for (size_t i = 0; i < f.name.size() && i < v.size(); ++i) f.name[i] = v[i] == "-" ? std::string() : v[i];
+        if (what == "face_set") {
+            nxrt::services::shared_font_set_face(f);
+        } else {
+            g_provider_face = f;
+            nxrt::services::shared_font_set_face_provider(&provider_face);
+        }
+    } else if (what == "face_get") {
+        const nxrt::services::ButtonFace f = nxrt::services::shared_font_face();
+        s += " " + f.style;
+        for (const std::string& n : f.name) s += " " + (n.empty() ? std::string("-") : n);
+    } else if (what == "vi_present") {
+        nxrt::services::victl::note_present();
+    } else if (what == "vi_frames") {
+        appendf(s, " %llu", static_cast<unsigned long long>(nxrt::services::victl::frames_presented()));
+    } else if (what == "vi_history") {
+        // the entries' status and frame number, and how their times relate (the times themselves vary run to run)
+        int max = 0;
+        is >> max;
+        uint64_t e[5 * 12];
+        std::memset(e, 0xEE, sizeof e);
+        const int n = nxrt::services::victl::frame_history(max > 0 ? e : nullptr, max > 12 ? 12 : max);
+        appendf(s, " n=%d", n);
+        for (int i = 0; i < n; ++i)
+            appendf(s, " %llu:%llu:%s%s", static_cast<unsigned long long>(e[5 * i]), static_cast<unsigned long long>(e[5 * i + 1]),
+                    e[5 * i + 2] <= e[5 * i + 3] ? "q<=p" : "q>p", e[5 * i + 3] == e[5 * i + 4] ? "" : ":p!=p");
+        if (n >= 0 && n < 12) appendf(s, " next=%s", e[5 * n] == 0xEEEEEEEEEEEEEEEEull ? "untouched" : "written");
+    } else if (what == "vi_vsync") {
+        appendf(s, " %s", nxrt::services::viapi::display_vsync_handle() ? "handle" : "none");
+    } else if (what == "am_docked" || what == "am_focus" || what == "am_applet") {
+        int on = 0;
+        is >> on;
+        if (what == "am_docked") nxrt::services::amctl::set_docked(on != 0);
+        else if (what == "am_focus") nxrt::services::amctl::set_focus(on != 0);
+        else nxrt::services::amctl::applet_open(on != 0);
+    } else if (what == "am_state") {
+        appendf(s, " docked=%d in_focus=%d", nxrt::services::amctl::docked() ? 1 : 0, nxrt::services::amctl::in_focus() ? 1 : 0);
+    } else if (what == "am_exit_hook") {
+        nxrt::services::amctl::set_exit_hook(&am_exit_hook);
+    } else if (what == "file" || what == "file_rm") {
+        std::string path;
+        std::getline(is >> std::ws, path);
+        if (what == "file_rm") {
+            std::remove(path.c_str());
+        } else {
+            std::ifstream f(path, std::ios::binary | std::ios::ate);
+            const std::streamoff n = f ? static_cast<std::streamoff>(f.tellg()) : -1;
+            if (n < 0) {
+                s += " none";
+            } else {
+                std::vector<uint8_t> v(static_cast<size_t>(n));
+                f.seekg(0);
+                if (n) f.read(reinterpret_cast<char*>(v.data()), n);
+                appendf(s, " %llu ", static_cast<unsigned long long>(n));
+                if (n <= 4096) hex_to(s, v.data(), v.size());
+                else appendf(s, "#%016llx", static_cast<unsigned long long>(fnv(v.data(), v.size())));
+            }
+        }
+    } else if (what == "sleep_ms") {
+        int ms = 0;
+        is >> ms;
+        if (ms > 0 && ms <= 10000) std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+    } else if (what == "tmem") {
+        for (size_t i = 0; i < g.tmems.size(); ++i) {
+            const auto& t = g.tmems[i];
+            const uint8_t* p = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(t->addr));
+            appendf(s, " t%zu:%llx:%016llx", i, static_cast<unsigned long long>(t->size),
+                    static_cast<unsigned long long>(p && t->size ? fnv(p, t->size) : 0));
+        }
+    } else if (!replay_hid(what, is, s)) {
         s += " unknown";
     }
     state_tail(s);
