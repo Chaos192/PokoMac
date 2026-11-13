@@ -9,7 +9,8 @@ Shipped in the app:
 - The runtime libpkp_rt.dylib (tools/build/sdk and runtime/): PolyForm Noncommercial 1.0.0 (LICENSE.txt, NOTICE.txt). What is compiled into it, or what its code comes from,
   is listed with its licence in THIRD_PARTY_NOTICES.md, with the texts in licenses/: SDL3 (zlib), volk (MIT), VulkanMemoryAllocator
   (MIT), Vulkan-Headers (Apache-2.0 or MIT), Zstandard (BSD), Dear ImGui (MIT), hidapi (BSD), libvpx 1.16.0 (BSD-3-Clause and its
-  PATENTS grant), astc-encoder (Apache-2.0), bc7enc_rdo, LLVM libc++abi (Apache-2.0 WITH LLVM-exception), the NVN header (MIT).
+  PATENTS grant), astc-encoder (Apache-2.0), bc7enc_rdo, LLVM libc++abi (Apache-2.0 WITH LLVM-exception), the NVN header (MIT);
+  libopus 1.5.2 (BSD-3-Clause) and Lua 5.4.7 (MIT), whose texts are in THIRD_PARTY_NOTICES.md itself.
 - Vulkan, from the LunarG Vulkan SDK 1.4.363.1 for macOS (runtime/, copied next to pkp in the game folder), unchanged:
   - libvulkan.1.dylib, the Khronos Vulkan loader: Apache-2.0 (LICENSE.Vulkan-Loader.txt).
   - libvulkan_kosmickrisp.dylib, KosmicKrisp (LunarG's Vulkan driver on Metal, part of Mesa): MIT (LICENSE.KosmicKrisp.MIT.txt).

@@ -28,6 +28,8 @@ $top = Get-ChildItem $stage -Directory | Select-Object -First 1
 Rename-Item $top.FullName $name
 # the upstream base carries its own launcher under the old name; this package's is PokoMac.exe (Put below)
 Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $pkg 'PokopiaLauncher.exe')
+# the base still carries the licence texts of code PokoMac no longer has (rewritten clean-room before the licence switch, RELICENSING.md)
+foreach ($f in 'LICENSE.ScarletNX.GPL-3.0.txt', 'LICENSE.yuzu-Eden.GPL-2.0.txt') { Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $pkg "licenses\$f") }
 
 function Put([string]$from, [string]$to) {
     $dst = Join-Path $pkg $to
@@ -64,6 +66,9 @@ foreach ($f in 'pkp_build.py', 'apply_ips.py', 'mods.py', 'cheats_fetch.py', 'du
 Put "$root\game-build\release_b\BUNDLED_TOOLS.txt" 'licenses\BUNDLED_TOOLS.txt'
 Put "$root\launcher\release\Play.bat" 'Play.bat'
 Put "$root\LICENSE" 'LICENSE.txt'
+Put "$root\NOTICE" 'NOTICE.txt'
+Put "$root\LICENSE.GPL-3.0.txt" 'licenses\LICENSE.GPL-3.0.txt'   # the lifter (RELICENSING.md)
+Put "$root\runtime\THIRD_PARTY_NOTICES.md" 'licenses\THIRD_PARTY_NOTICES.md'   # what is compiled into pkp_rt.dll, with its licence texts
 Put "$root\CHANGELOG.md" 'CHANGELOG.txt'
 Put "$root\tools\shaders\ampere\extract_corpus.py" 'tools\shaders\extract_corpus.py'
 Mirror "$root\runtime\assets\prompts" 'assets\prompts'   # button prompt icon pack prompt_icons.pak (Kenney CC0, licence in the folder)
