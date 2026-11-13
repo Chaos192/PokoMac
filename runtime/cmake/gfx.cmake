@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Portions Copyright (c) 2026 Chaos192
 # Graphics shell (S4b): SDL3 platform + input queue, Vulkan 1.3 device layer, NVN front end, ImGui overlay.
 # Built as the static library nxrt_gfx (links nxrt).
 include(${CMAKE_CURRENT_LIST_DIR}/gfx_deps.cmake)

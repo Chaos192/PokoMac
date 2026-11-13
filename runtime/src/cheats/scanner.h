@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Memory scanner for the cheats overlay: a Cheat Engine-class value search over guest memory. Multithreaded and chunked so it stays
 // responsive on a 12+ GiB Z-A heap; the game keeps running unless the caller asks for a pause.

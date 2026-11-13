@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Array-of-bytes patterns, first-class: parse and match patterns with `??` and nibble wildcards, scan them over guest memory (a module,
 // region or range), and make the shortest unique signature for an address. Used by the scanner's AOB search, by AOB-anchored cheat-table

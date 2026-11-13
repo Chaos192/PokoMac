@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Pins: small readouts that stay over the game while the menus are closed. One engine for both menus: the F1 settings menu pins
 // performance and settings readouts (play/perf_pins.h), the cheats menu pins its values and cheat codes (cheats_ui.cpp). Each menu owns a

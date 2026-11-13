@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // The cheats overlay's glass panel: a blurred copy of the game frame under the panel (overlay.cpp records it each frame the panel is glass,
 // and only then: nothing runs while the overlay is closed or solid).

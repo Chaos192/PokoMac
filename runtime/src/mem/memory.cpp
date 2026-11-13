@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Guest address space on the host (layout and contract: include/nxrt/memory.h).
 //  - fixed reservations at exact addresses (images, stacks, the kernel region), committed on demand;
 //  - the heap: one pagefile-backed section (SEC_RESERVE) with a primary view at kHeapBase and alias views of the same

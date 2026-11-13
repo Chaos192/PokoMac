@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // A64 disassembler and assembler (disasm.h). Decodes by the encoding groups of the ARMv8-A instruction set (ARM ARM, "A64 Instruction
 // Set Encoding") and prints LLVM's preferred assembly (its aliases: mov, cmp, lsl, ubfx, cset, mul, ...). The assembler takes the same

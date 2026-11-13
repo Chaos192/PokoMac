@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Standalone test of the cheats overlay's Lua scripts (runtime/src/cheats/luavm.*) over a fake guest memory: the nx API, hotkeys, the
 // frame callbacks, the sandbox (no io / os / dofile, files only by plain name), the instruction budget and the memory cap.

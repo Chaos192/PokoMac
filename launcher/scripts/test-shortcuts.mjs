@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Tests for Settings > In-game shortcuts (src/settings-schema.js SHORTCUTS_SECTION) and Settings > Cheats: the shortcuts and default pins
 // land in the game's pkp.ini, the pins' text form matches the runtime's (play/pin_board.h), clashes are found, and the cheats look reads

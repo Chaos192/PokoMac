@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 //! Checks before Set up starts: free disk space, write access to the game folder (writecheck.rs), Vulkan, RAM, and a warning
 //! for the Intel Core CPUs that crash under long heavy loads; on Linux also Proton, which runs the shader translator and the
 //! game. Every check except the disk space, the write access and Proton is a warning the player can continue past. On macOS the

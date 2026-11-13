@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // "Find what writes / reads this address" (phase 6), native: the page holding the watched address is made read-only (for writes) or
 // no-access (for reads); the first guest access faults, a vectored handler records the faulting code (the lifted host PC resolved to the

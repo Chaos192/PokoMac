@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // In-process sampling profiler (S34), for machines where no profiler can run without administrator rights.
 // `[prof] sample_hz` (env NXRT_PROF_SAMPLE_HZ, default 0 = off): a thread suspends every registered thread (or those named in `[prof]
 // sample_threads`, comma-separated) in turn, reads its context, walks

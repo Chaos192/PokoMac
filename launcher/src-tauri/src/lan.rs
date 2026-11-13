@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 //! What a relay host tells visitors: which of this PC's IPv4 addresses to give out, and whether Windows will let
 //! visitors in. Read only; nothing here changes the network profile or the firewall.
 //!

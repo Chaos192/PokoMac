@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // soft_raster.h: Dear ImGui draw data on the CPU. Vertex positions go to 8-bit sub-pixel fixed point so the edge functions are exact and a
 // shared edge belongs to exactly one of its two triangles (ImGui draws every rectangle as two triangles: a translucent panel must not get

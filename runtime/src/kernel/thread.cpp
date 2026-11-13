@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Guest threads: one Win32 thread per guest thread, a TLS region per thread (TPIDRRO_EL0) and a static TLS block (TPIDR_EL0).
 // Pattern from SuperMarioWonderRecomp runtime/src/kernel.cpp new_thread / thread_main (MIT, Copyright (c) 2026 BelmanteGu) and
 // smo-recomp runtime/os/os_threads.c (thread start with console core model).

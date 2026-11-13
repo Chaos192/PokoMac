@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // The game's icon for the cheats overlay's header (cheats_ui_internal.h game_icon): the title folder's icon.png or icon.jpg (what the app's
 // library keeps beside each title: icon.jpg from the catalogue or the control data, icon.png from some), decoded once, made smaller with a

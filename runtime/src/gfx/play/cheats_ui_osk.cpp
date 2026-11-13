@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // The cheats overlay's on-screen keyboard and hex / number keypad (cheats_ui_internal.h field / editor): every text field of the overlay
 // can be filled with a controller alone. With a pad in use, activating a field (A) or pressing Y on it opens the keyboard for that field;

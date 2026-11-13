@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Temporal upscaling: the camera from the G-buffer uniform block, the input pass (motion vectors, depth and colour copies) and the
 // backend call (temporal.h).
 #include "extras/temporal.h"

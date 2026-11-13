@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Platform layer (S4b): SDL3 window, fullscreen, relative (raw) mouse, gamepad hot-plug, Vulkan surface creation.
 // Everything here is called from one thread (the one that created the window, normally the main thread). Events are not
 // returned: pump_events() turns them into nxrt::input events (input.h).

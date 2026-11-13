@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // The overlay's saved cheat table and window layout (phase 6, CHEATS.md). Saved per title and build id as JSON next to the title
 // (<cheats dir>/<build id>.cheattable.json and <build id>.overlay.json), outside the repository. Loadable and editable in the overlay;

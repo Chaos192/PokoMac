@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Test the pointer scanner (runtime/src/cheats/pointerscan.*): build a map, find a path to a heap target rooted in a module, resolve it,
 // and rescan after a simulated restart that moves the dynamic objects.

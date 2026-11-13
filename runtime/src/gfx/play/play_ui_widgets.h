@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // The F1 settings menu's rows and cards, in the overlay's theme (cheats_theme.h): every page of play_ui*.cpp lays out with these, so the
 // menu reads as one product with the cheats menu and the app. A row is a label on the left and its control in a column on the right; a

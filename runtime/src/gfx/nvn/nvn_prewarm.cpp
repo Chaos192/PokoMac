@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Pipeline prewarm (S10). A graphics pipeline is created the first time a draw needs its combination of shaders and baked state,
 // and on the real GPU that costs from a few to a few hundred milliseconds on the render thread. Two things keep it off the frame:
 //

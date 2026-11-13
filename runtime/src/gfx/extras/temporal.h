@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Temporal upscaling / anti-aliasing on the HDR scene before the game's tone map: AMD FSR 3.1 (FidelityFX API, temporal_ffx.cpp) and NVIDIA DLSS /
 // DLAA (Streamline, temporal_dlss.cpp). Both SDKs are loaded at run time; nothing is linked. On macOS, Apple's MetalFX temporal scaler
 // (platform/mac/gfx/temporal_metalfx.mm), which runs on its own Metal command queue: the Vulkan recording is split around it (RecordingSplitter).

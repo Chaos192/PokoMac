@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 //! Can setup write in the game folder? Windows Security's Controlled folder access (ransomware protection) and some
 //! antivirus programs block writes in Documents, Desktop, Downloads and Pictures for programs they do not know. The game
 //! folder defaults to the launcher's own folder, which is often one of those, and the build and shader tools then fail

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Test tooling core (S5): configuration, the frame boundary, virtual clock, seeded RNG, per-frame hash and trace, result file,
 // input recording / replay, crash and freeze plumbing. See include/nxrt/tt.h.
 #include <windows.h>

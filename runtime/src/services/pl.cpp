@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // nn::pl:u and pl:s (S3c): the six shared system fonts in the 0x1100000-byte shared memory.
 // Command ids and reply layouts: Switchbrew "Shared Database services" (the pl:s table; RequestLoad 0 .. GetSharedFontInOrderOfPriorityForSystem 6
 // are the font commands of firmware 1.0.0 to 15.0.1, and pl:u has the same ones at that firmware).

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // The cheats overlay's search pages and tools: Find a value (the guided scan: every value type, text and AOB, every first and next
 // comparison), My table (freeze, edit, hotkeys, groups, pointer and AOB-anchored entries, AOB script entries, Atmosphère export, undo) and

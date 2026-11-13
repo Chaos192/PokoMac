@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // AMD FSR 3.1 through the FidelityFX API (temporal.h). The Vulkan DLLs are loaded at run time: the FSR SDK v2.4.0 pair
 // amd_fidelityfx_loader_vk.dll + amd_fidelityfx_upscaler_vk.dll (MIT, signed), or the v1.1.4 amd_fidelityfx_vk.dll; [upscale] fsr_dll names
 // one explicitly, otherwise upscalers\fsr3\ (the release package) or the executable's folder is searched. The upscaler version is the newest the DLL offers for this GPU (FSR 3.1.x; FSR 4 where AMD supports it).

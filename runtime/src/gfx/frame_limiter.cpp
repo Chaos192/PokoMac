@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // FrameLimiter: schedule on QueryPerformanceCounter; coarse wait on a high-resolution waitable timer; spin for the last
 // stretch. The behaviour and the thread rules are the contract in include/nxrt/frame_limiter.h.
 #include "nxrt/frame_limiter.h"

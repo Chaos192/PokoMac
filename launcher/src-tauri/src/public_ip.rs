@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 //! This PC's public IPv4 address, for an internet host to give its visitors (#245). The launcher's Link Play page only listed
 //! the PC's own adapters (LAN and VPN addresses), so a host had nothing to share but the 127.0.0.1 in its Relay address field,
 //! which on a visitor's PC means the visitor's own PC. Asked only while the page shows an internet host; one small HTTPS GET to

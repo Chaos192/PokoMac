@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Pipeline layouts, shader modules and pipelines (see nvn_pipeline.h). A pipeline the key file's prewarm or the pipeline libraries do not
 // provide is created on the render thread at its first draw while the game loads, and in play ([nvn] async_whole, the loading gate of
 // nvn_gpl.cpp) on a background thread while the draw is skipped. Compute pipelines are built ahead at boot from the key file ([nvn]

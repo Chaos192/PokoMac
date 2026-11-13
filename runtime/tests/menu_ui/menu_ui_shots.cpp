@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // The F1 settings menu's test: its pages, the pins and a group pin drawn offscreen (no window, no GPU: the cheats test's CPU rasterizer,
 // tests/cheats_ui/soft_raster.h) at two UI scales over a synthetic game frame, written as PNGs and compared with tests/menu_ui/ref (stored

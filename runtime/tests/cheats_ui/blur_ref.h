@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // The backdrop blur's arithmetic on the CPU (extras/backdrop_blur.cpp and its shader, scripts/gen_blur_shaders.py): level 0 is the frame at
 // half size (the mean of each 2 x 2 block, as the 2:1 linear blit gives), then the dual Kawase passes down and back up with bilinear,

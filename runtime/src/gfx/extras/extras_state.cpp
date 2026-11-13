@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Settings and runtime state of the display extras (include/nxrt/extras.h).
 #include "nxrt/extras.h"
 

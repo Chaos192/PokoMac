@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Portions Copyright (c) 2026 Chaos192
 """Downloads NVIDIA's nvngx_dlss.dll for the launcher's "Download DLSS" button (release model b).
 
     python -I tools/build/fetch_dlss.py --dir <install folder>/upscalers/streamline

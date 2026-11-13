@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Standalone test of the Atmosphère cheat parser and VM (runtime/src/cheats/cheat_vm.*): no runtime dependencies, so it builds and runs
 // on any platform with a C++20 compiler. CMake target nxrt_cheat_vm_test (runtime/tests/cheats/CMakeLists.txt). Each cheat below is hand

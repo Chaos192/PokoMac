@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Display extras (S14): HDR output, upscaling, frame generation and low-latency modes.
 //
 // Everything here is off by default except HDR "auto" (HDR is used when the display and Windows offer it). The settings are read once at

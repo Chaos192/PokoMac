@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // nn::os::LockBusyMutex as host code (S15, debug note 240).
 //
 // The SDK's busy mutex is a pure spin lock: ldaxr / cbnz / wfe, and the lifter turns wfe into a no-op. On the console the waiter spins on

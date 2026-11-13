@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // vi:u, vi:s, vi:m (the display services and the binder driver of a layer's buffer queue) and nvdrv, nvdrv:a, nvdrv:s, nvdrv:t (the
 // nvhost devices), as far as the SDK uses them before NVN is handed to our graphics bootstrap (S3c).
 //

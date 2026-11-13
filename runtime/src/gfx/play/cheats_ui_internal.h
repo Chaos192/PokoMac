@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Shared state and helpers of the cheats overlay's windows (cheats_ui*.cpp). Not a public header: cheats_ui.h is the overlay's interface.
 #pragma once

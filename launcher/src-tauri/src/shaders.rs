@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 //! First-run shader setup: builds `shader_cache/spirv` next to pkp.exe from the user's own romfs and main.
 //!
 //! Two existing tools do the work, both shipped in the launcher's `tools/` folder:

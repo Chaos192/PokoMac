@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 //! Keep my saves in iCloud Drive (macOS, opt-in, Settings > Saves): the active profile's save travels between the player's Macs by copy,
 //! around each Play. The game never plays from iCloud Drive itself: iCloud can turn a file into a placeholder that is only downloaded when
 //! it is read, and two Macs could write one save at the same time. So before the game starts, a newer copy in iCloud Drive is brought in

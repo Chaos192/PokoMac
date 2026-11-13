@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Standalone test of the memory scanner (runtime/src/cheats/scanner.*) against a fake memory source. No runtime dependency: it provides
 // its own MemSource, and gmem is stubbed out (scanner.cpp's GmemSource / live_source are not exercised here).

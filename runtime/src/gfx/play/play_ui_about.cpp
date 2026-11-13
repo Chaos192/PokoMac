@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // The About page of the F1 settings menu (play_ui.h draw_about_page): which build this is and where the files in use are. Every path is a
 // read-only text field, so it can be selected and copied.
 #ifndef WIN32_LEAN_AND_MEAN

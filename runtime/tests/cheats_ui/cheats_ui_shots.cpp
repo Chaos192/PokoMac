@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // The cheats overlay's screenshot test: every main screen drawn offscreen (no window, no GPU: soft_raster.h renders ImGui's draw data on
 // the CPU) at two UI scales over a synthetic game frame, written as PNGs and compared with the reference images in tests/cheats_ui/ref

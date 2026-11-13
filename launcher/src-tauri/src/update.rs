@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 //! Releases and the in-launcher update.
 //!
 //! `load_releases`: one GET of the GitHub releases list per session (plus one per refresh), the raw answer kept in the app config

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Internal interfaces of the Vulkan side of the NVN back end (render thread only). Modules:
 //   nvn_gpu.cpp          the Gpu singleton: device access, render thread, submission slots, timeline, deferred destruction, uploads
 //   nvn_gpu_pool.cpp     memory pools imported as Vulkan memory, GPU address -> VkBuffer

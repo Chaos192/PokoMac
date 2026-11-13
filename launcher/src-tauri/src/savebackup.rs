@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 //! Save backups: copies of the active profile's save, made on a timer while the game runs (when the player chose it), once when the game
 //! ends, and on request, so a progression-stopping bug can be rolled back. Nothing here touches the runtime: it works on the committed
 //! save folder from outside, and the whole contract (folder layout, manifest, pkp.ini keys, how a restore is requested) is written down in

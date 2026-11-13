@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Portions Copyright (c) 2026 Chaos192
 # Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 # Lua 5.4.7 (MIT, PUC-Rio): the cheats overlay's scripting (src/cheats/luavm.cpp, docs/CHEATS.md "Lua scripts"). Fetched by URL into
 # NXRT_DEPS_DIR and checked against its SHA-256 (as the other pinned sources, gfx_deps.cmake), built as a small static library: the core

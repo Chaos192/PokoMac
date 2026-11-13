@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // A compact AArch64 (A64) disassembler and a small assembler for the cheats memory viewer and code tools (phase 6). The disassembler
 // turns one 32-bit little-endian instruction word into text (mnemonic + operands) and reports the immediate/branch byte fields a

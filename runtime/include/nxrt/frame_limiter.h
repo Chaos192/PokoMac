@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Frame limiter for the low-latency design: begin_frame() waits for the frame's scheduled start BEFORE the caller samples input,
 // so input is read as late as possible and the display queue stays short. The wait is a high-resolution waitable timer for
 // the bulk and a spin on the performance counter for the last stretch. Schedules are absolute (next = previous + period), so

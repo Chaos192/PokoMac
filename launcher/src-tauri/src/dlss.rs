@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 //! Optional DLSS download. The release carries FSR 3 and the Streamline DLLs (upscalers/), but not NVIDIA's nvngx_dlss.dll: its
 //! licence (NVIDIA RTX SDKs LICENSE) does not fit a GPL-3.0 package. This runs the bundled `tools/build/fetch_dlss.py`, which
 //! downloads the file from NVIDIA's own GitHub repository at a fixed tag and checks its sha256, into `<game>/upscalers/streamline`.

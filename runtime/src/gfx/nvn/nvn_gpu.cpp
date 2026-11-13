@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // The Vulkan side of the NVN back end: the render thread, submission slots (command buffer, descriptor pools, upload memory),
 // the timeline semaphore, deferred destruction, barriers and the public backend API (include/nxrt/nvn_backend.h).
 // Design follows smo-recomp (record on game threads, replay on one render thread) and SuperMarioWonderRecomp docs/nvn (a submit

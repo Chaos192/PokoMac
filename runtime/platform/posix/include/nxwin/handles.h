@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // nxwin: kernel objects behind HANDLE (threads, events, mutexes, waitable timers, processes, files, sections) and the waits on them.
 // A HANDLE is a pointer to a reference-counted nxwin::Object; CloseHandle drops one reference. GetCurrentThread / GetCurrentProcess
 // return the Win32 pseudo handles (-2 / -1), which DuplicateHandle turns into real ones.

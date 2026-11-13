@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Standalone test of AOB parsing, scanning and signature making (runtime/src/cheats/aob.*).
 #define _CRT_SECURE_NO_WARNINGS

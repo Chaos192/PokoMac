@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Semantics adapted from SuperMarioWonderRecomp runtime/src/kernel.cpp and svc_process.cpp (MIT, Copyright (c) 2026 BelmanteGu); see THIRD_PARTY_NOTICES.md.
 // Memory SVC group (include/nxrt/svc.h): heap, MapMemory/UnmapMemory, QueryMemory, permission and attribute calls, shared,
 // transfer and physical memory views in the alias region. The address space and the Horizon vm map are in include/nxrt/memory.h.

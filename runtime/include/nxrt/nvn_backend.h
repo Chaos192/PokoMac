@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // The NVN-on-Vulkan back end (S4d). install_backend() replaces the logging stubs of the NVN shell (nvn.h) with real
 // implementations and starts the render thread that replays the game's command lists on a gfx::Device.
 //   * Memory pools are the game's own memory: the back end imports it as Vulkan memory (VK_EXT_external_memory_host), so a GPU

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Portions Copyright (c) 2026 Chaos192
 # libvpx (BSD-3-Clause; x86inc macros ISC) for the host nn::codec VP9/VP8 decoders (src/media/video_codec.cpp).
 # libvpx builds with its own configure script, not CMake, so it is taken prebuilt from vcpkg, static with the static MSVC runtime (/MT)
 # like everything else here:

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Page write tracking by page protection (include/nxrt/write_watch.h). Four bitmaps per region, one bit per 4 KiB page:
 //   prot    the page is read-only because of us (set by arm, cleared by whoever makes it writable again)
 //   valid   armed and not written since (the owner's copy of the page is current)

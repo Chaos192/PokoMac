@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // The glass panel's GPU blur against its CPU reference (nxrt_cheats_ui_test --gpu): a headless device, a frame image holding the test's game
 // picture, BackdropBlur::record over a panel's rectangle, level 0 read back and compared with blur_ref.h inside the rectangle; then the GPU

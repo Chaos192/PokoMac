@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Guest memory as the cheat tools see it (cheat VM, scanner, pointer scanner, memory viewer). Guest addresses are host addresses
 // (include/nxrt/memory.h), so a console cheat's main+X or heap+X lands where it would on the console. Every access is fault safe: a page

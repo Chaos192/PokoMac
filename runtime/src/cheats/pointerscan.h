@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Pointer scanner: heap and alias addresses move between runs, so a cheat needs a pointer path rooted in a stable place (a module image at
 // its fixed load address). Given a target address, it finds multi-level paths module+offset -> *() + off -> ... -> target, up to a maximum

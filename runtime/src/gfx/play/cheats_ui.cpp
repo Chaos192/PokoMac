@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // The cheats overlay UI (cheats_ui.h): the shell. One panel over a dimmed game with four pages, simple first (Cheats, Find a value, My
 // table, Advanced), a button-hint bar, toasts with undo, confirmations, the saved table and layout, hotkeys, the frame callback that

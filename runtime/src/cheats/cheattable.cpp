@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Saved cheat table + layout (cheattable.h). A tiny self-contained JSON reader/writer: enough for the objects this module emits and for
 // hand edits, no third-party dependency.

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // The F1 settings menu's pins (pin_board.h): performance readouts and settings shown as readouts, pinned over the game while the menu is
 // closed. The board in force comes from the settings file's [hud] (per game), else from the configuration's [hud] default (the launcher's

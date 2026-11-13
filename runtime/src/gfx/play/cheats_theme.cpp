@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // cheats_theme.h: the overlay's tokens, style, fonts, icons and shared widgets. The values are the launcher's (launcher/src/theme.css).
 #include "cheats_theme.h"

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // The overlay's toggles: the keys and controller chords that open the F1 settings menu ([menu] key / pad), the cheats menu ([cheats] key /
 // pad), hide or show every pin ([hud] key / pad) and show or hide one pin group (its own key / pad, play/pin_board.h). Pure: no SDL state,

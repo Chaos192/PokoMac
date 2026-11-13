@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Lua scripts for the cheats overlay (luavm.h).
 #define _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING 1

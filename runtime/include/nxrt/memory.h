@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Guest address space on the host. Guest pointers are host pointers (identity map): the loader reserves each module's
 // image at the address it was lifted for; the heap is a view of a pagefile-backed section so that further views (NVN
 // memory pools, shared memory, MapMemory aliases) can alias the same physical pages.

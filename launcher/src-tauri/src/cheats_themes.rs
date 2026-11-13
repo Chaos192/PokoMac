@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 //! The cheats overlay's theme files (docs/CHEATS.md "Themes"): the player's own themes live in `<app config dir>/cheats-themes/`, one
 //! JSON file each (and the .ttf / .otf it may name, next to it). The runtime reads the one `[cheats] theme` names (the settings

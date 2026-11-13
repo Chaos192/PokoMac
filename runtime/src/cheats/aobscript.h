@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Cheat Engine-style auto-assembler scripts for AArch64 guest code (phase 6, CHEATS.md "AOB scripts"): a table entry whose [ENABLE]
 // section finds its code by an AOB signature and patches it, and whose [DISABLE] section puts it back. Because the code is found by

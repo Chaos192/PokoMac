@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Test that exported cheats (runtime/src/cheats/export.*) parse and run through the VM: a static write and a two-level pointer path.
 #define _CRT_SECURE_NO_WARNINGS

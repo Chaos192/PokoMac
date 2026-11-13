@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Vulkan device layer (declarations in include/nxrt/gfx.h): instance + validation, GPU choice, logical device, VMA, image-format
 // checks, buffers, one-shot submits.
 // Ideas taken from SuperMarioWonderRecomp (MIT) docs/nvn/DEBUG-2.md #69 (ASTC on NVIDIA desktop) and #70 (iGPU listed first):

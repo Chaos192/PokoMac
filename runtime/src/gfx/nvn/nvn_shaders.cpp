@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Adapted from SuperMarioWonderRecomp runtime/src/nvn/nvn_shaders.{h,cpp} (MIT, Copyright (c) 2026 BelmanteGu); changes: namespace, cache lookup.
 // Also: the reflection of Wonder's runtime/src/nvn/nvn_spirv_reflect.cpp is in this file too (one source file builds it).
 // NVN shader stages -> offline-translated SPIR-V (nvn_shaders.h, SuperMarioWonderRecomp docs/nvn/TRANSLATOR.md "Runtime side").

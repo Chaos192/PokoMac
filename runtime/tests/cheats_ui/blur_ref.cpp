@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // blur_ref.h: the backdrop blur on the CPU, the GPU's arithmetic step by step: levels of the same sizes, the same region on each level
 // (BackdropBlur::region), every tap clamped into the source level's region, each pass stored as RGBA8.

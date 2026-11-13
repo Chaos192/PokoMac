@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Standalone test for the A64 disassembler + assembler (src/cheats/disasm.cpp). No runtime dependency.
 // a64_golden.inc holds hand-written instructions assembled by clang and printed back by llvm-objdump (LLVM is the reference): each row

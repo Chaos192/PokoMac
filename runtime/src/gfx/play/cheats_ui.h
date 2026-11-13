@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // The cheats overlay UI (phase 6): a Cheat Engine-class memory tool drawn with ImGui over the game, separate from the F1 dev menu and shown
 // with its own key ([cheats] key, default F3) and controller combo ([cheats] pad). It draws into the existing overlay's ImGui context

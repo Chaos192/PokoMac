@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // The cheats overlay's code and tool windows: Find what accesses (writes / reads), Breakpoints (registers, continue / step), Code patches
 // (IPS for the next build), Threads, Value graphs (triggers), Game control (pause, frame advance, speed), Lua (scripts, console), Cheat files

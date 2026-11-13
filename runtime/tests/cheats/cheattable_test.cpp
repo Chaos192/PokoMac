@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Round-trip test for the saved cheat table + layout (src/cheats/cheattable.cpp). No runtime dependency.
 #include "cheattable.h"

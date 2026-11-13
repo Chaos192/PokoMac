@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // The command list interpreter of the NVN back end (render thread). Walks recorded lists in order, keeps the GPU state the
 // console keeps (it persists across lists and submissions), and turns it into Vulkan: dynamic-rendering passes opened lazily on the
 // first draw or clear of a render target set, graphics pipelines keyed by the baked state, descriptor sets built from the

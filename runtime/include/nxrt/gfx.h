@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Vulkan 1.3 device layer of the graphics shell (S4b). Game independent: the NVN back end (later work) builds on it.
 //   Device    instance (+ validation in debug), GPU choice (discrete first, override), logical device, one graphics+present
 //             queue, VMA allocator, image-format checks before every image is created, buffers, one-shot submits.

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // The F1 page's start-up and menu tweaks (S46, play_fastboot.h): a group at the end of the Extras tab.
 #include "imgui.h"
 #include "play_fastboot.h"

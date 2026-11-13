@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Portions Copyright (c) 2026 Chaos192
 // Module loader and linker (see include/nxrt/module.h).
 // Pattern from smo-recomp runtime/core/hostrt.c runtime_init (relocation handling, post-relocation page protection) and
 // SuperMarioWonderRecomp runtime/src/loader.cpp (map every module first, then link; import thunks and logging stubs).

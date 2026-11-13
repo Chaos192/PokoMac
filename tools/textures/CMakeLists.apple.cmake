@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Portions Copyright (c) 2026 Chaos192
 # macOS (Apple silicon) build of astc2bc7: bc7e.ispc compiled for NEON, astcenc's NEON decompressor linked statically into
 # libastc2bc7.a (one archive, so the runtime links astc2bc7 and bc7e_ispc as on Windows). scripts/build_mac.sh runs it.
 set(A2B_ISPC "${TP}/ispc/ispc-v1.32.0-macOS.universal/bin/ispc" CACHE FILEPATH "Intel ISPC compiler (BSD-3)")
