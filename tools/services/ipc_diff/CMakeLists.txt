@@ -57,6 +57,9 @@ if(NXRT_IPC_DIFF_ALT)
         set_property(TARGET nxrt_ipc_alt APPEND PROPERTY COMPILE_DEFINITIONS "${_dd}")
     endif()
     target_link_libraries(nxrt_ipc_alt PRIVATE nxrt)
+    if(TARGET pokopia_coop)   # the library links it privately; network.cpp's and ldn.cpp's #include "coop.h" needs its folder here too
+        target_link_libraries(nxrt_ipc_alt PRIVATE pokopia_coop)
+    endif()
     # the alt files' own #include "x.h" of their neighbours resolve in the source folders
     target_include_directories(nxrt_ipc_alt BEFORE PRIVATE "${NXRT_ROOT}/src/services" "${NXRT_ROOT}/src")
     if(NXRT_IPC_DIFF_ALT_QUIET)
