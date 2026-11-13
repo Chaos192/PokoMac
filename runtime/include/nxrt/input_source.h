@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // Where the hid service gets its controller state from (S3c). The hid service owns the applet-resource shared memory and
 // refreshes it from an InputSource roughly every 5 ms (the console's 200 Hz sampling); the input / PC-feature streams provide a
 // real source later (SDL3 pads, keyboard and mouse). This header has no SDL3 dependency; ManualInputSource is the source the tests use.
@@ -99,6 +101,9 @@ std::shared_ptr<InputSource> input_source();
 // sets it each sample (about every 5 ms); a game module reads it to see a button the game itself does not handle.
 uint64_t sampled_buttons();
 void set_sampled_buttons(uint64_t buttons);
+// The players the game takes (SetSupportedNpadIdType): bit n = npad No n+1, players 1..8; all eight until the game sets it. A game that
+// takes only No1 is a one-player game: the play layer then lets every controller drive player 1 (play/pad_players.h). Any thread.
+uint32_t supported_player_mask();
 
 // A source driven by code: the tests and scripted runs. Thread safe.
 class ManualInputSource : public InputSource {
@@ -133,6 +138,12 @@ private:
     std::mutex mu_;
     InputSnapshot snap_;
 };
+
+// The SDK's nn::hid getters answered on the host instead of read from the shared memory (src/services/hid_sdk.cpp): npad states and style
+// sets, Joy-Con assignment, controller colors, the controller applet, six-axis sensors, vibration device mounts, mouse, keyboard and touch
+// screen. [hid] sdk_hooks = auto (default: on for a title with no game module of its own) | on | off. Call it once the lifted modules are
+// registered, so the sdk's own definitions are replaced for calls by address too. Returns whether the hooks were installed.
+bool install_sdk_hooks();
 
 // Vibration the game sends to a pad (nn::hid SendVibrationValue / SendVibrationValues): the newest value for one hand of one pad. The play-mode
 // layer registers a sink that turns it into SDL rumble. The sink is called on the thread that handled the IPC command; it must be quick.

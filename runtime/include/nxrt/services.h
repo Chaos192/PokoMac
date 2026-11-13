@@ -118,6 +118,7 @@ struct TitleProfile {
     std::string user_nickname = "Player";                  // [account] nickname
     uint64_t user_uid_hi = 0x0000000000000001ull, user_uid_lo = 0x6e78727475736572ull;   // [account] uid = 32 hex digits ("nxrtuser")
 };
+int program_index_now();                 // this program's index in its application: [am] program_index if set, else the low byte of program_id_now() (from AnySwitch)
 uint64_t program_id_now();               // [process] program_id if set, else [title] program_id, else the game's title id; read from the config on every call
 const TitleProfile& profile();           // loaded from the config on first use
 void profile_reload();                   // tests: re-read the config

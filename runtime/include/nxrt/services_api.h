@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // Cross-service and host-facing entry points of the service library (S3c): what one service asks of another, and what the PC
 // layers (window focus, settings UI) call to change console state. Implemented in the .cpp of the service named in each comment.
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <string>
 
 namespace nxrt::services {
@@ -15,6 +18,8 @@ namespace fsapi {
 uint32_t ensure_account_save(uint64_t uid_hi, uint64_t uid_lo, bool* created);
 // Size and journal size of the account save data (the values nn::fs::GetSaveDataSize reports); the fs "path not found" result when absent.
 uint32_t account_save_size(uint64_t uid_hi, uint64_t uid_lo, int64_t* size, int64_t* journal);
+// The application's cache storage <index> (save type 5; am CreateCacheStorage): made with those sizes when it is not there yet.
+uint32_t create_cache_storage(uint16_t index, int64_t size, int64_t journal);
 // Save commits that failed (fs_volume.cpp: a write failed, or the commit itself could not be written) since the start, and the Win32 error
 // of the last one. The last good save is kept. The overlay shows a notice when the count grows. Any thread.
 struct SaveFailures {
@@ -28,9 +33,31 @@ const char* save_failure_reason(uint32_t host_error);   // "the disk is full", .
 // ---- am (am.cpp): console state changes from the host --------------------------------------------------------------------------------
 // Each call queues the matching AppletMessage for the guest (it sees them through ICommonStateGetter::ReceiveMessage, with the message
 // event signalled) and updates the state the getters report.
+// ---- vi (vi_nv.cpp): what the display saw ------------------------------------------------------------------------------------------
+namespace victl {
+void note_present();   // the game presented a frame (the NVN front end): the layer's buffer history (binder GetBufferHistory) records it
+uint64_t frames_presented();   // the layer's latest frame number: the frames presented so far (nn::vi::GetLatestFrameNumber)
+// The last presents, newest first, as Switch 2's nn::vi::FrameInfo (5 u64 each: status 2 shown, frame number, queue tick, present tick
+// twice), at most max of them; returns how many were written.
+int frame_history(uint64_t* out, int max);
+}  // namespace victl
+
+namespace camerasvc {
+// nn::camera::sdk::CreateCameraContext on Switch 2: a new session handle of a console with no camera plugged in (services/camera_switch2.cpp)
+uint32_t create_context_session();
+}  // namespace camerasvc
+
 namespace amctl {
 void set_docked(bool docked);          // OperationModeChanged (30) + PerformanceModeChanged (31); GetOperationMode/GetPerformanceMode follow
 void set_focus(bool in_focus);         // FocusStateChanged (15); GetCurrentFocusState: 1 = InFocus, 2 = OutOfFocus
+void applet_open(bool open);           // a library applet answered on the host opens / closes: the game is out of focus meanwhile
+// Multi-program titles (IApplicationFunctions 120 ExecuteProgram): the process ends and the launcher starts the program named in the hand-off
+// file, as the console ends one program and starts another. The contract (docs/EXECUTE_PROGRAM.md): the runtime writes [am]
+// execute_program_file (default execute_program.ini) and its launch parameters, then exits with kExitExecuteProgram; the next program's
+// process gets [am] program_index, previous_program_index and launch_user_channel. set_exit_hook: how the process ends (play mode's own
+// exit, which saves its settings and caches); null: a plain exit. Tests set a hook that returns.
+constexpr int kExitExecuteProgram = 80;
+void set_exit_hook(void (*hook)(int code, const char* why));
 bool docked();
 bool in_focus();
 }  // namespace amctl
@@ -55,6 +82,30 @@ bool ask(const Request& r, std::string* text);
 uint64_t pending(Request* r);
 void answer(uint64_t id, bool ok, const std::string& text);
 }  // namespace swkbdui
+
+// ---- the controller applet's prompt (ctrl_prompt.cpp) -------------------------------------------------------------------------------
+// A game that asks for more players than are connected (ControllerSupportArg's minimum, not single mode) waits with the prompt up over
+// its picture until enough controllers are connected or the player closes it, as a Switch's applet stays open (nxnative services.md
+// "The controller applet waits for players"). Play mode turns the prompt on with a window and no scripted input; without it the applet
+// answers at once (canceled below the minimum), as tests and headless runs need.
+namespace ctrlui {
+struct Prompt {
+    int lo = 0, hi = 0;     // the players the game wants (minimum, maximum)
+    int players = 0;        // connected now
+};
+void enable_prompt(bool on);
+bool prompt_enabled();
+// Runs on the waiting thread between its checks (every 20 ms): play mode's window pump, so a wait on the window's own thread (the hooked
+// nn::hid::ShowControllerSupport) still sees controllers connect and draws the prompt. Null: none.
+void set_wait_hook(void (*fn)());
+bool enough(int players, int lo);   // at or above the minimum (a minimum below 1 counts as 1)
+// Waits while players() is below lo, the prompt up: true once enough are connected, false when the player closed it, `abandoned`
+// returned true (the game ended the applet) or the prompt is off. Any thread but the drawing one; polls players() every 100 ms.
+bool wait_for_players(int lo, int hi, const std::function<int()>& players, const std::function<bool()>& abandoned = {});
+// For the overlay: the open prompt's id (0 = none), with *p set when there is one; cancel() closes it as the player would (B / Escape).
+uint64_t pending(Prompt* p);
+void cancel(uint64_t id);
+}  // namespace ctrlui
 
 // ---- vi (vi_nv.cpp)----------------------------------------------------------------------------------------------------------------
 namespace viapi {

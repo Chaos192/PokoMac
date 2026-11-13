@@ -22,6 +22,9 @@ void config_clear();
 void config_set(const char* section, const char* key, const char* value);
 
 std::string config_get_str(const char* section, const char* key, const char* def = "");
+// config_get_str for a path (AnySwitch's name; there it joins the title's folder). PokoMac's game runs from its own folder, so a
+// relative path is already the game folder's: the value as given.
+std::string config_get_path(const char* section, const char* key, const char* def = "");
 // The folder of a run's own reports: the folder of [report] run_file (NXRT_REPORT_RUN_FILE), else of [report] history
 // (NXRT_REPORT_HISTORY); "" when neither is set (Play: the reports stay in the game folder). From AnySwitch by Chaos192.
 std::string run_report_dir();

@@ -66,8 +66,9 @@ void zero_buffer(const char* iface, uint32_t id, const char* name, size_t zero_b
 
 void register_extensions() {
     // PokoMac: the extensions of the services it has taken from AnySwitch so far (the Switch 2 sound mixer for audio.cpp, the hardware
-    // audio codec for audio_opus.cpp); AnySwitch's others (ext_account, ext_system, ext_hid, ext_services, ext_am, ext_ns) come with
+    // audio codec for audio_opus.cpp, hid's extra commands); AnySwitch's others (ext_account, ext_system, ext_services, ext_am, ext_ns) come with
     // their services.
+    ext::register_hid_extra();
     ext::register_sound_mixer();
     opus::register_opus_codec();
 }

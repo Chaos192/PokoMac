@@ -1,20 +1,46 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// appletOE and appletAE (S3c): the applet manager as the one application sees it. The application is in focus, its message
-// queue holds what the console queues for it, the notification flags it sets are real state. Library applets: the software keyboard
-// answers a text (the overlay's on-screen keyboard, or a configured text); the player select answers the one user; the others end at once.
-// Command ids and layouts follow the Switchbrew "Applet Manager services" page and ScarletNX's am.swipc.
-// Adapted from ScarletNX src/nx/hle/services/am.c and am.swipc (GPL-3.0-or-later): the command table, the message queue, the lock
-// accessor, the audio volumes, the save data rules and the launch parameter storage.
-// Adapted from Ryujinx src/Ryujinx.HLE/HOS/Services/Am (MIT): the result codes, the LaunchParameterKind values, the preselected user
-// layout (AppletAE/Storage/StorageHelper.cs MakeLaunchParams) and the GamePlay recording command id.
-// Adapted from SuperMarioWonderRecomp runtime/src/svc_am.cpp (MIT): the window controller's applet resource user id.
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Applet manager (S3c): appletOE / appletAE as one application sees them. The application proxy and every interface it hands out
+// (common state, self, window, audio, display, process winding, library applet creator and accessors, application functions, debug,
+// storages, lock accessors, graphics scaling), the applet message queue and the focus, the library applets answered on the host
+// (software keyboard, normal and inline; player select; error; controller; the web family; the ones that end cancelled), launch
+// parameters, save size queries and the ExecuteProgram / relaunch hand-off (docs/EXECUTE_PROGRAM.md). Also the host's controls (amctl)
+// and the software keyboard prompt switch (swkbdui::enable_prompt / prompt_enabled).
+//
+// Command ids, layouts and values: https://switchbrew.org/wiki/Applet_Manager_services (commands, AppletMessage, OperationMode,
+// FocusState, LibraryAppletMode), https://switchbrew.org/wiki/Software_Keyboard (the keyboard config, its output and text check
+// storages, the inline keyboard's requests, replies and Calc argument) and https://switchbrew.org/wiki/Internet_Browser (the web
+// argument TLVs, session messages, exit reasons). Facts taken from Ryujinx (MIT), no code: src/Ryujinx.HLE/HOS/Services/Am (ResultCode.cs,
+// AppletAE/Types AppletId and LibraryAppletMode, the storage and its accessor, the preselected user storage) and
+// src/Ryujinx.HLE/HOS/Applets (SoftwareKeyboard: inline keyboard states, requests, replies and Calc flags; Controller: the support
+// argument header and the result info; Browser: the argument header and TLVs, WebCommonReturnValue, exit reasons; PlayerSelect; Error:
+// the common header and the application error argument).
+//
+// AnySwitch's own rules on top of those (they win where the two differ):
+//   * messages: the queue starts with FocusStateChanged; OperationModeChanged / PerformanceModeChanged are queued at every set_docked
+//     the game asked to hear about, also when nothing changed; ReceiveMessage does not signal again while messages remain;
+//   * a library applet holds the application's focus while it is open (Mario Kart 8 Deluxe applies the controller applet's answer at the
+//     InFocus that follows it), except the inline keyboard and an offline web session started hidden;
+//   * every applet answers without a window unless a prompt is on (keyboard, the controller applet's wait for players) or a web view
+//     host shows a page; shop, MyPage, data erase, net connect and GameShare matchmaking end cancelled;
+//   * one lock (am's) guards the process state and every applet; the hid calls (hid_sdk.h) are made without it, as hid asks am for the
+//     operation mode.
+// Commands of these interfaces that ext_am.cpp adds (ipc::extend) are not registered here: a handler of the interface's own would
+// always win over the extension.
+#include <algorithm>
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <initializer_list>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "nxrt/config.h"
@@ -22,1369 +48,1877 @@
 #include "nxrt/log.h"
 #include "nxrt/memory.h"
 #include "nxrt/services_api.h"
+#include "nxrt/webview.h"
+#include "hid_sdk.h"
 #include "services_internal.h"
 
 namespace nxrt::services {
 
 namespace {
 
-using Bytes = std::vector<uint8_t>;
-using ipc::Handler;
-using ipc::Request;
-using ipc::Response;
-using ipc::Service;
-using ServicePtr = std::shared_ptr<Service>;
+using Req = ipc::Request;
+using Rsp = ipc::Response;
+using Blob = std::vector<uint8_t>;
+using BlobPtr = std::shared_ptr<Blob>;
 
-// nn::am::AppletMessage values the queue carries (Ryujinx AppletAE/AllSystemAppletProxiesService/.../AppletMessage.cs).
-constexpr uint32_t kMsgFocusStateChanged = 15;
-constexpr uint32_t kMsgOperationModeChanged = 30;
-constexpr uint32_t kMsgPerformanceModeChanged = 31;
-constexpr uint32_t kMsgStartupLogoDisappeared = 95;
+constexpr const char* kTag = "am";
 
-// nn::am::service::FocusState: InFocus 1, OutOfFocus 2, Background 3.
-constexpr uint8_t kFocusInFocus = 1;
-constexpr uint8_t kFocusOutOfFocus = 2;
-constexpr uint64_t kAppletResourceUserId = 0x51;
+// am results (module 128)
+const uint32_t kNoData = res(128, 2);             // 0x480: no storage to pop
+const uint32_t kNoMessages = res(128, 3);         // 0x680: ReceiveMessage with an empty queue
+const uint32_t kAppletCancelled = res(128, 22);   // 0x2C80: the applets that end cancelled
+const uint32_t kLaunchFailed = res(128, 35);      // 0x4680: another application asked for
+const uint32_t kBadOffset = res(128, 503);        // 0x3EE80: a storage range outside the storage
+const uint32_t kNotAStorage = res(128, 511);      // 0x3FE80: an object that is not one of am's storages
+const uint32_t kNoMemory = res(128, 600);         // 0x4B080: a storage size out of range
 
-// nn::am::service::LaunchParameterKind (Ryujinx AppletOE/.../Types/LaunchParameterKind.cs): UserChannel 1, PreselectedUser 2.
-constexpr uint32_t kLaunchParamUserChannel = 1;
-constexpr uint32_t kLaunchParamPreselectedUser = 2;
-constexpr uint32_t kLaunchParamsMagic = 0xC79497CAu;   // LaunchParameterAccountPreselectedUser
-constexpr uint64_t kLaunchParamsSize = 0x88;
-constexpr uint8_t kSaveDataTypeAccount = 1;            // nn::fs::SaveDataType::Account
+// AppletMessage values and the focus states
+constexpr uint32_t kMsgFocusChanged = 15, kMsgOperationMode = 30, kMsgPerformanceMode = 31, kMsgStartupLogoGone = 95;
+constexpr uint8_t kInFocus = 1, kOutOfFocus = 2;
 
-// Largest storage a guest can ask for (CreateStorage and the transfer / handle storages).
-constexpr int64_t kMaxStorageSize = 0x10000000;
+constexpr int64_t kStorageMax = 0x10000000;           // CreateStorage and the memory storages: 0 .. 256 MiB
+constexpr uint64_t kChannelEntryMax = 64ull << 20;    // an entry of a launch user channel file above this stops the reading
+constexpr uint32_t kTextMax = 500;                    // the keyboards' length limit (UTF-16 units)
+constexpr uint32_t kLanguages = static_cast<uint32_t>(Language::Count);
 
-// Am results (module 128): result = module | description << 9 (services.h res()).
-const uint32_t kNoData = res(128, 2);                // ResultNoDataInChannel: no launch parameter / nothing to pop
-const uint32_t kNoMessages = res(128, 3);            // ResultNoMessages: 0x680
-const uint32_t kInvalidOffset = res(128, 503);       // ResultInvalidOffset
-const uint32_t kInvalidStorage = res(128, 511);      // ResultInvalidStorageType
-const uint32_t kOutOfMemory = res(128, 600);         // MemoryAllocationFailed
-// A refused library applet. The SDK (nn::applet::CreateLibraryApplet) fails without aborting only for am descriptions 701..749
-// (anything else, e.g. 128-35 AppletLaunchFailed, ends in svcBreak: work/audit/crashes.md); 712 is Switchbrew's "thread stack pool
-// exhausted (out of memory)", a resource refusal the caller gets back as a plain failure.
-const uint32_t kLibraryAppletFailed = res(128, 712);
-const uint32_t kAppletCanceled = res(128, 22);       // LibraryAppletCanceled: 0x2C80, what JoinLibraryApplet maps to exit reason 1
+// Applet kinds: the low 16 bits of the id the game creates.
+constexpr uint32_t kController = 0x0C, kDataErase = 0x0D, kErrorApplet = 0x0E, kNetConnect = 0x0F, kPlayerSelect = 0x10,
+                   kKeyboard = 0x11, kWeb = 0x13, kShop = 0x14, kOffline = 0x17, kLoginShare = 0x18, kWifiAuth = 0x19,
+                   kMyPage = 0x1A, kGameShare = 0x24;
 
-// Everything the applet manager keeps for the process. Replaced by fresh_state() on start-up and by am_reset().
-struct AmState {
-    std::deque<uint32_t> msgs;                         // the AppletMessage queue, oldest first
-    ServiceEvent msg_event{false};                     // signalled while msgs is not empty
-    ServiceEvent sleep_lock_event{false};
-    ServiceEvent launchable_event{true};               // a library applet can always be launched
-    ServiceEvent tick_event{true};                     // accumulated suspended tick changed
-    ServiceEvent never_event{false};                   // the events that never fire
+bool ends_cancelled(uint32_t kind) {
+    return kind == kShop || kind == kMyPage || kind == kDataErase || kind == kNetConnect || kind == kGameShare;
+}
+
+// ---- bytes ---------------------------------------------------------------------------------------------------------------------
+uint8_t rd8(const Blob& b, uint64_t off) { return off < b.size() ? b[off] : 0; }
+uint16_t rd16(const Blob& b, uint64_t off) {
+    uint16_t v = 0;
+    if (off + 2 <= b.size()) std::memcpy(&v, b.data() + off, 2);
+    return v;
+}
+uint32_t rd32(const Blob& b, uint64_t off) {
+    uint32_t v = 0;
+    if (off + 4 <= b.size()) std::memcpy(&v, b.data() + off, 4);
+    return v;
+}
+uint64_t rd64(const Blob& b, uint64_t off) {
+    uint64_t v = 0;
+    if (off + 8 <= b.size()) std::memcpy(&v, b.data() + off, 8);
+    return v;
+}
+void wr32(Blob& b, size_t off, uint32_t v) { std::memcpy(b.data() + off, &v, 4); }
+void wr64(Blob& b, size_t off, uint64_t v) { std::memcpy(b.data() + off, &v, 8); }
+void append32(Blob& b, uint32_t v) {
+    const size_t at = b.size();
+    b.resize(at + 4);
+    std::memcpy(b.data() + at, &v, 4);
+}
+void put_bytes(Blob& b, size_t off, const void* src, size_t n) {
+    if (n) std::memcpy(b.data() + off, src, n);
+}
+
+// C files closed when they go out of scope (the writers close them themselves, to see fclose's result).
+struct FileCloser {
+    void operator()(std::FILE* f) const { std::fclose(f); }
+};
+using FilePtr = std::unique_ptr<std::FILE, FileCloser>;
+FilePtr open_file(const std::string& path, const char* mode) { return FilePtr(std::fopen(path.c_str(), mode)); }
+
+// ---- text (UTF-16 <-> UTF-8 as the keyboards convert it) -----------------------------------------------------------------------
+void utf8_append(std::string& out, uint32_t cp) {
+    if (cp < 0x80) {   // ASCII: the byte itself
+        out += static_cast<char>(cp);
+        return;
+    }
+    // continuation bytes after the lead: 1 below U+0800, 2 below U+10000, 3 above
+    const int tail = cp >= 0x10000 ? 3 : (cp >= 0x800 ? 2 : 1);
+    static constexpr uint8_t kLead[4] = {0x00, 0xC0, 0xE0, 0xF0};
+    out += static_cast<char>(kLead[tail] | (cp >> (6 * tail)));
+    for (int k = tail - 1; k >= 0; --k) out += static_cast<char>(0x80 | ((cp >> (6 * k)) & 0x3F));
+}
+
+// A surrogate pair becomes one code point; a surrogate without its partner is written as the 3-byte form of its own value.
+std::string to_utf8(const std::u16string& s) {
+    std::string out;
+    out.reserve(s.size());
+    size_t at = 0;
+    while (at < s.size()) {
+        const uint32_t unit = s[at++];
+        const bool high = unit >= 0xD800 && unit <= 0xDBFF;
+        if (high && at < s.size() && s[at] >= 0xDC00 && s[at] <= 0xDFFF) {
+            const uint32_t low = s[at++];
+            utf8_append(out, 0x10000 + (((unit & 0x3FF) << 10) | (low & 0x3FF)));
+        } else {
+            utf8_append(out, unit);
+        }
+    }
+    return out;
+}
+
+// Lead bytes 0xxxxxxx / 110xxxxx / 1110xxxx / 11110xxx start sequences of 1 / 2 / 3 / 4 bytes. Any other lead, or a sequence the string
+// cuts short, gives U+FFFD for one byte; a byte that is not a continuation at position k gives U+FFFD for the k bytes before it (it starts
+// the next character). No overlong or surrogate checks; above U+10FFFF gives U+FFFD.
+std::u16string to_utf16(const std::string& s) {
+    std::u16string out;
+    out.reserve(s.size());
+    size_t i = 0;
+    while (i < s.size()) {
+        const uint8_t lead = static_cast<uint8_t>(s[i]);
+        if (lead < 0x80) {
+            out += static_cast<char16_t>(lead);
+            ++i;
+            continue;
+        }
+        size_t len = 0;
+        uint32_t cp = 0;
+        if ((lead & 0xE0) == 0xC0) {
+            len = 2;
+            cp = lead & 0x1F;
+        } else if ((lead & 0xF0) == 0xE0) {
+            len = 3;
+            cp = lead & 0x0F;
+        } else if ((lead & 0xF8) == 0xF0) {
+            len = 4;
+            cp = lead & 0x07;
+        }
+        if (len == 0 || i + len > s.size()) {
+            out += u'\xFFFD';
+            ++i;
+            continue;
+        }
+        size_t k = 1;
+        for (; k < len; ++k) {
+            const uint8_t c = static_cast<uint8_t>(s[i + k]);
+            if ((c & 0xC0) != 0x80) break;
+            cp = (cp << 6) | (c & 0x3F);
+        }
+        if (k < len) {
+            out += u'\xFFFD';
+            i += k;
+            continue;
+        }
+        i += len;
+        if (cp < 0x10000) {
+            out += static_cast<char16_t>(cp);
+        } else if (cp <= 0x10FFFF) {
+            cp -= 0x10000;
+            out += static_cast<char16_t>(0xD800 + (cp >> 10));
+            out += static_cast<char16_t>(0xDC00 + (cp & 0x3FF));
+        } else {
+            out += u'\xFFFD';
+        }
+    }
+    return out;
+}
+
+// A UTF-16 text field of a storage: at most `units` units from byte `off`, up to a 0 unit or the storage's end; units below 0x20 are left
+// out except LF. Returned as UTF-8.
+std::string read_utf16(const Blob& b, uint64_t off, uint64_t units) {
+    std::u16string t;
+    for (uint64_t i = 0; i < units; ++i) {
+        const uint64_t at = off + 2 * i;
+        if (at + 2 > b.size()) break;
+        const uint16_t u = rd16(b, at);
+        if (u == 0) break;
+        if (u < 0x20 && u != 0x0A) continue;
+        t += static_cast<char16_t>(u);
+    }
+    return to_utf8(t);
+}
+
+std::u16string cut(std::u16string s, size_t units) {
+    if (s.size() > units) s.resize(units);
+    return s;
+}
+
+// ---- am's lock and the process state -------------------------------------------------------------------------------------------
+// Host threads (amctl, prompt answers, the controller applet's wait, web view hosts) take the lock as the IPC threads do.
+std::recursive_mutex& am_lock() {
+    static auto* m = new std::recursive_mutex();
+    return *m;
+}
+using Guard = std::lock_guard<std::recursive_mutex>;
+
+std::atomic<void (*)(int, const char*)> g_on_exit{nullptr};   // amctl::set_exit_hook (not reset)
+std::atomic<bool> g_swkbd_prompt{false};                         // swkbdui::enable_prompt (not reset)
+std::atomic<int> g_content_logged{0};                            // content messages of a stand-in session logged so far (not reset)
+
+struct Proc {
+    std::deque<uint32_t> messages;
+    ServiceEvent message_event{true};
+    ServiceEvent sleep_lock{false};
+    ServiceEvent launchable{true};       // signalled from the start, never cleared
+    ServiceEvent suspended_tick{true};   // the same
+    ServiceEvent never{false};           // the events that never fire: one object, a new handle each time
     bool docked = true;
-    uint8_t focus = kFocusInFocus;
-    bool operation_notify = false;                     // SetOperationModeChangedNotification
-    bool performance_notify = false;                   // SetPerformanceModeChangedNotification
-    bool vr_mode = false;
-    bool vr_mode_3d = false;
+    uint8_t focus = kInFocus;            // what GetCurrentFocusState reports
+    bool host_focus = true;
+    int open_applets = 0;
+    bool focus_notify = true;            // SetFocusHandlingMode's first byte
+    bool mode_notify = false, perf_notify = false;
+    bool vr = false, vr3d = false;
     bool auto_sleep_disabled = false;
     uint32_t idle_extension = 0;
     uint64_t next_layer = 1;
     bool preselected_popped = false;
-    std::vector<std::shared_ptr<Bytes>> user_channel;  // UnpopToUserChannel pushes; PopLaunchParameter(UserChannel) pops the last
-    bool save_extended = false;                        // ExtendSaveData was called for the account save data
-    int64_t save_normal = 0;
-    int64_t save_journal = 0;
+    std::vector<BlobPtr> user_channel;  // oldest first
+    bool save_extended = false;
+    int64_t save_normal = 0, save_journal = 0;
 };
 
-// One mutex for the whole applet manager: the host threads (amctl) and the guest's sessions both go through it.
-std::mutex& mu() {
-    static std::mutex m;
-    return m;
+// [am] launch_user_channel (a plain path, not the title's): the launch parameters the previous program left (EXECUTE_PROGRAM.md format:
+// u32 count, then u64 size and the bytes of each). An entry above 64 MiB or one the file cuts short ends the reading; the entries before
+// it are kept.
+void load_launch_channel(std::vector<BlobPtr>& out) {
+    const std::string chan_file = config_get_str("am", "launch_user_channel", "");
+    if (chan_file.empty()) return;
+    const FilePtr in = open_file(chan_file, "rb");
+    if (!in) {
+        NXLOG_W(kTag, "launch user channel %s cannot be opened", chan_file.c_str());
+        return;
+    }
+    uint32_t count = 0;
+    if (std::fread(&count, 4, 1, in.get()) == 1) {
+        for (uint32_t i = 0; i < count; ++i) {
+            uint64_t size = 0;
+            if (std::fread(&size, 8, 1, in.get()) != 1 || size > kChannelEntryMax) break;
+            auto entry = std::make_shared<Blob>();
+            bool whole = true;
+            for (uint64_t got = 0; got < size;) {   // grown as it is read: the file's length bounds the memory
+                const size_t n = static_cast<size_t>(std::min<uint64_t>(size - got, 1u << 20));
+                const size_t at = entry->size();
+                entry->resize(at + n);
+                if (std::fread(entry->data() + at, 1, n, in.get()) != n) {
+                    whole = false;
+                    break;
+                }
+                got += n;
+            }
+            if (!whole) break;
+            out.push_back(std::move(entry));
+        }
+    }
+    NXLOG_I(kTag, "launch user channel %s: %zu storage(s)", chan_file.c_str(), out.size());
 }
 
-// The state a fresh application starts in: in focus, docked as the profile says, and FocusStateChanged queued (Ryujinx
-// AppletStateMgr queues exactly that; the operation and performance mode messages come only when the mode changes).
-AmState fresh_state() {
-    AmState s;
-    s.docked = profile().docked;
-    s.msgs.push_back(kMsgFocusStateChanged);
-    s.msg_event.signal();
-    return s;
+std::unique_ptr<Proc> start_state() {
+    auto p = std::make_unique<Proc>();
+    p->messages.push_back(kMsgFocusChanged);   // the event starts signalled with it
+    p->docked = profile().docked;
+    load_launch_channel(p->user_channel);
+    return p;
 }
 
-AmState& st() {
-    static AmState s = fresh_state();
-    return s;
+std::unique_ptr<Proc>& proc_slot() {
+    static auto* slot = new std::unique_ptr<Proc>();
+    return *slot;
+}
+// am's lock held.
+Proc& proc() {
+    std::unique_ptr<Proc>& slot = proc_slot();
+    if (!slot) slot = start_state();
+    return *slot;
 }
 
-// Queues one AppletMessage and signals the message event. The caller holds mu().
-void queue_message(uint32_t msg) {
-    st().msgs.push_back(msg);
-    st().msg_event.signal();
+void queue_message(Proc& p, uint32_t msg) {
+    p.messages.push_back(msg);
+    p.message_event.signal();
 }
 
-// A command the console answers without doing anything (am.swipc marks it @stub): logged at Debug, with `zero_bytes` of zero output
-// so the reply has the layout the SDK reads.
-Handler ignored(const char* name, size_t zero_bytes = 0) {
-    return [name, zero_bytes](Request&, Response& rsp) -> uint32_t {
-        NXLOG_D("am", "%s: accepted, nothing done", name);
-        rsp.out.insert(rsp.out.end(), zero_bytes, uint8_t{0});
+// The focus the game sees: in focus while the host window has it and no applet is open. A change is stored always and notified only
+// when the game's focus handling mode asks for it.
+void refresh_focus(Proc& p) {
+    const uint8_t now = p.host_focus && p.open_applets == 0 ? kInFocus : kOutOfFocus;
+    if (now == p.focus) return;
+    p.focus = now;
+    if (p.focus_notify) queue_message(p, kMsgFocusChanged);
+}
+void applet_opened(Proc& p) {
+    ++p.open_applets;
+    refresh_focus(p);
+}
+void applet_closed(Proc& p) {
+    if (p.open_applets > 0) --p.open_applets;
+    refresh_focus(p);
+}
+
+// ---- command helpers -----------------------------------------------------------------------------------------------------------
+// Accepted and ignored: success with `zeros` zero bytes.
+void ignored(ipc::Service& s, uint32_t id, const char* name, size_t zeros = 0) {
+    const std::string iface = s.name();
+    s.add_cmd(id, name, [iface, name, zeros](Req&, Rsp& rsp) -> uint32_t {
+        NXLOG_D(kTag, "%s %s: accepted, nothing to do", iface.c_str(), name);
+        rsp.out.assign(zeros, 0);
         return 0;
-    };
+    });
 }
 
-// Copy handles belong to the client (HIPC copies them, the guest closes its own afterwards): nothing to close here (debug note 122).
-void close_copies(const Request&) {}
-
-// Byte range [off, off + n) lies inside a storage of `size` bytes.
-bool span_ok(uint64_t size, int64_t off, uint64_t n) {
-    return off >= 0 && static_cast<uint64_t>(off) <= size && n <= size - static_cast<uint64_t>(off);
+// A new copy handle of one of the process events.
+void process_event(ipc::Service& s, uint32_t id, const char* name, ServiceEvent Proc::*event) {
+    s.add_cmd(id, name, [event](Req&, Rsp& rsp) -> uint32_t {
+        Guard g(am_lock());
+        rsp.out_copy.push_back((proc().*event).new_handle());
+        return 0;
+    });
 }
 
-bool storage_size_ok(int64_t size) { return size >= 0 && size <= kMaxStorageSize; }
+std::shared_ptr<ipc::Service> empty_iface(const char* name) { return make_iface(name, [](ipc::Service&) {}); }
 
-// Appends `n` bytes of `src` (padded with zeros) to a reply: fixed-size outputs such as the display version.
-void push_bytes(Response& rsp, const void* src, size_t src_len, size_t n) {
-    const size_t at = rsp.out.size();
-    rsp.out.resize(at + n, 0);
-    if (src && src_len) std::memcpy(rsp.out.data() + at, src, src_len < n ? src_len : n);
-}
+// ---- storages ------------------------------------------------------------------------------------------------------------------
+std::shared_ptr<ipc::Service> make_storage_accessor(const BlobPtr& data);
 
-ServicePtr make_accessor(std::shared_ptr<Bytes> data);
-
-// IStorage over a host byte vector (the launch parameters, CreateStorage and the transfer / handle storages). Open is the one
-// command here (IStorage's OpenTransferStorage has no accessor in this model).
-class AmStorage : public Service {
+// am's IStorage: one byte vector, shared with every accessor opened on it. Only these are taken where the game passes a storage in.
+class AmStorage final : public ipc::Service {
 public:
-    explicit AmStorage(std::shared_ptr<Bytes> bytes) : Service("IStorage"), data(std::move(bytes)) {
-        add_cmd(0, "Open", [d = data](Request&, Response& rsp) -> uint32_t {
-            rsp.push_object(make_accessor(d));
+    explicit AmStorage(BlobPtr bytes) : ipc::Service("IStorage"), bytes_(std::move(bytes)) {
+        const BlobPtr data = bytes_;
+        add_cmd(0, "Open", [data](Req&, Rsp& rsp) -> uint32_t {
+            rsp.push_object(make_storage_accessor(data));
             return 0;
         });
     }
-    std::shared_ptr<Bytes> data;
+    const BlobPtr& bytes() const { return bytes_; }
+
+private:
+    BlobPtr bytes_;
 };
 
-ServicePtr new_storage(std::shared_ptr<Bytes> data) { return std::make_shared<AmStorage>(std::move(data)); }
+std::shared_ptr<ipc::Service> storage_object(BlobPtr bytes) { return std::make_shared<AmStorage>(std::move(bytes)); }
 
-// IStorageAccessor: GetSize, Write (guest -> storage), Read (storage -> guest). Ranges past the end are refused, not cut.
-ServicePtr make_accessor(std::shared_ptr<Bytes> data) {
-    return make_iface("IStorageAccessor", [data](Service& s) {
-        s.add_cmd(0, "GetSize", [data](Request&, Response& rsp) -> uint32_t {
+bool object_passed(const Req& req) { return !req.in_services.empty() && req.in_services[0] != nullptr; }
+// The storage passed in, or null when none was or the object is another kind (fs's IStorage has the same name).
+std::shared_ptr<AmStorage> storage_passed(const Req& req) {
+    if (!object_passed(req)) return nullptr;
+    return std::dynamic_pointer_cast<AmStorage>(req.in_services[0]);
+}
+// A copy of a storage's bytes as they are now (am's lock held).
+BlobPtr bytes_now(const AmStorage& st) { return std::make_shared<Blob>(*st.bytes()); }
+
+bool range_inside(int64_t offset, uint64_t n, size_t size) {
+    if (offset < 0 || static_cast<uint64_t>(offset) > size) return false;
+    return n <= size - static_cast<uint64_t>(offset);
+}
+
+std::shared_ptr<ipc::Service> make_storage_accessor(const BlobPtr& data) {
+    return make_iface("IStorageAccessor", [data](ipc::Service& s) {
+        s.add_cmd(0, "GetSize", [data](Req&, Rsp& rsp) -> uint32_t {
+            Guard g(am_lock());
             rsp.push<int64_t>(static_cast<int64_t>(data->size()));
             return 0;
         });
-        s.add_cmd(10, "Write", [data](Request& req, Response&) -> uint32_t {
-            const int64_t off = req.arg<int64_t>(0);
+        s.add_cmd(10, "Write", [data](Req& req, Rsp&) -> uint32_t {
+            const int64_t offset = req.arg<int64_t>(0);
             const ipc::Buffer b = req.in_buf(0);
-            if (!span_ok(data->size(), off, b.size)) return kInvalidOffset;
-            buf_read(b, data->data() + off, b.size);
+            Guard g(am_lock());
+            if (!range_inside(offset, b.size, data->size())) return kBadOffset;
+            if (b.size) buf_read(b, data->data() + offset, b.size);
             return 0;
         });
-        s.add_cmd(11, "Read", [data](Request& req, Response&) -> uint32_t {
-            const int64_t off = req.arg<int64_t>(0);
+        s.add_cmd(11, "Read", [data](Req& req, Rsp&) -> uint32_t {
+            const int64_t offset = req.arg<int64_t>(0);
             const ipc::Buffer b = req.out_buf(0);
-            if (!span_ok(data->size(), off, b.size)) return kInvalidOffset;
-            buf_write(b, data->data() + off, b.size);
+            Guard g(am_lock());
+            if (!range_inside(offset, b.size, data->size())) return kBadOffset;
+            if (b.size) buf_write(b, data->data() + offset, b.size);
             return 0;
         });
     });
 }
 
-// ILockAccessor: granted whenever it is free. The event is signalled while it is free (libnx waits on it before TryLock) and
-// again when it is released.
-struct LockState {
-    bool locked = false;
-    ServiceEvent event{true};
+// CreateTransferMemoryStorage / CreateHandleStorage: the bytes of the memory behind the handle as they are now, when the handle is a
+// transfer memory that holds the whole size and is mapped; zeros otherwise.
+uint32_t memory_storage(const Req& req, Rsp& rsp, int64_t size) {
+    if (size < 0 || size > kStorageMax) return kNoMemory;
+    auto bytes = std::make_shared<Blob>(static_cast<size_t>(size), 0);
+    const uint32_t h = req.in_copy.empty() ? 0 : req.in_copy[0];
+    if (auto tm = kernel::handle_as<kernel::KTransferMemory>(h)) {
+        const uint64_t n = static_cast<uint64_t>(size);
+        if (tm->addr != 0 && n > 0 && n <= tm->size && mem::is_mapped(tm->addr, n))
+            std::memcpy(bytes->data(), reinterpret_cast<const void*>(static_cast<uintptr_t>(tm->addr)), static_cast<size_t>(n));
+    }
+    rsp.push_object(storage_object(std::move(bytes)));
+    return 0;
+}
+
+// Hands the oldest storage of a queue out (the stored bytes themselves); the event is cleared once the queue is empty.
+uint32_t pop_storage(std::deque<BlobPtr>& q, ServiceEvent& ev, Rsp& rsp) {
+    const size_t queued = q.size();
+    if (queued == 0) {
+        ev.clear();
+        return kNoData;
+    }
+    BlobPtr oldest = std::move(q.front());
+    q.pop_front();
+    if (queued == 1) ev.clear();   // that was the last one
+    rsp.push_object(storage_object(std::move(oldest)));
+    return 0;
+}
+
+// ---- library applets -----------------------------------------------------------------------------------------------------------
+struct Applet {
+    uint32_t id = 0, kind = 0, mode = 0;
+    bool inline_kb = false;   // the software keyboard created in a mode other than AllForeground
+    bool started = false, completed = false, owns_focus = false;
+    std::deque<BlobPtr> in_data, game_in, out_data, interactive_out;
+    ServiceEvent end_event, out_ready, reply_ready;
+    // the normal keyboard
+    bool kb_utf8 = false, kb_check = false;
+    uint32_t kb_max = kTextMax;
+    std::u16string kb_text;
+    swkbdui::Request kb_request;
+    // the inline keyboard
+    uint32_t ik_state = 0;    // 0 not initialized, 1 hidden, 2 appearing, 3 shown, 4 disappearing
+    bool ik_utf8 = false, ik_v2 = false, ik_cursor_v2 = false;
+    int32_t ik_cursor = 0;
+    uint32_t ik_max = kTextMax;
+    std::u16string ik_text;
+    uint64_t ik_serial = 0;   // a prompt answer counts only while it is the latest question
+    // the web family
+    bool session = false, page = false, online = false;
+};
+using AppletPtr = std::shared_ptr<Applet>;
+
+// in-data[0] the common arguments, [1] the applet's argument, [2] the keyboard's work buffer.
+const Blob* in_entry(const Applet& a, size_t i) { return i < a.in_data.size() ? a.in_data[i].get() : nullptr; }
+
+// A storage for the game to pop, and its queue's event.
+void enqueue(std::deque<BlobPtr>& q, ServiceEvent& ready, Blob v) {
+    q.push_back(std::make_shared<Blob>(std::move(v)));
+    ready.signal();
+}
+void push_out(Applet& a, Blob v) { enqueue(a.out_data, a.out_ready, std::move(v)); }
+void push_reply(Applet& a, Blob v) { enqueue(a.interactive_out, a.reply_ready, std::move(v)); }
+void take_focus(Applet& a) {
+    a.owns_focus = true;
+    applet_opened(proc());
+}
+void end_applet(Applet& a) {
+    a.completed = true;
+    a.end_event.signal();
+    if (!a.owns_focus) return;
+    a.owns_focus = false;
+    applet_closed(proc());
+}
+
+// ---- the software keyboard, normal (AllForeground) ----
+struct KbConfig {
+    swkbdui::Request request;   // title, texts, limits
+    bool utf8 = false, check = false;
 };
 
-ServicePtr make_lock_accessor() {
-    auto l = std::make_shared<LockState>();
-    return make_iface("ILockAccessor", [l](Service& s) {
-        s.add_cmd(1, "TryLock", [l](Request& req, Response& rsp) -> uint32_t {
-            const bool return_handle = req.arg<uint8_t>(0) != 0;
-            bool acquired;
-            {
-                std::lock_guard<std::mutex> lk(mu());
-                acquired = !l->locked;
-                l->locked = true;
-            }
-            rsp.push<uint8_t>(acquired ? 1 : 0);
-            if (return_handle) rsp.out_copy.push_back(l->event.new_handle());
-            return 0;
-        });
-        s.add_cmd(2, "Unlock", [l](Request&, Response&) -> uint32_t {
-            {
-                std::lock_guard<std::mutex> lk(mu());
-                l->locked = false;
-            }
-            l->event.signal();
-            return 0;
-        });
-        s.add_cmd(3, "GetEvent", [l](Request&, Response& rsp) -> uint32_t {
-            rsp.out_copy.push_back(l->event.new_handle());
-            return 0;
-        });
-        s.add_cmd(4, "IsLocked", [l](Request&, Response& rsp) -> uint32_t {
-            bool locked;
-            {
-                std::lock_guard<std::mutex> lk(mu());
-                locked = l->locked;
-            }
-            rsp.push<uint8_t>(locked ? 1 : 0);
-            return 0;
-        });
-    });
-}
-
-// IAudioController: the expected volumes, kept per controller as ScarletNX keeps them. The fade of ChangeMainAppletMasterVolume is
-// not played.
-struct Volumes {
-    float main = 1.0f;
-    float library = 1.0f;
-};
-
-float clamp_volume(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
-
-ServicePtr make_audio_controller() {
-    auto v = std::make_shared<Volumes>();
-    return make_iface("IAudioController", [v](Service& s) {
-        s.add_cmd(0, "SetExpectedMasterVolume", [v](Request& req, Response&) -> uint32_t {
-            v->main = clamp_volume(req.arg<float>(0));
-            v->library = clamp_volume(req.arg<float>(4));
-            return 0;
-        });
-        s.add_cmd(1, "GetMainAppletExpectedMasterVolume", [v](Request&, Response& rsp) -> uint32_t {
-            rsp.push<float>(v->main);
-            return 0;
-        });
-        s.add_cmd(2, "GetLibraryAppletExpectedMasterVolume", [v](Request&, Response& rsp) -> uint32_t {
-            rsp.push<float>(v->library);
-            return 0;
-        });
-        s.add_cmd(3, "ChangeMainAppletMasterVolume", [v](Request& req, Response&) -> uint32_t {
-            v->main = clamp_volume(req.arg<float>(0));
-            return 0;
-        });
-        s.add_cmd(4, "SetTransparentVolumeRate", ignored("SetTransparentVolumeRate"));
-    });
-}
-
-// [am] resolution = WxH overrides the default resolution of the mode (ICommonStateGetter::GetDefaultDisplayResolution).
-bool parse_resolution(const std::string& text, uint32_t* w, uint32_t* h) {
-    if (text.empty()) return false;
-    char* end = nullptr;
-    const unsigned long a = std::strtoul(text.c_str(), &end, 10);
-    if (end == text.c_str() || *end != 'x') return false;
-    const char* p = end + 1;
-    const unsigned long b = std::strtoul(p, &end, 10);
-    if (end == p || *end != '\0' || a == 0 || b == 0 || a > 0xFFFF || b > 0xFFFF) return false;
-    *w = static_cast<uint32_t>(a);
-    *h = static_cast<uint32_t>(b);
-    return true;
-}
-
-void default_resolution(bool docked, uint32_t* w, uint32_t* h) {
-    *w = docked ? 1920 : 1280;
-    *h = docked ? 1080 : 720;
-    uint32_t cw = 0, ch = 0;
-    if (parse_resolution(nxrt::config_get_str("am", "resolution", ""), &cw, &ch)) {
-        *w = cw;
-        *h = ch;
+// The keyboard config (in-data[1], read when it has at least 0x3D4 bytes): the common offsets, and two layouts for the rest told apart by
+// the size (0x530: the packed one of newer SDKs). The initial text is in the work buffer (in-data[2]).
+KbConfig kb_config(const Applet& a) {
+    KbConfig c;
+    c.request.title = profile().name;
+    c.request.max_len = kTextMax;
+    const Blob* cfg = in_entry(a, 1);
+    if (!cfg || cfg->size() < 0x3D4) {
+        NXLOG_W(kTag, "software keyboard without a usable config (%zu bytes): defaults", cfg ? cfg->size() : size_t{0});
+        return c;
     }
+    const Blob& k = *cfg;
+    const bool packed = k.size() == 0x530;
+    c.request.ok_text = read_utf16(k, 0x04, 9);
+    c.request.header = read_utf16(k, 0x24, 65);
+    c.request.sub = read_utf16(k, 0xA6, 129);
+    c.request.guide = read_utf16(k, 0x1A8, 257);
+    const uint32_t max = rd32(k, 0x3AC);
+    c.request.max_len = max >= 1 && max <= kTextMax ? max : kTextMax;
+    c.request.min_len = rd32(k, 0x3B0);
+    c.request.password = rd32(k, 0x3B4) != 0;
+    c.utf8 = rd8(k, packed ? 0x3AA : 0x3BD) != 0;
+    const int32_t init_off = static_cast<int32_t>(rd32(k, packed ? 0x3BC : 0x3C0));
+    const int32_t init_len = static_cast<int32_t>(rd32(k, packed ? 0x3C0 : 0x3C4));
+    c.check = rd8(k, packed ? 0x48D : 0x3D0) != 0;
+    const Blob* work = in_entry(a, 2);
+    if (work && init_off >= 0 && init_len > 0)
+        c.request.initial = read_utf16(*work, static_cast<uint64_t>(init_off), static_cast<uint64_t>(init_len));
+    return c;
 }
 
-// The events that never fire (GetDefaultDisplayResolutionChangeEvent and the rest): each call hands out a new handle onto this one.
-ServiceEvent& never_event() { return st().never_event; }
-
-// ICommonStateGetter: the message queue, the operation and performance modes, VR mode, the default resolution and the boost calls.
-ServicePtr make_common_state_getter() {
-    return make_iface("ICommonStateGetter", [](Service& s) {
-        s.add_cmd(0, "GetEventHandle", [](Request&, Response& rsp) -> uint32_t {
-            std::lock_guard<std::mutex> lk(mu());
-            rsp.out_copy.push_back(st().msg_event.new_handle());
-            return 0;
-        });
-        s.add_cmd(1, "ReceiveMessage", [](Request&, Response& rsp) -> uint32_t {
-            std::lock_guard<std::mutex> lk(mu());
-            AmState& a = st();
-            if (a.msgs.empty()) {
-                a.msg_event.clear();
-                return kNoMessages;
-            }
-            rsp.push<uint32_t>(a.msgs.front());
-            a.msgs.pop_front();
-            if (a.msgs.empty()) a.msg_event.clear();
-            return 0;
-        });
-        s.add_cmd(2, "GetThisAppletKind", ignored("GetThisAppletKind", 8));
-        s.add_cmd(5, "GetOperationMode", [](Request&, Response& rsp) -> uint32_t {   // nn::oe::OperationMode: Handheld 0, Console 1
-            std::lock_guard<std::mutex> lk(mu());
-            rsp.push<uint8_t>(st().docked ? 1 : 0);
-            return 0;
-        });
-        s.add_cmd(6, "GetPerformanceMode", [](Request&, Response& rsp) -> uint32_t {   // nn::oe::PerformanceMode: Handheld 0, Boost 1
-            std::lock_guard<std::mutex> lk(mu());
-            rsp.push<uint32_t>(st().docked ? 1u : 0u);
-            return 0;
-        });
-        s.add_cmd(8, "GetBootMode", ignored("GetBootMode", 1));
-        s.add_cmd(9, "GetCurrentFocusState", [](Request&, Response& rsp) -> uint32_t {
-            std::lock_guard<std::mutex> lk(mu());
-            rsp.push<uint8_t>(st().focus);
-            return 0;
-        });
-        s.add_cmd(10, "RequestToAcquireSleepLock", [](Request&, Response&) -> uint32_t {
-            st().sleep_lock_event.signal();
-            return 0;
-        });
-        s.add_cmd(11, "ReleaseSleepLock", ignored("ReleaseSleepLock"));
-        s.add_cmd(12, "ReleaseSleepLockTransiently", ignored("ReleaseSleepLockTransiently"));
-        s.add_cmd(13, "GetAcquiredSleepLockEvent", [](Request&, Response& rsp) -> uint32_t {
-            rsp.out_copy.push_back(st().sleep_lock_event.new_handle());
-            return 0;
-        });
-        s.add_cmd(30, "GetHomeButtonReaderLockAccessor", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push_object(make_lock_accessor());
-            return 0;
-        });
-        s.add_cmd(31, "GetReaderLockAccessorEx", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push_object(make_lock_accessor());
-            return 0;
-        });
-        s.add_cmd(32, "GetWriterLockAccessorEx", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push_object(make_lock_accessor());
-            return 0;
-        });
-        s.add_cmd(50, "IsVrModeEnabled", [](Request&, Response& rsp) -> uint32_t {
-            std::lock_guard<std::mutex> lk(mu());
-            rsp.push<uint8_t>(st().vr_mode ? 1 : 0);
-            return 0;
-        });
-        s.add_cmd(51, "SetVrModeEnabled", [](Request& req, Response&) -> uint32_t {
-            std::lock_guard<std::mutex> lk(mu());
-            st().vr_mode = req.arg<uint8_t>(0) != 0;
-            return 0;
-        });
-        s.add_cmd(52, "SetLcdBacklighOffEnabled", ignored("SetLcdBacklighOffEnabled"));
-        s.add_cmd(53, "BeginVrModeEx", [](Request&, Response&) -> uint32_t {
-            std::lock_guard<std::mutex> lk(mu());
-            st().vr_mode = true;
-            return 0;
-        });
-        s.add_cmd(54, "EndVrModeEx", [](Request&, Response&) -> uint32_t {
-            std::lock_guard<std::mutex> lk(mu());
-            st().vr_mode = false;
-            return 0;
-        });
-        s.add_cmd(55, "IsInControllerFirmwareUpdateSection", ignored("IsInControllerFirmwareUpdateSection", 1));
-        s.add_cmd(59, "SetVrPositionForDebug", ignored("SetVrPositionForDebug"));
-        s.add_cmd(60, "GetDefaultDisplayResolution", [](Request&, Response& rsp) -> uint32_t {
-            bool docked;
-            {
-                std::lock_guard<std::mutex> lk(mu());
-                docked = st().docked;
-            }
-            uint32_t w = 0, h = 0;
-            default_resolution(docked, &w, &h);
-            rsp.push<int32_t>(static_cast<int32_t>(w));
-            rsp.push<int32_t>(static_cast<int32_t>(h));
-            return 0;
-        });
-        s.add_cmd(61, "GetDefaultDisplayResolutionChangeEvent", [](Request&, Response& rsp) -> uint32_t {
-            rsp.out_copy.push_back(never_event().new_handle());
-            return 0;
-        });
-        s.add_cmd(62, "GetHdcpAuthenticationState", ignored("GetHdcpAuthenticationState", 4));
-        s.add_cmd(63, "GetHdcpAuthenticationStateChangeEvent", [](Request&, Response& rsp) -> uint32_t {
-            rsp.out_copy.push_back(never_event().new_handle());
-            return 0;
-        });
-        s.add_cmd(66, "SetCpuBoostMode", ignored("SetCpuBoostMode"));
-        s.add_cmd(67, "CancelCpuBoostMode", ignored("CancelCpuBoostMode"));
-        s.add_cmd(68, "GetBuiltInDisplayType", ignored("GetBuiltInDisplayType", 4));
-        // 21.0.0+: the start-up logo is gone at once (there is none here), so the message is queued when it is asked for.
-        s.add_cmd(130, "EnableStartupLogoDisappearedMessage", [](Request&, Response&) -> uint32_t {
-            std::lock_guard<std::mutex> lk(mu());
-            queue_message(kMsgStartupLogoDisappeared);
-            return 0;
-        });
-        s.add_cmd(300, "GetSettingsPlatformRegion", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push<uint32_t>(1);   // Global, as ScarletNX answers
-            return 0;
-        });
-        s.add_cmd(900, "SetRequestExitToLibraryAppletAtExecuteNextProgramEnabled",
-                  ignored("SetRequestExitToLibraryAppletAtExecuteNextProgramEnabled"));
-        s.add_cmd(1000, "BeginVrMode3d", [](Request&, Response&) -> uint32_t {
-            std::lock_guard<std::mutex> lk(mu());
-            st().vr_mode_3d = true;
-            return 0;
-        });
-        s.add_cmd(1001, "EndVrMode3d", [](Request&, Response&) -> uint32_t {
-            std::lock_guard<std::mutex> lk(mu());
-            st().vr_mode_3d = false;
-            return 0;
-        });
-        s.add_cmd(1002, "IsVrModeEnabled3d", [](Request&, Response& rsp) -> uint32_t {
-            std::lock_guard<std::mutex> lk(mu());
-            rsp.push<uint8_t>(st().vr_mode_3d ? 1 : 0);
-            return 0;
-        });
-    });
-}
-
-// ISelfController: exit, the notification flags (real state), the display layers, the idle and sleep settings.
-ServicePtr make_self_controller() {
-    return make_iface("ISelfController", [](Service& s) {
-        // Switch 2 ([S2], switchbrew): 2000 GetGraphicsSupervisor hands out a TIPC session (a move handle, also from a domain);
-        // 2100-2402 switch recording / sharing / copyright layers and audio sharing on or off, which a PC run has nothing to do for.
-        s.add_cmd(2000, "GetGraphicsSupervisor", [](Request&, Response& rsp) -> uint32_t {
-            const uint32_t h = create_session_handle(std::make_shared<ipc::StubService>("GraphicsSupervisor"));
-            if (!h) return kernel::kStubService;
-            rsp.out_move.push_back(h);
-            return 0;
-        });
-        for (uint32_t id : {2100u, 2200u, 2300u, 2400u, 2401u, 2402u})
-            s.add_cmd(id, "SetLayerOrAudioSharingEnabled (S2)", [](Request&, Response&) -> uint32_t { return 0; });
-        // Exit: the application asks to end. The run is ended by the graphics shell (src/gfx), which this library does not link, so
-        // here the request is logged and answered with success only.
-        s.add_cmd(0, "Exit", [](Request&, Response&) -> uint32_t {
-            NXLOG_W("am", "Exit requested by the application: nothing ends the run here (the shell is not linked into the services)");
-            return 0;
-        });
-        s.add_cmd(1, "LockExit", ignored("LockExit"));
-        s.add_cmd(2, "UnlockExit", ignored("UnlockExit"));
-        s.add_cmd(3, "EnterFatalSection", ignored("EnterFatalSection"));
-        s.add_cmd(4, "LeaveFatalSection", ignored("LeaveFatalSection"));
-        s.add_cmd(9, "GetLibraryAppletLaunchableEvent", [](Request&, Response& rsp) -> uint32_t {
-            rsp.out_copy.push_back(st().launchable_event.new_handle());
-            return 0;
-        });
-        s.add_cmd(10, "SetScreenShotPermission", ignored("SetScreenShotPermission"));
-        s.add_cmd(11, "SetOperationModeChangedNotification", [](Request& req, Response&) -> uint32_t {
-            std::lock_guard<std::mutex> lk(mu());
-            st().operation_notify = req.arg<uint8_t>(0) != 0;
-            return 0;
-        });
-        s.add_cmd(12, "SetPerformanceModeChangedNotification", [](Request& req, Response&) -> uint32_t {
-            std::lock_guard<std::mutex> lk(mu());
-            st().performance_notify = req.arg<uint8_t>(0) != 0;
-            return 0;
-        });
-        s.add_cmd(13, "SetFocusHandlingMode", ignored("SetFocusHandlingMode"));
-        s.add_cmd(14, "SetRestartMessageEnabled", ignored("SetRestartMessageEnabled"));
-        s.add_cmd(16, "SetOutOfFocusSuspendingEnabled", ignored("SetOutOfFocusSuspendingEnabled"));
-        s.add_cmd(40, "CreateManagedDisplayLayer", [](Request&, Response& rsp) -> uint32_t {
-            std::lock_guard<std::mutex> lk(mu());
-            rsp.push<uint64_t>(st().next_layer++);
-            return 0;
-        });
-        s.add_cmd(41, "IsSystemBufferSharingEnabled", ignored("IsSystemBufferSharingEnabled"));
-        s.add_cmd(44, "CreateManagedDisplaySeparableLayer", [](Request&, Response& rsp) -> uint32_t {
-            std::lock_guard<std::mutex> lk(mu());
-            rsp.push<uint64_t>(st().next_layer++);
-            rsp.push<uint64_t>(st().next_layer++);
-            return 0;
-        });
-        s.add_cmd(62, "SetIdleTimeDetectionExtension", [](Request& req, Response&) -> uint32_t {
-            std::lock_guard<std::mutex> lk(mu());
-            st().idle_extension = req.arg<uint32_t>(0);
-            return 0;
-        });
-        s.add_cmd(63, "GetIdleTimeDetectionExtension", [](Request&, Response& rsp) -> uint32_t {
-            std::lock_guard<std::mutex> lk(mu());
-            rsp.push<uint32_t>(st().idle_extension);
-            return 0;
-        });
-        s.add_cmd(68, "SetAutoSleepDisabled", [](Request& req, Response&) -> uint32_t {
-            std::lock_guard<std::mutex> lk(mu());
-            st().auto_sleep_disabled = req.arg<uint8_t>(0) != 0;
-            return 0;
-        });
-        s.add_cmd(69, "IsAutoSleepDisabled", [](Request&, Response& rsp) -> uint32_t {
-            std::lock_guard<std::mutex> lk(mu());
-            rsp.push<uint8_t>(st().auto_sleep_disabled ? 1 : 0);
-            return 0;
-        });
-        s.add_cmd(90, "GetAccumulatedSuspendedTickValue", ignored("GetAccumulatedSuspendedTickValue", 8));
-        s.add_cmd(91, "GetAccumulatedSuspendedTickChangedEvent", [](Request&, Response& rsp) -> uint32_t {
-            rsp.out_copy.push_back(st().tick_event.new_handle());
-            return 0;
-        });
-        s.add_cmd(100, "SetAlbumImageTakenNotificationEnabled", ignored("SetAlbumImageTakenNotificationEnabled"));
-        s.add_cmd(110, "SetApplicationAlbumUserData", ignored("SetApplicationAlbumUserData"));
-        s.add_cmd(120, "SaveCurrentScreenshot", ignored("SaveCurrentScreenshot"));
-    });
-}
-
-// IWindowController: the applet resource user id of the one application (the value Wonder answers).
-ServicePtr make_window_controller() {
-    return make_iface("IWindowController", [](Service& s) {
-        s.add_cmd(1, "GetAppletResourceUserId", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push<uint64_t>(kAppletResourceUserId);
-            return 0;
-        });
-        s.add_cmd(10, "AcquireForegroundRights", ignored("AcquireForegroundRights"));
-        s.add_cmd(11, "ReleaseForegroundRights", ignored("ReleaseForegroundRights"));
-        s.add_cmd(12, "RejectToChangeIntoBackground", ignored("RejectToChangeIntoBackground"));
-    });
-}
-
-// ---- library applets -------------------------------------------------------------------------------------------------------------
-// Every applet Pokopia's main (and the SDK functions it imports) can create gets its own answer; the list and the reasons are in
-// docs/IPC_ANSWERS.md. The software keyboard (LibraryAppletId 0x11) in its normal, full-screen form answers a text, the player select
-// (0x10) answers the one user or, for its network-account modes, that the player backed out; the error applet (0x0E) logs the error it
-// was given; the shop, friends, data management, network connection and GameShare matchmaking applets end as cancelled by the player
-// (offline: nothing to buy, invite, free or connect to). An applet id nothing here knows ends at once with no output. Command ids
-// follow the Switchbrew "Applet Manager services" page (IAppletAccessor / ILibraryAppletAccessor). The keyboard storages follow Ryujinx
-// src/Ryujinx.HLE/HOS/Applets/SoftwareKeyboard (MIT: SoftwareKeyboardConfig, the 0x7D8-byte output) and Eden / yuzu
-// applet_software_keyboard_types.h (GPL-3.0-or-later); the accessor's channel model follows the user's Afterpulse runtime (am.cpp, same
-// licence). Switch 2 games pass the applet id with more bits above it (Pokopia: 0x1020011 for the keyboard), so the low 16 bits pick it.
-constexpr uint32_t kAppletIdError = 0x0E;                     // LibraryAppletError (Pokopia: 0x100000E, nn::err::ShowError)
-constexpr uint32_t kAppletIdShop = 0x14;                      // LibraryAppletShop (0x1000014, nn::ec::detail::ShowShopPage)
-// LibraryAppletMyPage (0x100001A): nn::friends::StartFriendInvitation / StartSendingFriendInvitation (sdk 0x75003e32a0, 0x75003e33b0)
-// run it with a 0x10A8-byte argument (kind 8 / 9). CreateMyPageApplet aborts if creating it fails, so it is created and ends as
-// cancelled at once (offline: no invitation can be sent); nn::la::StartLibraryApplet turns that into a failure and the friends call
-// returns 0x3C79 (121-30) to the game, which ignores it (StartFriendInvitation) or takes its failure path (StartSending...).
-constexpr uint32_t kAppletIdMyPage = 0x1A;
-// LibraryAppletDataErase (0x100000D): nn::fs::EnsureSaveData / ExtendSaveData (sdk 0x75003e6a78, 0x75003e6d7c) run it through
-// nn::la::StartLibraryAppletEasy when IApplicationFunctions reports a required size above 0 (the save does not fit). Ends cancelled:
-// the fs call then returns 0x3E02 (not enough space), as when the player leaves data management without freeing anything.
-constexpr uint32_t kAppletIdDataErase = 0x0D;
-// LibraryAppletNetConnect (0x0F): nn::nifm::HandleNetworkRequestErrorResult. Pokopia's two imports of it are answered before the SDK
-// gets here (core/switch2.cpp); if it is reached anyway it ends cancelled (the network problem is not resolved).
-constexpr uint32_t kAppletIdNetConnect = 0x0F;
-// GameShare matchmaking (0x1000024, or 0x1030024 for the other StreamPlayType): nn::streamplay::detail::ShowMatchmakeSupportCore
-// (sdk 0x75006b9420), from nn::streamplay::OpenSessionWithMatchmakeSupport (game: main 0x7101132f60, GameShare host). Ends cancelled:
-// the SDK returns 0x3D1F, which the game (main 0x7101133704) treats as the player backing out, with no error shown.
-constexpr uint32_t kAppletIdMatchmake = 0x24;
-constexpr uint32_t kAppletIdPlayerSelect = 0x10;              // nn::applet::AppletId LibraryAppletPlayerSelect
-// The player select's UiSettings (in data 1, 0xA0 bytes): u32 mode at 0 (nn::account::detail::StartPselApplet, sdk 0x75001844c0,
-// pushes it and pops a 0x18-byte {u64 result, Uid} answer whose result it returns). Mode 0 is ShowUserSelector; 2 is
-// EnsureNetworkServiceAccountAvailable, 10 / 11 ShowLicenseRequirementsForNetworkService (also from nn::err::ShowError for some
-// network results). Offline there is no Nintendo Account to link and no Switch Online licence, so every mode but the user selector
-// answers ResultCancelledByUser (124-1, 0x27C). Pokopia's callers (main 0x7100542f20, 0x7100583860 ...) read 0x27C as "the player
-// backed out" and stop quietly; a success from mode 2 would make them retry the token request in a loop.
-constexpr uint32_t kPselModeUserSelector = 0;
-constexpr uint32_t kAccountCancelledByUser = 0x27C;
-constexpr uint32_t kAppletIdSwkbd = 0x11;                     // LibraryAppletSwkbd
-constexpr uint32_t kAppletModeAllForeground = 0;              // nn::applet::LibraryAppletMode: the normal keyboard
-constexpr size_t kSwkbdStringSize = 0x7D4;                    // STRING_BUFFER_SIZE
-constexpr size_t kSwkbdOutputSize = 4 + kSwkbdStringSize;     // SwkbdResult + string: 0x7D8
-constexpr size_t kSwkbdTextCheckSize = 4 + kSwkbdStringSize;  // SwkbdTextCheck the application pushes back: 0x7D8
-constexpr uint32_t kSwkbdDefaultMaxLength = 500;              // DEFAULT_MAX_TEXT_LENGTH
-constexpr uint32_t kSwkbdResultOk = 0;
-constexpr uint32_t kSwkbdResultCancel = 1;
-constexpr uint32_t kTextCheckSuccess = 0;                     // SwkbdTextCheckResult: Success 0, Failure 1, Confirm 2, Silent 3
-constexpr uint32_t kTextCheckConfirm = 2;
-// Keyboard config storage field offsets. The text fields, the lengths and the password mode sit at the same offsets in every version.
-constexpr size_t kCfgOkText = 0x04;            // u16[9]
-constexpr size_t kCfgHeaderText = 0x24;        // u16[65]
-constexpr size_t kCfgSubText = 0xA6;           // u16[129]
-constexpr size_t kCfgGuideText = 0x1A8;        // u16[257]
-constexpr size_t kCfgMaxTextLength = 0x3AC;
-constexpr size_t kCfgMinTextLength = 0x3B0;
-constexpr size_t kCfgPasswordMode = 0x3B4;
-constexpr size_t kCfgCommonSize = 0x3D4;
-// The flags and the initial string moved. Older SDKs push the application's KeyboardConfig as is (Ryujinx SoftwareKeyboardConfig,
-// natural alignment). The 0x530-byte config (library version 0x140010, Pokopia 2.0.1a) is repacked by the shim: sdk
-// nn::swkbd::ShowKeyboard(String*, const ShowKeyboardArg&, Trigger) at 0x750054e700 copies use_utf8 (arg 0x3BD) to 0x3AA, the initial
-// string offset/length (arg 0x3C0/0x3C4) to 0x3BC/0x3C0 and use_text_check (arg 0x3D0) to 0x48D. Read with the old offsets, use_utf8
-// came from a byte of the initial string offset (always 0): the text went back as UTF-16 to a game reading UTF-8, "Alex" -> "A".
-struct SwkbdCfgLayout {
-    size_t use_utf8, initial_offset, initial_length /* UTF-16 characters */, use_text_check;
-};
-constexpr size_t kCfgPackedSize = 0x530;
-constexpr SwkbdCfgLayout kCfgLayoutOld{0x3BD, 0x3C0, 0x3C4, 0x3D0};
-constexpr SwkbdCfgLayout kCfgLayoutPacked{0x3AA, 0x3BC, 0x3C0, 0x48D};
-constexpr size_t kCommonArgsLibraryVersion = 8;               // CommonArguments: version, size, library_version, theme ...
-
-std::string utf16_to_utf8(const std::u16string& s) {
-    std::string out;
-    for (size_t i = 0; i < s.size(); ++i) {
-        uint32_t cp = s[i];
-        if (cp >= 0xD800 && cp < 0xDC00 && i + 1 < s.size() && s[i + 1] >= 0xDC00 && s[i + 1] < 0xE000) {
-            cp = 0x10000 + ((cp - 0xD800) << 10) + (static_cast<uint32_t>(s[i + 1]) - 0xDC00);
-            ++i;
-        }
-        if (cp < 0x80) {
-            out.push_back(static_cast<char>(cp));
-        } else if (cp < 0x800) {
-            out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
-            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-        } else if (cp < 0x10000) {
-            out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
-            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-        } else {
-            out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
-            out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
-            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-        }
+// The text in the config's encoding: UTF-8 up to `cap8` bytes, or UTF-16LE up to `cap16` bytes.
+Blob kb_text_bytes(const std::u16string& text, bool utf8, size_t cap8, size_t cap16) {
+    if (utf8) {
+        const std::string s = to_utf8(text);
+        return Blob(s.begin(), s.begin() + static_cast<std::ptrdiff_t>(std::min(s.size(), cap8)));
     }
-    return out;
-}
-
-std::u16string utf8_to_utf16(const std::string& s) {
-    std::u16string out;
-    for (size_t i = 0; i < s.size();) {
-        const uint8_t c = static_cast<uint8_t>(s[i]);
-        uint32_t cp = 0xFFFD;
-        size_t n = 1;
-        if (c < 0x80) cp = c;
-        else if ((c >> 5) == 0x6) { n = 2; cp = c & 0x1Fu; }
-        else if ((c >> 4) == 0xE) { n = 3; cp = c & 0x0Fu; }
-        else if ((c >> 3) == 0x1E) { n = 4; cp = c & 0x07u; }
-        if (n > 1) {
-            if (i + n > s.size()) { cp = 0xFFFD; n = 1; }
-            for (size_t k = 1; k < n; ++k) {
-                const uint8_t cc = static_cast<uint8_t>(s[i + k]);
-                if ((cc >> 6) != 0x2) { cp = 0xFFFD; n = k; break; }
-                cp = (cp << 6) | (cc & 0x3Fu);
-            }
-        }
-        i += n;
-        if (cp >= 0x10000 && cp <= 0x10FFFF) {
-            cp -= 0x10000;
-            out.push_back(static_cast<char16_t>(0xD800 + (cp >> 10)));
-            out.push_back(static_cast<char16_t>(0xDC00 + (cp & 0x3FF)));
-        } else {
-            out.push_back(static_cast<char16_t>(cp > 0xFFFF ? 0xFFFD : cp));
-        }
-    }
-    return out;
-}
-
-template <typename T>
-T read_at(const Bytes& b, size_t off, T fallback) {
-    T v = fallback;
-    if (off + sizeof(T) <= b.size()) std::memcpy(&v, b.data() + off, sizeof(T));
+    Blob v(std::min(text.size() * 2, cap16));
+    put_bytes(v, 0, text.data(), v.size());
     return v;
 }
 
-// A NUL-terminated UTF-16 string of at most `chars` units at `off`, as UTF-8 (control characters dropped, as Ryujinx strips them).
-std::string read_u16_text(const Bytes& b, size_t off, size_t chars) {
-    std::u16string t;
-    for (size_t i = 0; i < chars && off + 2 * i + 2 <= b.size(); ++i) {
-        char16_t c;
-        std::memcpy(&c, b.data() + off + 2 * i, 2);
-        if (c == 0) break;
-        if (c >= 0x20 || c == 0x0A) t.push_back(c);
-    }
-    return utf16_to_utf8(t);
-}
-
-// A NUL-terminated UTF-8 string of at most `bytes` bytes at `off` (control characters dropped, as in read_u16_text).
-std::string read_u8_text(const Bytes& b, size_t off, size_t bytes) {
-    std::string t;
-    for (size_t i = 0; i < bytes && off + i < b.size(); ++i) {
-        const char c = static_cast<char>(b[off + i]);
-        if (c == 0) break;
-        if (static_cast<uint8_t>(c) >= 0x20 || c == '\n') t.push_back(c);
-    }
-    return t;
-}
-
-std::atomic<bool>& prompt_flag() {
-    static std::atomic<bool> on{false};
-    return on;
-}
-
-// One library applet's channels and state. Guarded by mu() (the prompt thread takes it to answer).
-struct AppletState {
-    uint32_t id = 0;            // the low 16 bits of what the game asked for
-    uint32_t full_id = 0;
-    uint32_t mode = 0;
-    bool started = false;
-    bool completed = false;
-    std::deque<std::shared_ptr<Bytes>> in_data;            // PushInData, oldest first
-    std::deque<std::shared_ptr<Bytes>> interactive_in;     // PushInteractiveInData
-    std::deque<std::shared_ptr<Bytes>> out_data;           // PopOutData
-    std::deque<std::shared_ptr<Bytes>> interactive_out;    // PopInteractiveOutData
-    ServiceEvent state_event{false};                       // signalled once the applet has ended
-    ServiceEvent out_event{false};                         // signalled while out_data is not empty
-    ServiceEvent interactive_out_event{false};             // signalled while interactive_out is not empty
-    bool utf8 = false;                                     // software keyboard: the config's use_utf8
-    bool text_check = false;                               // software keyboard: the config's use_text_check
-    std::u16string text;                                   // software keyboard: the text answered
-    swkbdui::Request req;                                  // software keyboard: what the prompt shows
-};
-
-// Ends the applet: it has exited and its state-changed event fires. The caller holds mu().
-void applet_finish(AppletState& a) {
-    a.completed = true;
-    a.state_event.signal();
-}
-
-void push_out(AppletState& a, std::shared_ptr<Bytes> d) {
-    a.out_data.push_back(std::move(d));
-    a.out_event.signal();
-}
-
-// Copies `text` into a zeroed buffer of `cap` bytes at `dst`, as UTF-8 or UTF-16LE, leaving room for the NUL.
-void put_text(uint8_t* dst, size_t cap, const std::u16string& text, bool utf8) {
-    if (utf8) {
-        const std::string t = utf16_to_utf8(text);
-        std::memcpy(dst, t.data(), t.size() < cap - 1 ? t.size() : cap - 1);
-    } else {
-        const size_t n = text.size() * 2;
-        std::memcpy(dst, text.data(), n < cap - 2 ? n : cap - 2);
-    }
-}
-
-// The 0x7D8-byte keyboard output: SwkbdResult, then the text, zero padded. The applet then ends. The caller holds mu().
-void swkbd_submit(AppletState& a, uint32_t result) {
-    auto out = std::make_shared<Bytes>(kSwkbdOutputSize, uint8_t{0});
-    std::memcpy(out->data(), &result, 4);
-    if (result == kSwkbdResultOk) put_text(out->data() + 4, kSwkbdStringSize, a.text, a.utf8);
-    push_out(a, out);
-    applet_finish(a);
-}
-
-// The text is known (or the player cancelled): submit it, or with text check on hand it to the application first (u64 byte size with
-// the NUL, then the string: 8 + 0x7D4 bytes); its answer comes back through PushInteractiveInData. The caller holds mu().
-void swkbd_answer(AppletState& a, bool ok) {
-    if (a.completed) return;
+// The output storage (0x7D8): u32 result (0 OK, 1 cancel), then the text on OK.
+Blob kb_output(const Applet& a, bool ok) {
+    Blob v(0x7D8, 0);
     if (!ok) {
-        NXLOG_I("am", "swkbd: cancelled");
-        swkbd_submit(a, kSwkbdResultCancel);
-        return;
+        wr32(v, 0, 1);
+        return v;
     }
-    NXLOG_I("am", "swkbd: answering \"%s\"%s", utf16_to_utf8(a.text).c_str(), a.text_check ? " (to the game's text check first)" : "");
-    if (!a.text_check) {
-        swkbd_submit(a, kSwkbdResultOk);
-        return;
-    }
-    auto out = std::make_shared<Bytes>(8 + kSwkbdStringSize, uint8_t{0});
-    // The text check uses the config's encoding, like the final result: with use_utf8 the game reads UTF-8 here too (and answers in
-    // UTF-8). UTF-16 "Alex" read as UTF-8 is "A" then NULs, which the game's name check refuses.
-    const uint64_t size = a.utf8 ? utf16_to_utf8(a.text).size() + 1 : (a.text.size() + 1) * 2;
-    std::memcpy(out->data(), &size, 8);
-    put_text(out->data() + 8, kSwkbdStringSize, a.text, a.utf8);
-    a.interactive_out.push_back(out);
-    a.interactive_out_event.signal();
+    const Blob t = kb_text_bytes(a.kb_text, a.kb_utf8, 0x7D3, 0x7D2);
+    put_bytes(v, 4, t.data(), t.size());
+    return v;
 }
 
-// Asks the on-screen keyboard on its own thread; the answer arrives with mu() taken there.
-void swkbd_prompt_async(const std::shared_ptr<AppletState>& ap) {
-    swkbdui::Request r = ap->req;
-    std::thread([ap, r] {
-        std::string t;
-        const bool ok = swkbdui::ask(r, &t);
-        std::u16string u = utf8_to_utf16(t);
-        std::lock_guard<std::mutex> lk(mu());
-        if (ok) {
-            const uint32_t max_len = r.max_len ? r.max_len : kSwkbdDefaultMaxLength;
-            if (u.size() > max_len) u.resize(max_len);
-            ap->text = u;
-        }
-        swkbd_answer(*ap, ok);
+// The text check request (interactive out, 0x7DC): u64 the text's size with its NUL, then the text.
+Blob kb_check_request(const Applet& a) {
+    Blob v(0x7DC, 0);
+    const Blob t = kb_text_bytes(a.kb_text, a.kb_utf8, 0x7D3, 0x7D2);
+    wr64(v, 0, a.kb_utf8 ? t.size() + 1 : (t.size() / 2 + 1) * 2);
+    put_bytes(v, 8, t.data(), t.size());
+    return v;
+}
+
+void kb_answer(Applet& a, bool ok, const std::string& text) {
+    if (!ok) {
+        push_out(a, kb_output(a, false));
+        end_applet(a);
+        return;
+    }
+    a.kb_text = cut(to_utf16(text), a.kb_max);
+    if (a.kb_check) {
+        push_reply(a, kb_check_request(a));   // the game checks the text first; the applet stays open
+        return;
+    }
+    push_out(a, kb_output(a, true));
+    end_applet(a);
+}
+
+// The on-screen keyboard: asked on a thread of its own (it waits for the player), the answer applied under am's lock when it comes.
+void kb_ask(const AppletPtr& ap, const swkbdui::Request& r) {
+    std::thread([applet = ap, question = r] {
+        std::string text;
+        const bool ok = swkbdui::ask(question, &text);
+        Guard g(am_lock());
+        if (applet->completed) return;
+        kb_answer(*applet, ok, text);
     }).detach();
 }
 
-// Start of the normal keyboard: in data 0 is CommonArguments, 1 the keyboard config, 2 the work buffer (initial text, dictionary).
-// The caller holds mu().
-void swkbd_start(const std::shared_ptr<AppletState>& ap) {
-    AppletState& a = *ap;
-    std::shared_ptr<Bytes> common = a.in_data.size() > 0 ? a.in_data[0] : nullptr;
-    std::shared_ptr<Bytes> cfg = a.in_data.size() > 1 ? a.in_data[1] : nullptr;
-    std::shared_ptr<Bytes> work = a.in_data.size() > 2 ? a.in_data[2] : nullptr;
-    const uint32_t version = common ? read_at<uint32_t>(*common, kCommonArgsLibraryVersion, 0) : 0;
-    uint32_t max_len = kSwkbdDefaultMaxLength;
-    swkbdui::Request& r = a.req;
-    r.title = profile().name;
-    if (cfg && cfg->size() >= kCfgCommonSize) {
-        const SwkbdCfgLayout& l = cfg->size() == kCfgPackedSize ? kCfgLayoutPacked : kCfgLayoutOld;
-        const uint32_t m = read_at<uint32_t>(*cfg, kCfgMaxTextLength, 0);
-        if (m > 0 && m <= kSwkbdDefaultMaxLength) max_len = m;
-        r.min_len = read_at<uint32_t>(*cfg, kCfgMinTextLength, 0);
-        r.password = read_at<uint32_t>(*cfg, kCfgPasswordMode, 0) != 0;
-        a.utf8 = read_at<uint8_t>(*cfg, l.use_utf8, 0) != 0;
-        a.text_check = read_at<uint8_t>(*cfg, l.use_text_check, 0) != 0;
-        r.ok_text = read_u16_text(*cfg, kCfgOkText, 9);
-        r.header = read_u16_text(*cfg, kCfgHeaderText, 65);
-        r.sub = read_u16_text(*cfg, kCfgSubText, 129);
-        r.guide = read_u16_text(*cfg, kCfgGuideText, 257);
-        const int32_t ioff = read_at<int32_t>(*cfg, l.initial_offset, 0);
-        const int32_t ilen = read_at<int32_t>(*cfg, l.initial_length, 0);
-        if (work && ioff >= 0 && ilen > 0) r.initial = read_u16_text(*work, static_cast<size_t>(ioff), static_cast<size_t>(ilen));
+void kb_start(const AppletPtr& ap) {
+    Applet& a = *ap;
+    const KbConfig c = kb_config(a);
+    a.kb_utf8 = c.utf8;
+    a.kb_check = c.check;
+    a.kb_max = c.request.max_len;
+    a.kb_request = c.request;
+    if (config_has("applet", "swkbd_text")) {
+        kb_answer(a, true, config_get_str("applet", "swkbd_text", ""));
+    } else if (swkbdui::prompt_enabled()) {
+        kb_ask(ap, a.kb_request);
     } else {
-        NXLOG_W("am", "swkbd: no keyboard config among the %zu storages pushed: defaults used", a.in_data.size());
-    }
-    r.max_len = max_len;
-    NXLOG_I("am", "swkbd: version 0x%x, config %zu bytes, work %zu bytes, max length %u, utf8 %d, text check %d, header \"%s\", guide \"%s\", initial \"%s\"",
-            version, cfg ? cfg->size() : size_t{0}, work ? work->size() : size_t{0}, max_len, a.utf8 ? 1 : 0, a.text_check ? 1 : 0,
-            r.header.c_str(), r.guide.c_str(), r.initial.c_str());
-    if (nxrt::config_has("applet", "swkbd_text")) {
-        a.text = utf8_to_utf16(nxrt::config_get_str("applet", "swkbd_text", ""));
-    } else if (prompt_flag().load()) {
-        swkbd_prompt_async(ap);
-        return;
-    } else {
-        a.text = utf8_to_utf16(r.initial.empty() ? std::string("Player") : r.initial);
-    }
-    if (a.text.size() > max_len) a.text.resize(max_len);
-    swkbd_answer(a, true);
-}
-
-// The application's text check answer (SwkbdTextCheck). Success or Confirm submits the text. Failure or Silent: with the prompt the
-// player is asked again (the game's message as the guide text); without it the same text would come back, so the keyboard cancels.
-// The caller holds mu().
-void swkbd_interactive(const std::shared_ptr<AppletState>& ap) {
-    AppletState& a = *ap;
-    if (a.interactive_in.empty() || !a.text_check || a.completed) return;
-    std::shared_ptr<Bytes> d = a.interactive_in.front();
-    a.interactive_in.pop_front();
-    if (d->size() != kSwkbdTextCheckSize) NXLOG_W("am", "swkbd: text check storage is %zu bytes, 0x7D8 expected", d->size());
-    const uint32_t check = read_at<uint32_t>(*d, 0, 1);
-    if (check == kTextCheckSuccess || check == kTextCheckConfirm) {
-        swkbd_submit(a, kSwkbdResultOk);
-        return;
-    }
-    // The game's message comes in the config's encoding: read as UTF-16, its UTF-8 bytes turned into CJK characters.
-    const std::string why = a.utf8 ? read_u8_text(*d, 4, kSwkbdStringSize) : read_u16_text(*d, 4, kSwkbdStringSize / 2);
-    NXLOG_W("am", "swkbd: the game rejected the text (text check result %u: \"%s\")", check, why.c_str());
-    if (prompt_flag().load() && !nxrt::config_has("applet", "swkbd_text")) {
-        if (!why.empty()) a.req.guide = why;
-        a.req.initial = utf16_to_utf8(a.text);
-        swkbd_prompt_async(ap);
-    } else {
-        swkbd_submit(a, kSwkbdResultCancel);
+        kb_answer(a, true, c.request.initial.empty() ? std::string("Player") : c.request.initial);
     }
 }
 
-// The player select (output: u64 result, then the Uid; 0x18 bytes). The user selector picks the one user at once; the other modes
-// (network account and licence screens) answer that the player backed out, with no user.
-void player_select_start(AppletState& a) {
-    std::shared_ptr<Bytes> ui = a.in_data.size() > 1 ? a.in_data[1] : nullptr;
-    const uint32_t mode = ui ? read_at<uint32_t>(*ui, 0, kPselModeUserSelector) : kPselModeUserSelector;
-    auto out = std::make_shared<Bytes>(0x18, uint8_t{0});
-    if (mode == kPselModeUserSelector) {
+// The game's message with a rejected text (@4), in the config's encoding.
+std::string kb_game_message(const Applet& a, const Blob& st) {
+    if (!a.kb_utf8) return read_utf16(st, 4, 0x3EA);
+    std::string s;
+    for (uint64_t i = 4; i < st.size() && i < 4 + 0x7D4; ++i) {
+        const uint8_t c = st[i];
+        if (c == 0) break;
+        if (c < 0x20 && c != 0x0A) continue;
+        s += static_cast<char>(c);
+    }
+    return s;
+}
+
+// The game's verdict on the text (PushInteractiveInData): Success / ShowConfirmDialog take the text; anything else asks again when the
+// prompt can, else the keyboard ends cancelled.
+void kb_check_answer(const AppletPtr& ap) {
+    Applet& a = *ap;
+    if (!a.started || !a.kb_check || a.completed || a.game_in.empty()) return;
+    const BlobPtr st = a.game_in.front();
+    a.game_in.pop_front();
+    if (st->size() != 0x7D8) NXLOG_I(kTag, "software keyboard: text check answer of %zu bytes", st->size());
+    const uint32_t verdict = st->size() < 4 ? 1 : rd32(*st, 0);
+    if (verdict == 0 || verdict == 2) {
+        push_out(a, kb_output(a, true));
+        end_applet(a);
+        return;
+    }
+    const std::string msg = kb_game_message(a, *st);
+    NXLOG_I(kTag, "software keyboard: the game refused the text (%u): %s", verdict, msg.c_str());
+    if (swkbdui::prompt_enabled() && !config_has("applet", "swkbd_text")) {
+        swkbdui::Request r = a.kb_request;
+        if (!msg.empty()) r.guide = msg;
+        r.initial = to_utf8(a.kb_text);
+        kb_ask(ap, r);
+        return;
+    }
+    push_out(a, kb_output(a, false));
+    end_applet(a);
+}
+
+// ---- the software keyboard, inline (resident; requests through PushInteractiveInData) ----
+// Every reply: u32 state, u32 reply type, then its payload.
+void ik_reply(Applet& a, uint32_t type, const Blob& payload = Blob()) {
+    Blob v(8, 0);
+    wr32(v, 0, a.ik_state);
+    wr32(v, 4, type);
+    v.insert(v.end(), payload.begin(), payload.end());
+    push_reply(a, std::move(v));
+}
+void ik_set_state(Applet& a, uint32_t state) {
+    a.ik_state = state;
+    ik_reply(a, 1);   // Default
+}
+
+// The text area of a reply: UTF-16 0x3EC bytes (text up to 0x3EA), UTF-8 0x7D4 bytes (text up to 0x7D3), zero filled.
+Blob ik_text_area(const Applet& a) {
+    if (a.ik_utf8) {
+        Blob v(0x7D4, 0);
+        const std::string s = to_utf8(a.ik_text);
+        put_bytes(v, 0, s.data(), std::min<size_t>(s.size(), 0x7D3));
+        return v;
+    }
+    Blob v(0x3EC, 0);
+    put_bytes(v, 0, a.ik_text.data(), std::min<size_t>(a.ik_text.size() * 2, 0x3EA));
+    return v;
+}
+void ik_changed_string(Applet& a) {
+    Blob p = ik_text_area(a);
+    append32(p, static_cast<uint32_t>(a.ik_text.size()));
+    append32(p, 0xFFFFFFFFu);
+    append32(p, 0xFFFFFFFFu);
+    append32(p, static_cast<uint32_t>(a.ik_cursor));
+    if (a.ik_v2) p.push_back(0);
+    ik_reply(a, a.ik_utf8 ? (a.ik_v2 ? 15u : 7u) : (a.ik_v2 ? 13u : 2u), p);
+}
+void ik_decided_enter(Applet& a) {
+    Blob p = ik_text_area(a);
+    append32(p, static_cast<uint32_t>(a.ik_text.size()));
+    ik_reply(a, a.ik_utf8 ? 9u : 5u, p);
+}
+void ik_hide(Applet& a) {
+    if (a.ik_state != 3) return;
+    ik_set_state(a, 4);
+    ik_set_state(a, 1);
+}
+void ik_answer(Applet& a, bool ok, const std::u16string& text) {
+    if (!ok) {
+        ik_reply(a, 6);   // DecidedCancel
+        ik_hide(a);
+        return;
+    }
+    a.ik_text = cut(text, a.ik_max);
+    a.ik_cursor = static_cast<int32_t>(a.ik_text.size());
+    ik_changed_string(a);
+    ik_decided_enter(a);
+    ik_hide(a);
+}
+
+// Appear (from the hidden state): shown, then answered with the text (or later, when the prompt answers).
+void ik_appear(const AppletPtr& ap, const Blob& st, uint64_t appear) {
+    Applet& a = *ap;
+    ik_set_state(a, 2);
+    ik_set_state(a, 3);
+    const uint32_t want_max = rd32(st, appear + 0x20), want_min = rd32(st, appear + 0x24);
+    a.ik_max = want_max >= 1 && want_max <= kTextMax ? want_max : kTextMax;
+    swkbdui::Request q;
+    q.title = profile().name;
+    q.ok_text = read_utf16(st, appear + 4, 9);
+    q.initial = to_utf8(a.ik_text);
+    q.max_len = a.ik_max;
+    q.min_len = want_min <= a.ik_max ? want_min : 0;
+    const uint64_t serial = ++a.ik_serial;
+    if (config_has("applet", "swkbd_text")) {
+        ik_answer(a, true, to_utf16(config_get_str("applet", "swkbd_text", "")));
+    } else if (swkbdui::prompt_enabled()) {
+        std::thread([applet = ap, question = q, serial] {
+            std::string text;
+            const bool ok = swkbdui::ask(question, &text);
+            Guard g(am_lock());
+            if (applet->ik_serial != serial || applet->completed) return;   // a Finalize or a disappear came first
+            ik_answer(*applet, ok, to_utf16(text));
+        }).detach();
+    } else {
+        ik_answer(a, true, a.ik_text.empty() ? std::u16string(u"Player") : a.ik_text);
+    }
+}
+
+// Calc: offsets in the storage (4 + the argument's own). The old argument (size 0x4A0) and the newer one (every other size).
+void ik_calc(const AppletPtr& ap, const Blob& st) {
+    Applet& a = *ap;
+    const bool old_layout = rd16(st, 8) == 0x4A0;
+    const uint64_t flags = rd64(st, 12);
+    const uint64_t appear = old_layout ? 0x24 : 0x1C, cursor = old_layout ? 0x20 : 0x90, text = old_layout ? 0x6C : 0x94,
+                   utf8 = old_layout ? 0x460 : 0x488;
+    if (flags & 0x8) a.ik_text = to_utf16(read_utf16(st, text, 0x1FA));        // set the input text
+    if (flags & 0x10) a.ik_cursor = static_cast<int32_t>(rd32(st, cursor));    // set the cursor
+    if (flags & 0x20) a.ik_utf8 = rd8(st, utf8) != 0;                           // UTF-8 mode
+    if (a.ik_state <= 1 && (flags & 0x40)) ik_reply(a, 10);                     // UnsetCustomizeDic
+    if (a.ik_state <= 1 && (flags & 0x400)) ik_reply(a, 11);                    // ReleasedUserWordInfo
+    if (a.ik_state == 0 && (flags & 0x1)) {                                     // initialize
+        ik_set_state(a, 1);
+        ik_reply(a, 0, Blob(1, 0));                                            // FinishedInitialize
+    }
+    if (a.ik_state == 1 && (flags & 0x4)) {
+        ik_appear(ap, st, appear);
+    } else if (a.ik_state == 3 && (flags & 0x80)) {                             // disappear
+        ++a.ik_serial;
+        ik_hide(a);
+    }
+}
+
+// The inline keyboard's requests (u32 @0 of each storage the game pushes).
+enum : uint32_t {
+    kIkFinalize = 4,
+    kIkSetUserWordInfo = 6,
+    kIkSetCustomizeDic = 7,
+    kIkCalc = 10,
+    kIkSetCustomizedDictionaries = 11,
+    kIkUnsetCustomizedDictionaries = 12,
+    kIkSetChangedStringV2Flag = 13,
+    kIkSetMovedCursorV2Flag = 14,
+};
+
+void ik_request(const AppletPtr& ap, const Blob& st) {
+    Applet& a = *ap;
+    const uint32_t cmd = rd32(st, 0);
+    switch (cmd) {
+        case kIkFinalize:
+            ++a.ik_serial;
+            ik_set_state(a, 0);
+            end_applet(a);
+            break;
+        case kIkSetUserWordInfo:
+        case kIkSetCustomizeDic:
+        case kIkSetCustomizedDictionaries:
+            break;   // nothing to keep
+        case kIkUnsetCustomizedDictionaries:
+            ik_reply(a, 12);
+            break;
+        case kIkSetChangedStringV2Flag:
+            a.ik_v2 = rd8(st, 4) != 0;
+            break;
+        case kIkSetMovedCursorV2Flag:
+            a.ik_cursor_v2 = rd8(st, 4) != 0;
+            break;
+        case kIkCalc:
+            ik_calc(ap, st);
+            break;
+        default:
+            NXLOG_I(kTag, "inline keyboard: request %u (%zu bytes) ignored", cmd, st.size());
+            break;
+    }
+}
+
+// Every queued request in order, until one ends the keyboard.
+void ik_process(const AppletPtr& ap) {
+    Applet& a = *ap;
+    while (!a.completed && !a.game_in.empty()) {
+        const BlobPtr st = a.game_in.front();
+        a.game_in.pop_front();
+        ik_request(ap, *st);
+    }
+}
+
+// ---- player select ----
+void player_select(Applet& a) {
+    const Blob* ui = in_entry(a, 1);
+    const uint32_t mode = ui && ui->size() >= 4 ? rd32(*ui, 0) : 0;
+    Blob v(0x18, 0);
+    if (mode == 0) {   // the user selector: the one user
         uint64_t hi = 0, lo = 0;
         accapi::user_uid(&hi, &lo);
-        std::memcpy(out->data() + 8, &hi, 8);
-        std::memcpy(out->data() + 16, &lo, 8);
-        NXLOG_I("am", "player select applet 0x%x (user selector): answering the one user", a.full_id);
+        wr64(v, 8, hi);
+        wr64(v, 16, lo);
+    } else {           // a user creator or a network account check: the player backed out (124-1 CancelledByUser)
+        wr64(v, 0, 0x27C);
+    }
+    push_out(a, std::move(v));
+    end_applet(a);
+}
+
+// ---- error applet: logged, nothing shown ----
+std::string c_text(const Blob& b, uint64_t off, uint64_t max) {
+    std::string s;
+    for (uint64_t i = off; i < b.size() && i < off + max && b[i]; ++i) s += static_cast<char>(b[i]);
+    return s;
+}
+void error_applet(Applet& a) {
+    const Blob* info = in_entry(a, 1);
+    if (info == nullptr || info->size() == 0) {
+        NXLOG_W(kTag, "error applet without an argument");
     } else {
-        const uint64_t r = kAccountCancelledByUser;
-        std::memcpy(out->data(), &r, 8);
-        NXLOG_I("am", "player select applet 0x%x (account mode %u: network account / licence screen): offline, answering cancelled by "
-                "the player (0x27C)", a.full_id, mode);
-    }
-    push_out(a, out);
-    applet_finish(a);
-}
-
-// The applets that end as cancelled by the player (GetResult LibraryAppletCanceled, exit reason 1), with what the log says about them.
-const char* cancelled_applet(uint32_t id) {
-    switch (id) {
-    case kAppletIdShop: return "shop: no eShop here";
-    case kAppletIdMyPage: return "friends (friend invitation): offline, no invitation sent";
-    case kAppletIdDataErase: return "data management (save data does not fit): nothing freed";
-    case kAppletIdNetConnect: return "network connection: offline, not resolved";
-    case kAppletIdMatchmake: return "GameShare matchmaking: no guests here";
-    default: return nullptr;
-    }
-}
-
-// The error applet: in data 0 is CommonArguments, 1 the error argument; the first byte of that is its type (sdk nn::err, Pokopia's sdk
-// module: ShowError 0x38e580, ShowApplicationError 0x38ead0, ApplicationErrorArg 0x38fb9c..0x38fe60). Type 0 (ShowError(Result), 0x20
-// bytes): the Result at 0x10. Type 4 (a pctl Result, 12 bytes): the Result at 8. Type 2 (ApplicationErrorArg, 0x1014 bytes): u32
-// error code number at 8, language code char[8] at 0xC, dialog message char[0x800] at 0x14, full-screen message char[0x800] at 0x814.
-// Nothing is shown: the error is logged and the applet ends as if the player closed it (no output, GetResult success).
-std::string read_c_text(const Bytes& b, size_t off, size_t cap) {
-    std::string t;
-    for (size_t i = 0; i < cap && off + i < b.size(); ++i) {
-        const char c = static_cast<char>(b[off + i]);
-        if (c == 0) break;
-        t.push_back(c == '\r' ? ' ' : c);
-    }
-    return t;
-}
-
-void error_applet_start(AppletState& a) {
-    std::shared_ptr<Bytes> arg = a.in_data.size() > 1 ? a.in_data[1] : nullptr;
-    if (!arg || arg->empty()) {
-        NXLOG_I("am", "error applet: no error argument among the %zu storages pushed", a.in_data.size());
-    } else {
-        const uint8_t type = (*arg)[0];
-        if (type == 0 || type == 4) {
-            const uint32_t r = read_at<uint32_t>(*arg, type == 0 ? 0x10 : 8, 0);
-            NXLOG_I("am", "error applet: the game shows error %04u-%04u (result 0x%x, argument type %u, %zu bytes)", 2000 + (r & 0x1FF),
-                    (r >> 9) & 0x1FFF, r, type, arg->size());
-        } else if (type == 2) {
-            const uint32_t code = read_at<uint32_t>(*arg, 8, 0);
-            const std::string lang = read_c_text(*arg, 0xC, 8);
-            const std::string dialog = read_c_text(*arg, 0x14, 0x800);
-            const std::string full = read_c_text(*arg, 0x814, 0x800);
-            NXLOG_I("am", "error applet: the game shows application error %u (language \"%s\"): dialog \"%s\", full screen \"%s\"", code,
-                    lang.c_str(), dialog.c_str(), full.c_str());
-        } else {
-            NXLOG_I("am", "error applet: argument type %u (%zu bytes), not decoded", type, arg->size());
+        const Blob& e = *info;
+        switch (e[0]) {
+            case 0: NXLOG_W(kTag, "error applet: result 0x%X", rd32(e, 0x10)); break;
+            case 4: NXLOG_W(kTag, "error applet: result 0x%X", rd32(e, 8)); break;
+            case 2:
+                NXLOG_W(kTag, "error applet: application error %u (%s): %s / %s", rd32(e, 8), c_text(e, 0xC, 8).c_str(),
+                        c_text(e, 0x14, 0x800).c_str(), c_text(e, 0x814, 0x800).c_str());
+                break;
+            default: NXLOG_W(kTag, "error applet: type %u, %zu bytes", static_cast<unsigned>(e[0]), e.size()); break;
         }
     }
-    applet_finish(a);
+    end_applet(a);
 }
 
-// The bytes of the storage handed in (an IStorage this file made). Null when there is none or it is not one.
-std::shared_ptr<Bytes> storage_bytes(const Request& req) {
-    if (req.in_services.empty() || !req.in_services[0]) return nullptr;
-    auto src = std::dynamic_pointer_cast<AmStorage>(req.in_services[0]);
-    return src ? src->data : nullptr;
+// ---- controller applet ----
+struct CtrlArg {
+    int min = 0, max = 0;   // 0 when there is no header
+    bool single = false;
+};
+struct CtrlHid {
+    int max_seen = 0;       // the maximum given to hid (1 in single mode)
+    int players = 0;
+    uint32_t selected = 0;
+    bool waits = false;
+};
+
+CtrlArg controller_arg(const Applet& a) {
+    CtrlArg c;
+    const Blob* h = in_entry(a, 1);
+    if (h && h->size() >= 2) {
+        c.min = static_cast<int8_t>((*h)[0]);
+        c.max = static_cast<int8_t>((*h)[1]);
+    }
+    if (h && h->size() >= 6) c.single = (*h)[5] != 0;
+    return c;
 }
 
-// Pops the oldest storage of `q` as a new IStorage; `ev` is cleared once `q` is empty.
-uint32_t pop_storage(std::deque<std::shared_ptr<Bytes>>& q, ServiceEvent& ev, Response& rsp) {
-    std::shared_ptr<Bytes> d;
+// hid's side, without am's lock (every Start).
+void controller_hid(const CtrlArg& c, CtrlHid* h) {
+    h->max_seen = c.single ? 1 : c.max;
+    hid_applet_open(h->max_seen);
+    h->players = hid_sdk_players(&h->selected);
+    h->waits = !c.single && !ctrlui::enough(h->players, c.min) && ctrlui::prompt_enabled();
+    if (!h->waits) h->players = hid_applet_close(h->max_seen, &h->selected);
+}
+
+// ControllerSupportResultInfo (12 bytes): s8 players, u32 selected npad id @4, u32 result @8 (0 success, 2 cancel).
+void controller_answer(Applet& a, const CtrlArg& c, int players, uint32_t selected) {
+    const int lo = std::max(1, c.min), hi = c.max;
+    const bool cancel = !c.single && lo > players;
+    int count = c.single ? std::min(players, 1) : players;
+    if (hi > 0) count = std::min(count, hi);
+    Blob v(12, 0);
+    v[0] = static_cast<uint8_t>(static_cast<int8_t>(count));
+    wr32(v, 4, selected);
+    wr32(v, 8, cancel ? 2u : 0u);
+    push_out(a, std::move(v));
+    end_applet(a);
+}
+
+void controller_start(const AppletPtr& ap, const CtrlArg& c, const CtrlHid& h) {
+    if (!h.waits) {
+        controller_answer(*ap, c, h.players, h.selected);
+        return;
+    }
+    const int max_seen = h.max_seen;
+    std::thread([ap, c, max_seen] {   // the prompt is up until enough players are there or the player closes it
+        ctrlui::wait_for_players(
+            c.min, c.max, [] { return hid_sdk_players(nullptr); },
+            [ap] {
+                Guard g(am_lock());
+                return ap->completed;
+            });
+        uint32_t selected = 0;
+        const int players = hid_applet_close(max_seen, &selected);
+        Guard g(am_lock());
+        if (ap->completed) return;
+        controller_answer(*ap, c, players, selected);
+    }).detach();
+}
+
+// ---- the web family ----
+// The argument (in-data[1]): u16 count @0, u32 shim kind @4, then entries {u16 type, u16 size, 4 bytes, data} from @8. The walk ends at an
+// entry whose data the argument cuts short.
+bool tlv_find(const Blob& arg, uint16_t type, uint64_t* off, uint16_t* size) {
+    if (arg.size() < 8) return false;
+    const uint16_t count = rd16(arg, 0);
+    uint64_t at = 8;
+    for (uint32_t i = 0; i < count && at + 8 <= arg.size(); ++i) {
+        const uint16_t t = rd16(arg, at), n = rd16(arg, at + 2);
+        if (at + 8 + n > arg.size()) return false;
+        if (t == type) {
+            *off = at + 8;
+            *size = n;
+            return true;
+        }
+        at += 8 + n;
+    }
+    return false;
+}
+uint32_t tlv_u32(const Blob* arg, uint16_t type, uint32_t def) {
+    uint64_t off = 0;
+    uint16_t n = 0;
+    if (!arg || !tlv_find(*arg, type, &off, &n) || n == 0) return def;
+    uint32_t v = 0;
+    std::memcpy(&v, arg->data() + off, std::min<size_t>(n, 4));
+    return v;
+}
+std::string tlv_str(const Blob* arg, uint16_t type) {
+    uint64_t off = 0;
+    uint16_t n = 0;
+    if (!arg || !tlv_find(*arg, type, &off, &n)) return std::string();
+    return c_text(*arg, off, n);
+}
+
+bool hidden_web_session(const Applet& a) {
+    const Blob* arg = in_entry(a, 1);
+    return a.kind == kOffline && arg && tlv_u32(arg, 0x42, 0) != 0 && tlv_u32(arg, 0x41, 0) == 1;
+}
+
+// A content message (kind 0): u32 kind, u32 size (the text with its NUL), 8 bytes, the text, NUL.
+Blob content_message(const std::string& text) {
+    Blob v(0x10 + text.size() + 1, 0);
+    wr32(v, 4, static_cast<uint32_t>(text.size() + 1));
+    put_bytes(v, 0x10, text.data(), text.size());
+    return v;
+}
+
+// The return value, as out data; the page (if one is shown) gives the input back; the applet ends.
+void web_return(Applet& a, uint32_t reason, const std::string& url) {
+    const bool tlv_form = webview::view_enabled();
+    Blob v;
+    if (tlv_form) {
+        const Blob* arg = in_entry(a, 1);
+        const Blob* common = in_entry(a, 0);
+        const uint32_t shim = arg && arg->size() >= 8 ? rd32(*arg, 4) : 0;
+        const uint32_t library = common && common->size() >= 12 ? rd32(*common, 8) : 0;
+        v = webview::return_storage(shim, library, reason, url);
+    } else {   // WebCommonReturnValue
+        v.assign(0x1010, 0);
+        wr32(v, 0, reason);
+        const size_t n = std::min<size_t>(url.size(), 0xFFF);
+        put_bytes(v, 8, url.data(), n);
+        wr64(v, 0x1008, n);
+    }
+    push_out(a, std::move(v));
+    if (a.page) {
+        a.page = false;
+        webview::set_input_held(false);
+    }
+    end_applet(a);
+}
+
+// What the host reports, applied under am's lock; nothing once the applet ended or its page is gone.
+webview::Events web_events(const AppletPtr& ap) {
+    const std::weak_ptr<Applet> weak = ap;
+    webview::Events e;
+    e.message = [weak](const std::string& text) {
+        Guard g(am_lock());
+        const AppletPtr a = weak.lock();
+        if (!a || a->completed || !a->page) return;
+        push_reply(*a, content_message(text));
+    };
+    e.ended = [weak](uint32_t reason, const std::string& last_url) {
+        Guard g(am_lock());
+        const AppletPtr a = weak.lock();
+        if (!a || a->completed || !a->page) return;
+        web_return(*a, reason, last_url);
+    };
+    e.failed = [weak](const std::string& why) {
+        Guard g(am_lock());
+        const AppletPtr a = weak.lock();
+        if (!a || a->completed || !a->page) return;
+        NXLOG_W(kTag, "web applet: the web view could not show the page: %s", why.c_str());
+        a->page = false;
+        webview::set_input_held(false);
+        if (a->session) push_reply(*a, content_message(std::string()));
+        else web_return(*a, a->online ? webview::kExitErrorDialog : webview::kExitRequested, std::string());
+    };
+    return e;
+}
+
+// An offline page the game ships, in the host's web view. False: the stand-in answers instead.
+bool web_offline_page(const AppletPtr& ap, bool start_hidden) {
+    Applet& a = *ap;
+    const Blob* arg = in_entry(a, 1);
+    webview::Host* host = webview::host();
+    const std::string doc = tlv_str(arg, 0x6);
+    if (!host || doc.empty()) {
+        NXLOG_I(kTag, "offline web applet (%s): %s, the stand-in answers", doc.c_str(), host ? "no document path" : "no web view");
+        return false;
+    }
+    webview::Page page;
+    if (!webview::find_page(webview::html_folder(), doc, &page)) {
+        NXLOG_W(kTag, "offline web applet: %s is not in the title's html folder, the stand-in answers", doc.c_str());
+        return false;
+    }
+    const std::string callback = tlv_str(arg, 0x3);
+    page.callback_url = callback.empty() ? std::string("http://localhost/") : callback;
+    page.hidden = start_hidden;
+    page.repeat_delay = tlv_u32(arg, 0x1C, 0);
+    page.repeat_pulse = tlv_u32(arg, 0x1D, 0);
+    page.muted = config_get_str("audio", "sink", "") == "null";
+    if (!host->open(page, web_events(ap))) {
+        NXLOG_W(kTag, "offline web applet: the web view refused %s, the stand-in answers", doc.c_str());
+        return false;
+    }
+    a.page = true;
+    if (!start_hidden) webview::set_input_held(true);
+    return true;
+}
+
+// An online page (the web applet with [web] view): the page, or the console's error dialog when it is refused.
+void web_online_page(const AppletPtr& ap) {
+    Applet& a = *ap;
+    const Blob* arg = in_entry(a, 1);
+    webview::Page page;
+    page.online = true;
+    page.url = tlv_str(arg, 0x1);
+    page.callback_url = tlv_str(arg, 0x3);
+    page.repeat_delay = tlv_u32(arg, 0x1C, 0);
+    page.repeat_pulse = tlv_u32(arg, 0x1D, 0);
+    page.muted = config_get_str("audio", "sink", "") == "null";
+    const bool http = page.url.rfind("http://", 0) == 0 || page.url.rfind("https://", 0) == 0;
+    const std::string site = webview::url_host(page.url);
+    const bool online_ok = webview::online_enabled();
+    if (http && webview::nintendo_url(page.url)) {
+        page.error = "This page is on Nintendo's servers (" + site + "), which AnySwitch never connects to.";
+    } else if (!online_ok) {
+        page.error = "Unable to connect to the Internet.\n\nThis game wants to show a page from the Internet" +
+                     (site.empty() ? std::string() : " (" + site + ")") + ". Online pages are off in AnySwitch's settings.";
+    } else if (!http) {
+        page.error = "This page cannot be shown.";
+    }
+    a.online = true;
+    if (!page.error.empty()) NXLOG_I(kTag, "web applet: %s refused: %s", page.url.c_str(), page.error.c_str());
+    webview::Host* host = webview::host();
+    if (host && host->open(page, web_events(ap))) {
+        a.page = true;
+        webview::set_input_held(true);
+        return;
+    }
+    web_return(a, webview::kExitErrorDialog, std::string());
+}
+
+void web_start(const AppletPtr& ap) {
+    Applet& a = *ap;
+    const Blob* arg = in_entry(a, 1);
+    if (a.kind == kWeb && arg && webview::view_enabled()) {
+        web_online_page(ap);
+        return;
+    }
+    if (a.kind == kOffline && arg) {
+        const bool session = tlv_u32(arg, 0x42, 0) != 0;
+        const bool hidden = session && tlv_u32(arg, 0x41, 0) == 1;
+        if (web_offline_page(ap, hidden)) {
+            a.session = session;
+            return;
+        }
+        if (session) {   // the stand-in session: the page's first content message, empty; Appear ends it
+            a.session = true;
+            push_reply(a, content_message(std::string()));
+            return;
+        }
+    }
+    web_return(a, a.kind == kWeb || a.kind == kOffline ? webview::kExitRequested : webview::kExitEndButton, std::string());
+}
+
+// A message of the game to the session's page (the storage stays queued).
+void web_session_message(const AppletPtr& ap) {
+    Applet& a = *ap;
+    if (a.completed || a.game_in.empty()) return;
+    const Blob& st = *a.game_in.back();
+    if (st.size() < 0x10) return;
+    const uint32_t kind = rd32(st, 0), size = rd32(st, 4);
+    const bool view = webview::view_enabled();
+    if (view && (kind == 0 || kind == 0x100)) {   // acknowledged at once: 0x1000 a content message, 0x1001 the Appear
+        Blob ack(0x20, 0);
+        wr32(ack, 0, kind == 0 ? 0x1000u : 0x1001u);
+        wr32(ack, 4, 0xC);
+        wr32(ack, 0x10, static_cast<uint32_t>(st.size()));
+        push_reply(a, std::move(ack));
+    }
+    if (a.page) {
+        webview::Host* host = webview::host();
+        if (kind == 0x100) {
+            if (!a.owns_focus) take_focus(a);
+            webview::set_input_held(true);
+            if (host) host->show();
+        } else if (kind == 0) {
+            std::string text;
+            if (view) {
+                text = c_text(st, 0x10, std::min<uint64_t>(st.size() - 0x10, size));
+            } else if (size != 0 && st.size() >= 0x10 + static_cast<uint64_t>(size)) {
+                text.assign(reinterpret_cast<const char*>(st.data()) + 0x10, size - 1);
+            }
+            if (host) host->send(text);
+        }
+        return;
+    }
+    if (kind == 0x100) {
+        web_return(a, webview::kExitEndButton, std::string());
+    } else if (kind == 0) {
+        if (g_content_logged.fetch_add(1) < 8) NXLOG_I(kTag, "offline web stand-in: content message of %u bytes", size);
+    } else if (kind != 0x1000) {
+        NXLOG_D(kTag, "offline web stand-in: message kind 0x%X", kind);
+    }
+}
+
+// ---- Start ----
+uint32_t applet_start(const AppletPtr& ap) {
+    CtrlArg carg;
+    bool controller = false;
     {
-        std::lock_guard<std::mutex> lk(mu());
-        if (!q.empty()) {
-            d = q.front();
-            q.pop_front();
-        }
-        if (q.empty()) ev.clear();
+        Guard g(am_lock());
+        controller = ap->kind == kController;
+        if (controller) carg = controller_arg(*ap);
     }
-    if (!d) return kNoData;
-    rsp.push_object(new_storage(d));
+    CtrlHid hid;
+    if (controller) controller_hid(carg, &hid);
+    Guard g(am_lock());
+    Applet& a = *ap;
+    if (a.started) return 0;
+    a.started = true;
+    if (a.inline_kb) return 0;   // resident; the game keeps its focus
+    if (!hidden_web_session(a)) take_focus(a);
+    switch (a.kind) {
+        case kKeyboard: kb_start(ap); break;
+        case kPlayerSelect: player_select(a); break;
+        case kErrorApplet: error_applet(a); break;
+        case kController: controller_start(ap, carg, hid); break;
+        case kWeb:
+        case kOffline:
+        case kLoginShare:
+        case kWifiAuth: web_start(ap); break;
+        default:
+            if (!ends_cancelled(a.kind)) NXLOG_W(kTag, "library applet 0x%X (kind 0x%X) is not answered: it ends at once", a.id, a.kind);
+            end_applet(a);
+            break;
+    }
     return 0;
 }
 
-// ILibraryAppletAccessor over one AppletState. Pushed storages are copied (the guest may reuse its storage afterwards).
-ServicePtr make_library_applet_accessor(uint32_t full_id, uint32_t mode) {
-    auto a = std::make_shared<AppletState>();
-    a->full_id = full_id;
-    a->id = full_id & 0xFFFF;
-    a->mode = mode;
-    return make_iface("ILibraryAppletAccessor", [a](Service& s) {
-        s.add_cmd(0, "GetAppletStateChangedEvent", [a](Request&, Response& rsp) -> uint32_t {
-            rsp.out_copy.push_back(a->state_event.new_handle());
+std::shared_ptr<ipc::Service> make_applet_accessor(uint32_t id, uint32_t mode) {
+    auto ap = std::make_shared<Applet>();
+    ap->id = id;
+    ap->kind = id & 0xFFFF;
+    ap->mode = mode;
+    ap->inline_kb = ap->kind == kKeyboard && mode != 0;
+    NXLOG_I(kTag, "library applet 0x%X created (mode %u)", id, mode);
+    return make_iface("ILibraryAppletAccessor", [ap](ipc::Service& s) {
+        s.add_cmd(0, "GetAppletStateChangedEvent", [ap](Req&, Rsp& rsp) -> uint32_t {
+            Guard g(am_lock());
+            rsp.out_copy.push_back(ap->end_event.new_handle());
             return 0;
         });
-        s.add_cmd(1, "IsCompleted", [a](Request&, Response& rsp) -> uint32_t {
-            std::lock_guard<std::mutex> lk(mu());
-            rsp.push<uint8_t>(a->completed ? 1 : 0);
+        s.add_cmd(1, "IsCompleted", [ap](Req&, Rsp& rsp) -> uint32_t {
+            Guard g(am_lock());
+            rsp.push<uint8_t>(ap->completed ? 1 : 0);
             return 0;
         });
-        s.add_cmd(10, "Start", [a](Request&, Response&) -> uint32_t {
-            std::lock_guard<std::mutex> lk(mu());
-            if (a->started) return 0;
-            a->started = true;
-            if (a->id == kAppletIdSwkbd) {
-                swkbd_start(a);
-            } else if (a->id == kAppletIdPlayerSelect) {
-                player_select_start(*a);
-            } else if (a->id == kAppletIdError) {
-                error_applet_start(*a);
-            } else if (const char* why = cancelled_applet(a->id)) {
-                NXLOG_I("am", "library applet 0x%x started (%s): it ends as cancelled by the player", a->full_id, why);
-                applet_finish(*a);
+        s.add_cmd(10, "Start", [ap](Req&, Rsp&) -> uint32_t { return applet_start(ap); });
+        s.add_cmd(20, "RequestExit", [ap](Req&, Rsp&) -> uint32_t {
+            Guard g(am_lock());
+            Applet& a = *ap;
+            if (a.completed) return 0;
+            if (a.page) {
+                if (webview::Host* host = webview::host()) host->close();
+                web_return(a, webview::kExitRequested, std::string());
+            } else if (a.session) {
+                web_return(a, webview::kExitRequested, std::string());
             } else {
-                NXLOG_W("am", "library applet 0x%x started (not one Pokopia was seen to launch): it ends at once with no output", a->full_id);
-                applet_finish(*a);
+                end_applet(a);
             }
             return 0;
         });
-        // RequestExit / Terminate: the applet ends at once.
-        s.add_cmd(20, "RequestExit", [a](Request&, Response&) -> uint32_t {
-            std::lock_guard<std::mutex> lk(mu());
-            if (!a->completed) applet_finish(*a);
+        s.add_cmd(25, "Terminate", [ap](Req&, Rsp&) -> uint32_t {
+            Guard g(am_lock());
+            Applet& a = *ap;
+            if (a.page) {
+                if (webview::Host* host = webview::host()) host->close();
+                a.page = false;
+                webview::set_input_held(false);
+            }
+            if (!a.completed) end_applet(a);
             return 0;
         });
-        s.add_cmd(25, "Terminate", [a](Request&, Response&) -> uint32_t {
-            std::lock_guard<std::mutex> lk(mu());
-            if (!a->completed) applet_finish(*a);
+        s.add_cmd(30, "GetResult", [ap](Req&, Rsp&) -> uint32_t { return ends_cancelled(ap->kind) ? kAppletCancelled : 0; });
+        ignored(s, 50, "SetOutOfFocusApplicationSuspendingEnabled");
+        ignored(s, 60, "PresetLibraryAppletGpuTimeSliceZero");
+        ignored(s, 90, "Cmd90");
+        s.add_cmd(100, "PushInData", [ap](Req& req, Rsp&) -> uint32_t {
+            const auto st = storage_passed(req);
+            if (!st) return kNotAStorage;
+            Guard g(am_lock());
+            ap->in_data.push_back(bytes_now(*st));
             return 0;
         });
-        // The cancelled applets answer LibraryAppletCanceled (128-22: exit reason Canceled in nn::applet::JoinLibraryApplet, a failure
-        // in nn::la::StartLibraryApplet), so nn::ec::detail::ShowShopPage does not read the 0x1010-byte return value it aborts without
-        // and the others return their own "cancelled" result. Every other applet: success.
-        s.add_cmd(30, "GetResult", [a](Request&, Response&) -> uint32_t {
-            return cancelled_applet(a->id) ? kAppletCanceled : 0;
+        s.add_cmd(101, "PopOutData", [ap](Req&, Rsp& rsp) -> uint32_t {
+            Guard g(am_lock());
+            return pop_storage(ap->out_data, ap->out_ready, rsp);
         });
-        s.add_cmd(50, "SetOutOfFocusApplicationSuspendingEnabled", ignored("SetOutOfFocusApplicationSuspendingEnabled"));
-        s.add_cmd(60, "PresetLibraryAppletGpuTimeSliceZero", ignored("PresetLibraryAppletGpuTimeSliceZero"));
-        s.add_cmd(100, "PushInData", [a](Request& req, Response&) -> uint32_t {
-            std::shared_ptr<Bytes> d = storage_bytes(req);
-            if (!d) return kInvalidStorage;
-            std::lock_guard<std::mutex> lk(mu());
-            a->in_data.push_back(std::make_shared<Bytes>(*d));
+        s.add_cmd(102, "PushExtraStorage", [](Req& req, Rsp&) -> uint32_t { return storage_passed(req) ? 0 : kNotAStorage; });
+        s.add_cmd(103, "PushInteractiveInData", [ap](Req& req, Rsp&) -> uint32_t {
+            const auto st = storage_passed(req);
+            if (!st) return kNotAStorage;
+            Guard g(am_lock());
+            Applet& a = *ap;
+            a.game_in.push_back(bytes_now(*st));
+            if (!a.started) return 0;
+            if (a.inline_kb) ik_process(ap);
+            else if (a.kind == kKeyboard) kb_check_answer(ap);
+            else if (a.session) web_session_message(ap);
             return 0;
         });
-        s.add_cmd(101, "PopOutData", [a](Request&, Response& rsp) -> uint32_t {
-            return pop_storage(a->out_data, a->out_event, rsp);
+        s.add_cmd(104, "PopInteractiveOutData", [ap](Req&, Rsp& rsp) -> uint32_t {
+            Guard g(am_lock());
+            return pop_storage(ap->interactive_out, ap->reply_ready, rsp);
         });
-        s.add_cmd(102, "PushExtraStorage", [](Request& req, Response&) -> uint32_t {
-            return storage_bytes(req) ? 0 : kInvalidStorage;
-        });
-        s.add_cmd(103, "PushInteractiveInData", [a](Request& req, Response&) -> uint32_t {
-            std::shared_ptr<Bytes> d = storage_bytes(req);
-            if (!d) return kInvalidStorage;
-            std::lock_guard<std::mutex> lk(mu());
-            a->interactive_in.push_back(std::make_shared<Bytes>(*d));
-            if (a->id == kAppletIdSwkbd && a->started) swkbd_interactive(a);
+        s.add_cmd(105, "GetPopOutDataEvent", [ap](Req&, Rsp& rsp) -> uint32_t {
+            Guard g(am_lock());
+            rsp.out_copy.push_back(ap->out_ready.new_handle());
             return 0;
         });
-        s.add_cmd(104, "PopInteractiveOutData", [a](Request&, Response& rsp) -> uint32_t {
-            return pop_storage(a->interactive_out, a->interactive_out_event, rsp);
-        });
-        s.add_cmd(105, "GetPopOutDataEvent", [a](Request&, Response& rsp) -> uint32_t {
-            rsp.out_copy.push_back(a->out_event.new_handle());
+        s.add_cmd(106, "GetPopInteractiveOutDataEvent", [ap](Req&, Rsp& rsp) -> uint32_t {
+            Guard g(am_lock());
+            rsp.out_copy.push_back(ap->reply_ready.new_handle());
             return 0;
         });
-        s.add_cmd(106, "GetPopInteractiveOutDataEvent", [a](Request&, Response& rsp) -> uint32_t {
-            rsp.out_copy.push_back(a->interactive_out_event.new_handle());
+        ignored(s, 110, "NeedsToExitProcess", 1);
+        s.add_cmd(120, "GetLibraryAppletInfo", [ap](Req&, Rsp& rsp) -> uint32_t {
+            rsp.push<uint32_t>(ap->id);
+            rsp.push<uint32_t>(ap->mode);
             return 0;
         });
-        s.add_cmd(110, "NeedsToExitProcess", ignored("NeedsToExitProcess", 1));
-        s.add_cmd(120, "GetLibraryAppletInfo", [a](Request&, Response& rsp) -> uint32_t {
-            rsp.push<uint32_t>(a->full_id);
-            rsp.push<uint32_t>(a->mode);
-            return 0;
-        });
-        s.add_cmd(150, "RequestForAppletToGetForeground", ignored("RequestForAppletToGetForeground"));
-        // Switch 2: one input bool, no output (sdk proxy at 0x75001bd560). Name and meaning unknown; accepted.
-        s.add_cmd(90, "Cmd90", ignored("ILibraryAppletAccessor Cmd90"));
+        ignored(s, 150, "RequestForAppletToGetForeground");
     });
 }
 
-// CreateLibraryApplet(u32 applet id, u32 library applet mode) and CreateLibraryAppletEx (the same two words first). The inline
-// keyboard (a partial-foreground mode) is refused: it talks a different protocol the game would wait on forever.
-uint32_t create_library_applet(const char* cmd, Request& req, Response& rsp) {
-    const uint32_t id = req.arg<uint32_t>(0);
-    const uint32_t mode = req.arg<uint32_t>(4);
-    if ((id & 0xFFFF) == kAppletIdSwkbd && mode != kAppletModeAllForeground) {
-        NXLOG_W("am", "%s(applet 0x%x, mode %u): the inline software keyboard is not supported", cmd, id, mode);
-        return kLibraryAppletFailed;
+// ---- ExecuteProgram and the relaunch: the hand-off to the launcher (docs/EXECUTE_PROGRAM.md) -------------------------------------
+// Both writers report a failed write or close.
+bool write_channel_file(const std::string& path, const std::vector<Blob>& params) {
+    FilePtr out = open_file(path, "wb");
+    if (out == nullptr) return false;
+    const uint32_t count = static_cast<uint32_t>(params.size());
+    bool ok = std::fwrite(&count, 4, 1, out.get()) == 1;
+    for (const Blob& p : params) {
+        if (!ok) break;
+        const uint64_t n = p.size();
+        ok = std::fwrite(&n, 8, 1, out.get()) == 1 && (n == 0 || std::fwrite(p.data(), 1, static_cast<size_t>(n), out.get()) == n);
     }
-    NXLOG_I("am", "%s(applet 0x%x, mode %u)", cmd, id, mode);
-    rsp.push_object(make_library_applet_accessor(id, mode));
-    return 0;
+    return std::fclose(out.release()) == 0 && ok;
+}
+bool write_text_file(const std::string& path, const char* text) {
+    FilePtr out = open_file(path, "wb");
+    if (out == nullptr) return false;
+    const size_t len = std::strlen(text);
+    const bool ok = std::fwrite(text, 1, len, out.get()) == len;
+    return std::fclose(out.release()) == 0 && ok;
 }
 
-// The guest bytes behind a transfer memory handle, copied (the keyboard's work buffer: the initial text). Zeros when unreadable.
-std::shared_ptr<Bytes> transfer_memory_bytes(const Request& req, int64_t size) {
-    auto d = std::make_shared<Bytes>(static_cast<size_t>(size), uint8_t{0});
-    if (!req.in_copy.empty())
-        if (auto tm = kernel::handle_as<kernel::KTransferMemory>(req.in_copy[0]))
-            if (tm->addr && size > 0 && static_cast<uint64_t>(size) <= tm->size && mem::is_mapped(tm->addr, static_cast<uint64_t>(size)))
-                std::memcpy(d->data(), reinterpret_cast<const void*>(tm->addr), static_cast<size_t>(size));
-    return d;
+// The launch parameters to [am] execute_program_file + ".user_channel.bin", then the ini naming the next program; then the process ends
+// with kExitExecuteProgram (through the exit hook when one is set: the call then returns). A file that cannot be written: the program
+// goes on. Called without am's lock.
+uint32_t hand_off(int64_t next, int64_t previous, const char* extra, const std::vector<Blob>& params, const std::string& what) {
+    const std::string ini_path = config_get_path("am", "execute_program_file", "execute_program.ini");
+    const std::string chan_path = ini_path + ".user_channel.bin";
+    if (!write_channel_file(chan_path, params)) {
+        NXLOG_E(kTag, "%s: cannot write %s; the program goes on", what.c_str(), chan_path.c_str());
+        return 0;
+    }
+    char text[640];
+    std::snprintf(text, sizeof(text),
+                  "; written by the runtime at %s: the launcher starts this program next\n[execute_program]\nprogram_index = %lld\n"
+                  "%sprevious_program_index = %lld\nuser_channel = %s\n",
+                  what.c_str(), static_cast<long long>(next), extra, static_cast<long long>(previous), chan_path.c_str());
+    if (!write_text_file(ini_path, text)) {
+        NXLOG_E(kTag, "%s: cannot write %s; the program goes on", what.c_str(), ini_path.c_str());
+        return 0;
+    }
+    NXLOG_I(kTag, "%s: program %lld next (%zu launch parameter(s)); this program ends", what.c_str(), static_cast<long long>(next),
+            params.size());
+    if (auto hook = g_on_exit.load()) {
+        hook(amctl::kExitExecuteProgram, what.c_str());
+        return 0;
+    }
+    log_flush();
+    std::fflush(nullptr);
+    std::_Exit(amctl::kExitExecuteProgram);
 }
 
-// ILibraryAppletCreator: the library applets above, and the storages handed to them.
-ServicePtr make_library_applet_creator() {
-    return make_iface("ILibraryAppletCreator", [](Service& s) {
-        s.add_cmd(0, "CreateLibraryApplet", [](Request& req, Response& rsp) -> uint32_t {
-            return create_library_applet("CreateLibraryApplet", req, rsp);
-        });
-        s.add_cmd(3, "CreateLibraryAppletEx", [](Request& req, Response& rsp) -> uint32_t {
-            return create_library_applet("CreateLibraryAppletEx", req, rsp);
-        });
-        s.add_cmd(10, "CreateStorage", [](Request& req, Response& rsp) -> uint32_t {
-            const int64_t size = req.arg<int64_t>(0);
-            if (!storage_size_ok(size)) return kOutOfMemory;
-            rsp.push_object(new_storage(std::make_shared<Bytes>(static_cast<size_t>(size), uint8_t{0})));
+// CreateApplicationAndRequestToStart (12) / ...AndPushAndRequestToStart (10): this application again (id 0 or one of its programs).
+uint32_t request_to_start(uint64_t id, const char* call, const std::vector<Blob>& params) {
+    char what[160];
+    std::snprintf(what, sizeof what, "IApplicationFunctions %s(%016llx)", call, static_cast<unsigned long long>(id));
+    const uint64_t app_mask = ~uint64_t{0xFFF};
+    const bool own = id == 0 || (id & app_mask) == (profile().application_id & app_mask) || (id & app_mask) == (program_id_now() & app_mask);
+    if (!own) {
+        NXLOG_E(kTag, "%s: another application cannot be started from here", what);
+        return kLaunchFailed;
+    }
+    return hand_off(id == 0 ? 0 : static_cast<int64_t>(id & 0xFFF), -1, "relaunch = 1\n", params, what);
+}
+
+// ---- the other interfaces ------------------------------------------------------------------------------------------------------
+std::shared_ptr<ipc::Service> make_lock_accessor() {
+    struct LockState {
+        bool locked = false;
+        ServiceEvent event{true};
+    };
+    auto st = std::make_shared<LockState>();
+    return make_iface("ILockAccessor", [st](ipc::Service& s) {
+        s.add_cmd(1, "TryLock", [st](Req& req, Rsp& rsp) -> uint32_t {
+            const bool want_handle = req.arg<uint8_t>(0) != 0;
+            Guard g(am_lock());
+            const bool acquired = !st->locked;
+            st->locked = true;
+            rsp.push<uint8_t>(acquired ? 1 : 0);
+            rsp.out_copy.push_back(want_handle ? st->event.new_handle() : 0);
             return 0;
         });
-        // Transfer and handle storages: a host copy of the guest memory behind the handle (taken now: the keyboard reads its work buffer).
-        s.add_cmd(11, "CreateTransferMemoryStorage", [](Request& req, Response& rsp) -> uint32_t {
-            const int64_t size = req.arg<int64_t>(8);
-            if (!storage_size_ok(size)) return kOutOfMemory;
-            rsp.push_object(new_storage(transfer_memory_bytes(req, size)));
-            close_copies(req);
+        s.add_cmd(2, "Unlock", [st](Req&, Rsp&) -> uint32_t {
+            Guard g(am_lock());
+            st->locked = false;
+            st->event.signal();
             return 0;
         });
-        s.add_cmd(12, "CreateHandleStorage", [](Request& req, Response& rsp) -> uint32_t {
-            const int64_t size = req.arg<int64_t>(0);
-            if (!storage_size_ok(size)) return kOutOfMemory;
-            rsp.push_object(new_storage(transfer_memory_bytes(req, size)));
-            close_copies(req);
+        s.add_cmd(3, "GetEvent", [st](Req&, Rsp& rsp) -> uint32_t {
+            Guard g(am_lock());
+            rsp.out_copy.push_back(st->event.new_handle());
+            return 0;
+        });
+        s.add_cmd(4, "IsLocked", [st](Req&, Rsp& rsp) -> uint32_t {
+            Guard g(am_lock());
+            rsp.push<uint8_t>(st->locked ? 1 : 0);
             return 0;
         });
     });
 }
 
-// The preselected user launch parameter: the 0x88-byte LaunchParameterAccountPreselectedUser (magic, flag 1, the user id as the
-// Uid's low word then high word). The user is the one the account service reports.
-ServicePtr preselected_user_storage() {
-    uint64_t hi = 0, lo = 0;
-    accapi::user_uid(&hi, &lo);
-    auto d = std::make_shared<Bytes>(static_cast<size_t>(kLaunchParamsSize), uint8_t{0});
-    const uint32_t magic = kLaunchParamsMagic, flag = 1;
-    std::memcpy(d->data() + 0, &magic, 4);
-    std::memcpy(d->data() + 4, &flag, 4);
-    std::memcpy(d->data() + 8, &hi, 8);    // the Uid in memory order, as acc:u0 carries it (first u64 = profile uid_hi)
-    std::memcpy(d->data() + 16, &lo, 8);
-    return new_storage(d);
+// [am] resolution = WxH (decimal, a lower-case x, nothing after the height, each 1..65535).
+bool resolution_override(int32_t* w, int32_t* h) {
+    const std::string s = config_get_str("am", "resolution", "");
+    if (s.empty()) return false;
+    const char* p = s.c_str();
+    char* end = nullptr;
+    const unsigned long width = std::strtoul(p, &end, 10);
+    if (end == p || *end != 'x') return false;
+    const char* q = end + 1;
+    const unsigned long height = std::strtoul(q, &end, 10);
+    if (end == q || *end != '\0') return false;
+    if (width < 1 || width > 0xFFFF || height < 1 || height > 0xFFFF) return false;
+    *w = static_cast<int32_t>(width);
+    *h = static_cast<int32_t>(height);
+    return true;
 }
 
-// The language the game is shown in: the system's when the game supports it, else the first language the game supports.
+std::shared_ptr<ipc::Service> make_common_state_getter() {
+    return make_iface("ICommonStateGetter", [](ipc::Service& s) {
+        process_event(s, 0, "GetEventHandle", &Proc::message_event);
+        s.add_cmd(1, "ReceiveMessage", [](Req&, Rsp& rsp) -> uint32_t {
+            Guard g(am_lock());
+            Proc& p = proc();
+            if (p.messages.empty()) {
+                p.message_event.clear();
+                return kNoMessages;
+            }
+            const uint32_t msg = p.messages.front();
+            p.messages.pop_front();
+            if (p.messages.empty()) p.message_event.clear();
+            rsp.push<uint32_t>(msg);
+            return 0;
+        });
+        ignored(s, 2, "GetThisAppletKind", 8);
+        s.add_cmd(5, "GetOperationMode", [](Req&, Rsp& rsp) -> uint32_t {
+            Guard g(am_lock());
+            rsp.push<uint8_t>(proc().docked ? 1 : 0);   // 1 Console, 0 Handheld
+            return 0;
+        });
+        s.add_cmd(6, "GetPerformanceMode", [](Req&, Rsp& rsp) -> uint32_t {
+            Guard g(am_lock());
+            rsp.push<uint32_t>(proc().docked ? 1u : 0u);   // 1 Boost while docked
+            return 0;
+        });
+        ignored(s, 8, "GetBootMode", 1);
+        s.add_cmd(9, "GetCurrentFocusState", [](Req&, Rsp& rsp) -> uint32_t {
+            Guard g(am_lock());
+            rsp.push<uint8_t>(proc().focus);
+            return 0;
+        });
+        s.add_cmd(10, "RequestToAcquireSleepLock", [](Req&, Rsp&) -> uint32_t {
+            Guard g(am_lock());
+            proc().sleep_lock.signal();
+            return 0;
+        });
+        ignored(s, 11, "ReleaseSleepLock");
+        ignored(s, 12, "ReleaseSleepLockTransiently");
+        process_event(s, 13, "GetAcquiredSleepLockEvent", &Proc::sleep_lock);
+        const auto lock_accessor = [](Req&, Rsp& rsp) -> uint32_t {
+            rsp.push_object(make_lock_accessor());
+            return 0;
+        };
+        s.add_cmd(30, "GetHomeButtonReaderLockAccessor", lock_accessor);
+        s.add_cmd(31, "GetReaderLockAccessorEx", lock_accessor);
+        s.add_cmd(32, "GetWriterLockAccessorEx", lock_accessor);
+        s.add_cmd(50, "IsVrModeEnabled", [](Req&, Rsp& rsp) -> uint32_t {
+            Guard g(am_lock());
+            rsp.push<uint8_t>(proc().vr ? 1 : 0);
+            return 0;
+        });
+        s.add_cmd(51, "SetVrModeEnabled", [](Req& req, Rsp&) -> uint32_t {
+            Guard g(am_lock());
+            proc().vr = req.arg<uint8_t>(0) != 0;
+            return 0;
+        });
+        ignored(s, 52, "SetLcdBacklighOffEnabled");
+        s.add_cmd(53, "BeginVrModeEx", [](Req&, Rsp&) -> uint32_t {
+            Guard g(am_lock());
+            proc().vr = true;
+            return 0;
+        });
+        s.add_cmd(54, "EndVrModeEx", [](Req&, Rsp&) -> uint32_t {
+            Guard g(am_lock());
+            proc().vr = false;
+            return 0;
+        });
+        ignored(s, 55, "IsInControllerFirmwareUpdateSection", 1);
+        ignored(s, 59, "SetVrPositionForDebug");
+        s.add_cmd(60, "GetDefaultDisplayResolution", [](Req&, Rsp& rsp) -> uint32_t {
+            bool docked;
+            {
+                Guard g(am_lock());
+                docked = proc().docked;
+            }
+            int32_t w = docked ? 1920 : 1280, h = docked ? 1080 : 720;
+            resolution_override(&w, &h);
+            rsp.push<int32_t>(w);
+            rsp.push<int32_t>(h);
+            return 0;
+        });
+        process_event(s, 61, "GetDefaultDisplayResolutionChangeEvent", &Proc::never);
+        ignored(s, 62, "GetHdcpAuthenticationState", 4);
+        process_event(s, 63, "GetHdcpAuthenticationStateChangeEvent", &Proc::never);
+        ignored(s, 66, "SetCpuBoostMode");
+        ignored(s, 67, "CancelCpuBoostMode");
+        ignored(s, 68, "GetBuiltInDisplayType", 4);
+        s.add_cmd(130, "EnableStartupLogoDisappearedMessage", [](Req&, Rsp&) -> uint32_t {
+            Guard g(am_lock());
+            queue_message(proc(), kMsgStartupLogoGone);
+            return 0;
+        });
+        s.add_cmd(300, "GetSettingsPlatformRegion", [](Req&, Rsp& rsp) -> uint32_t {
+            rsp.push<uint32_t>(1);   // Global
+            return 0;
+        });
+        ignored(s, 900, "SetRequestExitToLibraryAppletAtExecuteNextProgramEnabled");
+        s.add_cmd(1000, "BeginVrMode3d", [](Req&, Rsp&) -> uint32_t {
+            Guard g(am_lock());
+            proc().vr3d = true;
+            return 0;
+        });
+        s.add_cmd(1001, "EndVrMode3d", [](Req&, Rsp&) -> uint32_t {
+            Guard g(am_lock());
+            proc().vr3d = false;
+            return 0;
+        });
+        s.add_cmd(1002, "IsVrModeEnabled3d", [](Req&, Rsp& rsp) -> uint32_t {
+            Guard g(am_lock());
+            rsp.push<uint8_t>(proc().vr3d ? 1 : 0);
+            return 0;
+        });
+    });
+}
+
+std::shared_ptr<ipc::Service> make_self_controller() {
+    return make_iface("ISelfController", [](ipc::Service& s) {
+        s.add_cmd(0, "Exit", [](Req&, Rsp&) -> uint32_t {
+            NXLOG_W(kTag, "ISelfController Exit: the game asks to end (the run is ended by the shell, not here)");
+            return 0;
+        });
+        ignored(s, 1, "LockExit");
+        ignored(s, 2, "UnlockExit");
+        ignored(s, 3, "EnterFatalSection");
+        ignored(s, 4, "LeaveFatalSection");
+        process_event(s, 9, "GetLibraryAppletLaunchableEvent", &Proc::launchable);
+        ignored(s, 10, "SetScreenShotPermission");
+        s.add_cmd(11, "SetOperationModeChangedNotification", [](Req& req, Rsp&) -> uint32_t {
+            Guard g(am_lock());
+            proc().mode_notify = req.arg<uint8_t>(0) != 0;
+            return 0;
+        });
+        s.add_cmd(12, "SetPerformanceModeChangedNotification", [](Req& req, Rsp&) -> uint32_t {
+            Guard g(am_lock());
+            proc().perf_notify = req.arg<uint8_t>(0) != 0;
+            return 0;
+        });
+        s.add_cmd(13, "SetFocusHandlingMode", [](Req& req, Rsp&) -> uint32_t {
+            const uint8_t notify = req.arg<uint8_t>(0), b1 = req.arg<uint8_t>(1), b2 = req.arg<uint8_t>(2);
+            NXLOG_D(kTag, "SetFocusHandlingMode(%u, %u, %u)", static_cast<unsigned>(notify), static_cast<unsigned>(b1),
+                    static_cast<unsigned>(b2));
+            Guard g(am_lock());
+            proc().focus_notify = notify != 0;
+            return 0;
+        });
+        ignored(s, 14, "SetRestartMessageEnabled");
+        ignored(s, 16, "SetOutOfFocusSuspendingEnabled");
+        s.add_cmd(40, "CreateManagedDisplayLayer", [](Req&, Rsp& rsp) -> uint32_t {
+            Guard g(am_lock());
+            rsp.push<uint64_t>(proc().next_layer++);
+            return 0;
+        });
+        ignored(s, 41, "IsSystemBufferSharingEnabled");
+        s.add_cmd(44, "CreateManagedDisplaySeparableLayer", [](Req&, Rsp& rsp) -> uint32_t {
+            Guard g(am_lock());
+            Proc& p = proc();
+            rsp.push<uint64_t>(p.next_layer);
+            rsp.push<uint64_t>(p.next_layer + 1);
+            p.next_layer += 2;
+            return 0;
+        });
+        s.add_cmd(62, "SetIdleTimeDetectionExtension", [](Req& req, Rsp&) -> uint32_t {
+            Guard g(am_lock());
+            proc().idle_extension = req.arg<uint32_t>(0);
+            return 0;
+        });
+        s.add_cmd(63, "GetIdleTimeDetectionExtension", [](Req&, Rsp& rsp) -> uint32_t {
+            Guard g(am_lock());
+            rsp.push<uint32_t>(proc().idle_extension);
+            return 0;
+        });
+        s.add_cmd(68, "SetAutoSleepDisabled", [](Req& req, Rsp&) -> uint32_t {
+            Guard g(am_lock());
+            proc().auto_sleep_disabled = req.arg<uint8_t>(0) != 0;
+            return 0;
+        });
+        s.add_cmd(69, "IsAutoSleepDisabled", [](Req&, Rsp& rsp) -> uint32_t {
+            Guard g(am_lock());
+            rsp.push<uint8_t>(proc().auto_sleep_disabled ? 1 : 0);
+            return 0;
+        });
+        ignored(s, 90, "GetAccumulatedSuspendedTickValue", 8);
+        process_event(s, 91, "GetAccumulatedSuspendedTickChangedEvent", &Proc::suspended_tick);
+        ignored(s, 100, "SetAlbumImageTakenNotificationEnabled");
+        ignored(s, 110, "SetApplicationAlbumUserData");
+        ignored(s, 120, "SaveCurrentScreenshot");
+        s.add_cmd(2000, "GetGraphicsSupervisor", [](Req&, Rsp& rsp) -> uint32_t {
+            const uint32_t session = ipc::create_session_handle(std::make_shared<ipc::StubService>("GraphicsSupervisor"));
+            if (session == 0) return kernel::kStubService;   // no handle left
+            rsp.out_move.push_back(session);
+            return 0;
+        });
+        static constexpr uint32_t kSharingCmds[] = {2100, 2200, 2300, 2400, 2401, 2402};
+        for (const uint32_t cmd : kSharingCmds)
+            s.add_cmd(cmd, "SetLayerOrAudioSharingEnabled (S2)", [](Req&, Rsp&) -> uint32_t { return 0; });
+    });
+}
+
+std::shared_ptr<ipc::Service> make_window_controller() {
+    return make_iface("IWindowController", [](ipc::Service& s) {
+        s.add_cmd(1, "GetAppletResourceUserId", [](Req&, Rsp& rsp) -> uint32_t {
+            rsp.push<uint64_t>(0x51);
+            return 0;
+        });
+        ignored(s, 10, "AcquireForegroundRights");
+        ignored(s, 11, "ReleaseForegroundRights");
+        ignored(s, 12, "RejectToChangeIntoBackground");
+    });
+}
+
+float volume(float v) { return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v; }   // a NaN stays as it is
+
+std::shared_ptr<ipc::Service> make_audio_controller() {
+    struct Volumes {
+        float main = 1.0f, library = 1.0f;
+    };
+    auto vol = std::make_shared<Volumes>();
+    return make_iface("IAudioController", [vol](ipc::Service& s) {
+        s.add_cmd(0, "SetExpectedMasterVolume", [vol](Req& req, Rsp&) -> uint32_t {
+            Guard g(am_lock());
+            vol->main = volume(req.arg<float>(0));
+            vol->library = volume(req.arg<float>(4));
+            return 0;
+        });
+        s.add_cmd(1, "GetMainAppletExpectedMasterVolume", [vol](Req&, Rsp& rsp) -> uint32_t {
+            Guard g(am_lock());
+            rsp.push<float>(vol->main);
+            return 0;
+        });
+        s.add_cmd(2, "GetLibraryAppletExpectedMasterVolume", [vol](Req&, Rsp& rsp) -> uint32_t {
+            Guard g(am_lock());
+            rsp.push<float>(vol->library);
+            return 0;
+        });
+        s.add_cmd(3, "ChangeMainAppletMasterVolume", [vol](Req& req, Rsp&) -> uint32_t {
+            Guard g(am_lock());
+            vol->main = volume(req.arg<float>(0));   // the fade time (@8) is not used
+            return 0;
+        });
+        ignored(s, 4, "SetTransparentVolumeRate");
+    });
+}
+
+std::shared_ptr<ipc::Service> make_library_applet_creator() {
+    return make_iface("ILibraryAppletCreator", [](ipc::Service& s) {
+        const auto create = [](Req& req, Rsp& rsp) -> uint32_t {
+            rsp.push_object(make_applet_accessor(req.arg<uint32_t>(0), req.arg<uint32_t>(4)));
+            return 0;
+        };
+        s.add_cmd(0, "CreateLibraryApplet", create);
+        s.add_cmd(3, "CreateLibraryAppletEx", create);
+        s.add_cmd(10, "CreateStorage", [](Req& req, Rsp& rsp) -> uint32_t {
+            const int64_t size = req.arg<int64_t>(0);
+            if (size < 0 || size > kStorageMax) return kNoMemory;
+            rsp.push_object(storage_object(std::make_shared<Blob>(static_cast<size_t>(size), 0)));
+            return 0;
+        });
+        s.add_cmd(11, "CreateTransferMemoryStorage", [](Req& req, Rsp& rsp) -> uint32_t {
+            return memory_storage(req, rsp, req.arg<int64_t>(8));
+        });
+        s.add_cmd(12, "CreateHandleStorage", [](Req& req, Rsp& rsp) -> uint32_t { return memory_storage(req, rsp, req.arg<int64_t>(0)); });
+    });
+}
+
+// control.nacp ([fs] nacp, read at each call): two i64 maxima at `off`; a missing one, or one at or below zero, is 0xFFFFFFF.
+void nacp_maxima(long off, int64_t* first, int64_t* second) {
+    int64_t v[2] = {0, 0};
+    const std::string nacp_file = config_get_path("fs", "nacp", "");
+    const FilePtr in = nacp_file.empty() ? FilePtr() : open_file(nacp_file, "rb");
+    if (in && std::fseek(in.get(), off, SEEK_SET) == 0) {
+        if (std::fread(&v[0], 8, 1, in.get()) != 1) v[0] = 0;   // a short read counts as missing
+        else if (std::fread(&v[1], 8, 1, in.get()) != 1) v[1] = 0;
+    }
+    *first = v[0] > 0 ? v[0] : 0xFFFFFFF;
+    *second = v[1] > 0 ? v[1] : 0xFFFFFFF;
+}
+
+// The language the game should use: the console's, when the game supports it (or says nothing); else the first one it supports.
 Language desired_language() {
     const TitleProfile& p = profile();
-    const uint32_t mask = p.supported_languages;
-    const uint32_t lang = static_cast<uint32_t>(p.language);
-    if (mask == 0 || ((mask >> lang) & 1u)) return p.language;
-    for (uint32_t i = 0; i < static_cast<uint32_t>(Language::Count); ++i)
-        if ((mask >> i) & 1u) return static_cast<Language>(i);
+    const uint32_t mine = static_cast<uint32_t>(p.language);
+    const uint32_t supported = p.supported_languages;
+    if (supported == 0 || (mine < 32 && ((supported >> mine) & 1))) return p.language;
+    for (uint32_t i = 0; i < kLanguages; ++i)
+        if ((supported >> i) & 1) return static_cast<Language>(i);
     return p.language;
 }
 
-// IApplicationFunctions: launch parameters, save data sizes, the language and display version, and the events that never fire.
-ServicePtr make_application_functions() {
-    return make_iface("IApplicationFunctions", [](Service& s) {
-        s.add_cmd(1, "PopLaunchParameter", [](Request& req, Response& rsp) -> uint32_t {
+std::shared_ptr<ipc::Service> make_application_functions() {
+    return make_iface("IApplicationFunctions", [](ipc::Service& s) {
+        s.add_cmd(1, "PopLaunchParameter", [](Req& req, Rsp& rsp) -> uint32_t {
             const uint32_t kind = req.arg<uint32_t>(0);
-            if (kind == kLaunchParamUserChannel) {
-                std::shared_ptr<Bytes> d;
-                {
-                    std::lock_guard<std::mutex> lk(mu());
-                    if (!st().user_channel.empty()) {
-                        d = st().user_channel.back();
-                        st().user_channel.pop_back();
-                    }
-                }
-                if (!d) return kNoData;
-                rsp.push_object(new_storage(d));
+            Guard g(am_lock());
+            Proc& p = proc();
+            if (kind == 1) {   // UserChannel: the newest first
+                if (p.user_channel.empty()) return kNoData;
+                BlobPtr b = p.user_channel.back();
+                p.user_channel.pop_back();
+                rsp.push_object(storage_object(std::move(b)));
                 return 0;
             }
-            if (kind == kLaunchParamPreselectedUser) {
-                bool popped;
-                {
-                    std::lock_guard<std::mutex> lk(mu());
-                    popped = st().preselected_popped;
-                    st().preselected_popped = true;
-                }
-                if (popped) return kNoData;
-                rsp.push_object(preselected_user_storage());
+            if (kind == 2 && !p.preselected_popped) {   // PreselectedUser, once
+                p.preselected_popped = true;
+                auto b = std::make_shared<Blob>(0x88, 0);
+                uint64_t hi = 0, lo = 0;
+                accapi::user_uid(&hi, &lo);
+                wr32(*b, 0, 0xC79497CA);
+                wr32(*b, 4, 1);
+                wr64(*b, 8, hi);
+                wr64(*b, 16, lo);
+                rsp.push_object(storage_object(std::move(b)));
                 return 0;
             }
             return kNoData;
         });
-        // EnsureSaveData(Uid) -> u64 required size: the account save data of the title, created when it is missing.
-        s.add_cmd(20, "EnsureSaveData", [](Request& req, Response& rsp) -> uint32_t {
-            const uint64_t hi = req.arg<uint64_t>(0);   // Uid in memory order: first u64 = hi
-            const uint64_t lo = req.arg<uint64_t>(8);
-            bool created = false;
-            const uint32_t rc = fsapi::ensure_account_save(hi, lo, &created);
-            rsp.push<uint64_t>(0);   // nothing is missing: the space and the save are there
-            return rc;
+        s.add_cmd(10, "CreateApplicationAndPushAndRequestToStart", [](Req& req, Rsp&) -> uint32_t {
+            std::vector<Blob> params;
+            if (const auto st = storage_passed(req)) {
+                Guard g(am_lock());
+                params.push_back(*st->bytes());
+            }
+            return request_to_start(req.arg<uint64_t>(0), "CreateApplicationAndPushAndRequestToStart", params);
         });
-        s.add_cmd(21, "GetDesiredLanguage", [](Request&, Response& rsp) -> uint32_t {
+        s.add_cmd(12, "CreateApplicationAndRequestToStart", [](Req& req, Rsp&) -> uint32_t {
+            return request_to_start(req.arg<uint64_t>(0), "CreateApplicationAndRequestToStart", std::vector<Blob>());
+        });
+        s.add_cmd(20, "EnsureSaveData", [](Req& req, Rsp& rsp) -> uint32_t {
+            bool created = false;
+            const uint32_t r = fsapi::ensure_account_save(req.arg<uint64_t>(0), req.arg<uint64_t>(8), &created);
+            if (r) return r;
+            rsp.push<uint64_t>(0);   // no more space needed
+            return 0;
+        });
+        s.add_cmd(21, "GetDesiredLanguage", [](Req&, Rsp& rsp) -> uint32_t {
             rsp.push<uint64_t>(language_code_u64(desired_language()));
             return 0;
         });
-        s.add_cmd(22, "SetTerminateResult", ignored("SetTerminateResult"));
-        // Switch 2 commands with no input (sdk proxies 0x75001bd9f8 / 0x75001bda04): 320 returns two bytes, 321 one byte. Names unknown;
-        // zeros (false) is what boot ran on, and nothing reads them as an object.
-        s.add_cmd(320, "Cmd320", ignored("IApplicationFunctions Cmd320", 2));
-        s.add_cmd(321, "Cmd321", ignored("IApplicationFunctions Cmd321", 1));
-        s.add_cmd(23, "GetDisplayVersion", [](Request&, Response& rsp) -> uint32_t {
-            const std::string& v = profile().display_version;
-            push_bytes(rsp, v.data(), v.size() < 15 ? v.size() : 15, 16);   // NUL-terminated 16-byte string
+        ignored(s, 22, "SetTerminateResult");
+        s.add_cmd(23, "GetDisplayVersion", [](Req&, Rsp& rsp) -> uint32_t {
+            uint8_t v[16] = {};
+            const std::string& dv = profile().display_version;
+            std::memcpy(v, dv.data(), std::min<size_t>(dv.size(), 15));
+            rsp.out.insert(rsp.out.end(), v, v + sizeof v);
             return 0;
         });
-        // ExtendSaveData(type, Uid, normal, journal) -> i64 required size. Only the account save data is kept (its size is stored).
-        s.add_cmd(25, "ExtendSaveData", [](Request& req, Response& rsp) -> uint32_t {
-            const uint8_t type = req.arg<uint8_t>(0);
-            const int64_t normal = req.arg<int64_t>(24);
-            const int64_t journal = req.arg<int64_t>(32);
-            if (type == kSaveDataTypeAccount) {
-                std::lock_guard<std::mutex> lk(mu());
-                st().save_extended = true;
-                st().save_normal = normal;
-                st().save_journal = journal;
+        s.add_cmd(25, "ExtendSaveData", [](Req& req, Rsp& rsp) -> uint32_t {
+            if (req.arg<uint8_t>(0) == 1) {   // Account
+                Guard g(am_lock());
+                Proc& p = proc();
+                p.save_extended = true;
+                p.save_normal = req.arg<int64_t>(24);
+                p.save_journal = req.arg<int64_t>(32);
             }
             rsp.push<int64_t>(0);
             return 0;
         });
-        // GetSaveDataSize(type, Uid) -> (i64 normal, i64 journal): the stored extension, else the fs account save data.
-        s.add_cmd(26, "GetSaveDataSize", [](Request& req, Response& rsp) -> uint32_t {
-            const uint8_t type = req.arg<uint8_t>(0);
-            const uint64_t hi = req.arg<uint64_t>(8);
-            const uint64_t lo = req.arg<uint64_t>(16);
+        s.add_cmd(26, "GetSaveDataSize", [](Req& req, Rsp& rsp) -> uint32_t {
             int64_t normal = 0, journal = 0;
-            uint32_t rc = 0;
-            if (type == kSaveDataTypeAccount) {
+            if (req.arg<uint8_t>(0) == 1) {
                 bool extended;
                 {
-                    std::lock_guard<std::mutex> lk(mu());
-                    extended = st().save_extended;
-                    normal = st().save_normal;
-                    journal = st().save_journal;
+                    Guard g(am_lock());
+                    const Proc& p = proc();
+                    extended = p.save_extended;
+                    normal = p.save_normal;
+                    journal = p.save_journal;
                 }
-                if (!extended) rc = fsapi::account_save_size(hi, lo, &normal, &journal);
+                if (!extended) {
+                    const uint32_t r = fsapi::account_save_size(req.arg<uint64_t>(8), req.arg<uint64_t>(16), &normal, &journal);
+                    if (r) return r;
+                }
             }
             rsp.push<int64_t>(normal);
             rsp.push<int64_t>(journal);
-            return rc;
-        });
-        s.add_cmd(27, "CreateCacheStorage", ignored("CreateCacheStorage", 16));
-        s.add_cmd(28, "GetSaveDataSizeMax", ignored("GetSaveDataSizeMax", 16));
-        s.add_cmd(32, "BeginBlockingHomeButton", ignored("BeginBlockingHomeButton"));
-        s.add_cmd(33, "EndBlockingHomeButton", ignored("EndBlockingHomeButton"));
-        s.add_cmd(34, "SelectApplicationLicense", ignored("SelectApplicationLicense", 1));
-        s.add_cmd(35, "GetDeviceSaveDataSizeMax", ignored("GetDeviceSaveDataSizeMax", 16));
-        s.add_cmd(37, "GetLimitedApplicationLicenseUpgradableEvent", [](Request&, Response& rsp) -> uint32_t {
-            rsp.out_copy.push_back(never_event().new_handle());
             return 0;
         });
-        s.add_cmd(40, "NotifyRunning", [](Request&, Response& rsp) -> uint32_t {
+        s.add_cmd(27, "CreateCacheStorage", [](Req& req, Rsp& rsp) -> uint32_t {
+            const uint32_t r = fsapi::create_cache_storage(req.arg<uint16_t>(0), req.arg<int64_t>(8), req.arg<int64_t>(16));
+            if (r) return r;
+            rsp.push<uint32_t>(1);   // NAND
+            rsp.push<uint32_t>(0);
+            rsp.push<int64_t>(0);
+            return 0;
+        });
+        s.add_cmd(28, "GetSaveDataSizeMax", [](Req&, Rsp& rsp) -> uint32_t {
+            int64_t normal = 0, journal = 0;
+            nacp_maxima(0x3148, &normal, &journal);   // UserAccountSaveDataSizeMax, UserAccountSaveDataJournalSizeMax
+            rsp.push<int64_t>(normal);
+            rsp.push<int64_t>(journal);
+            return 0;
+        });
+        ignored(s, 32, "BeginBlockingHomeButton");
+        ignored(s, 33, "EndBlockingHomeButton");
+        ignored(s, 34, "SelectApplicationLicense", 1);
+        s.add_cmd(35, "GetDeviceSaveDataSizeMax", [](Req&, Rsp& rsp) -> uint32_t {
+            int64_t normal = 0, journal = 0;
+            nacp_maxima(0x3158, &normal, &journal);   // DeviceSaveDataSizeMax, DeviceSaveDataJournalSizeMax
+            rsp.push<int64_t>(normal);
+            rsp.push<int64_t>(journal);
+            return 0;
+        });
+        process_event(s, 37, "GetLimitedApplicationLicenseUpgradableEvent", &Proc::never);
+        s.add_cmd(40, "NotifyRunning", [](Req&, Rsp& rsp) -> uint32_t {
             rsp.push<uint8_t>(1);
             return 0;
         });
-        // GetPseudoDeviceId -> the 16-byte nn::util::Uuid. A fixed value ("NXRT-DEVICE-0001") on every run.
-        s.add_cmd(50, "GetPseudoDeviceId", [](Request&, Response& rsp) -> uint32_t {
-            static const char kId[16] = {'N', 'X', 'R', 'T', '-', 'D', 'E', 'V', 'I', 'C', 'E', '-', '0', '0', '0', '1'};
-            push_bytes(rsp, kId, sizeof kId, sizeof kId);
+        s.add_cmd(50, "GetPseudoDeviceId", [](Req&, Rsp& rsp) -> uint32_t {
+            static constexpr char kDeviceId[] = "NXRT-DEVICE-0001";   // 16 bytes on the wire, no NUL
+            rsp.out.insert(rsp.out.end(), kDeviceId, kDeviceId + 16);
             return 0;
         });
-        s.add_cmd(60, "SetMediaPlaybackStateForApplication", ignored("SetMediaPlaybackStateForApplication"));
-        // GamePlay recording is not available: it reports unsupported and takes the calls that set it up.
-        s.add_cmd(65, "IsGamePlayRecordingSupported", ignored("IsGamePlayRecordingSupported", 1));
-        s.add_cmd(66, "InitializeGamePlayRecording", [](Request& req, Response&) -> uint32_t {
-            close_copies(req);
-            NXLOG_D("am", "InitializeGamePlayRecording: accepted, nothing recorded");
+        ignored(s, 60, "SetMediaPlaybackStateForApplication");
+        ignored(s, 65, "IsGamePlayRecordingSupported", 1);
+        ignored(s, 66, "InitializeGamePlayRecording");
+        ignored(s, 67, "SetGamePlayRecordingState");
+        ignored(s, 68, "RequestFlushGamePlayingMovieForDebug");
+        ignored(s, 90, "EnableApplicationCrashReport");
+        ignored(s, 100, "InitializeApplicationCopyrightFrameBuffer");
+        ignored(s, 101, "SetApplicationCopyrightImage");
+        ignored(s, 110, "QueryApplicationPlayStatistics", 4);
+        s.add_cmd(120, "ExecuteProgram", [](Req& req, Rsp&) -> uint32_t {
+            const uint32_t kind = req.arg<uint32_t>(0);   // 0 program index, 1 sub-application, 2 restart
+            const uint64_t value = req.arg<uint64_t>(8);
+            const int current = program_index_now();
+            const int64_t next = kind == 2 ? current : static_cast<int64_t>(value <= 0xFF ? value : (value & 0xFF));
+            std::vector<Blob> params;   // the user channel goes with it (and stays)
+            {
+                Guard g(am_lock());
+                for (const BlobPtr& b : proc().user_channel) params.push_back(*b);
+            }
+            char what[160], extra[32];
+            std::snprintf(what, sizeof what, "IApplicationFunctions 120 ExecuteProgram(kind %u, %llu)", kind,
+                          static_cast<unsigned long long>(value));
+            std::snprintf(extra, sizeof extra, "kind = %u\n", kind);
+            return hand_off(next, current, extra, params, what);
+        });
+        s.add_cmd(121, "ClearUserChannel", [](Req&, Rsp&) -> uint32_t {
+            Guard g(am_lock());
+            proc().user_channel.clear();
             return 0;
         });
-        s.add_cmd(67, "SetGamePlayRecordingState", ignored("SetGamePlayRecordingState"));
-        s.add_cmd(68, "RequestFlushGamePlayingMovieForDebug", ignored("RequestFlushGamePlayingMovieForDebug"));
-        s.add_cmd(90, "EnableApplicationCrashReport", ignored("EnableApplicationCrashReport"));
-        s.add_cmd(100, "InitializeApplicationCopyrightFrameBuffer", [](Request& req, Response&) -> uint32_t {
-            close_copies(req);
-            NXLOG_D("am", "InitializeApplicationCopyrightFrameBuffer: accepted, no overlay");
+        s.add_cmd(122, "UnpopToUserChannel", [](Req& req, Rsp&) -> uint32_t {
+            if (!object_passed(req)) return 0;
+            const auto st = storage_passed(req);
+            if (!st) return kNotAStorage;
+            Guard g(am_lock());
+            proc().user_channel.push_back(bytes_now(*st));
             return 0;
         });
-        s.add_cmd(101, "SetApplicationCopyrightImage", ignored("SetApplicationCopyrightImage"));
-        s.add_cmd(110, "QueryApplicationPlayStatistics", ignored("QueryApplicationPlayStatistics", 4));
-        s.add_cmd(120, "ExecuteProgram", ignored("ExecuteProgram"));
-        s.add_cmd(121, "ClearUserChannel", [](Request&, Response&) -> uint32_t {
-            std::lock_guard<std::mutex> lk(mu());
-            st().user_channel.clear();
+        s.add_cmd(123, "GetPreviousProgramIndex", [](Req&, Rsp& rsp) -> uint32_t {
+            rsp.push<int32_t>(static_cast<int32_t>(config_get_int("am", "previous_program_index", -1)));
             return 0;
         });
-        // UnpopToUserChannel(IStorage): a copy of the storage goes on the user channel, to be popped by PopLaunchParameter(UserChannel).
-        s.add_cmd(122, "UnpopToUserChannel", [](Request& req, Response&) -> uint32_t {
-            if (req.in_services.empty() || !req.in_services[0]) return 0;
-            auto src = std::dynamic_pointer_cast<AmStorage>(req.in_services[0]);
-            if (!src) return kInvalidStorage;
-            auto copy = std::make_shared<Bytes>(*src->data);
-            std::lock_guard<std::mutex> lk(mu());
-            st().user_channel.push_back(copy);
-            return 0;
-        });
-        s.add_cmd(123, "GetPreviousProgramIndex", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push<int32_t>(-1);   // launched by the system, not by another of the title's programs
-            return 0;
-        });
-        s.add_cmd(124, "EnableApplicationAllThreadDumpOnCrash", ignored("EnableApplicationAllThreadDumpOnCrash"));
-        s.add_cmd(130, "GetGpuErrorDetectedSystemEvent", [](Request&, Response& rsp) -> uint32_t {
-            rsp.out_copy.push_back(never_event().new_handle());
-            return 0;
-        });
-        // Friend invitations: nn::friends::GetFriendInvitationNotificationEvent (sdk 0x75003d8968, vtable slot 0x1B0 = cmd 140; it aborts
-        // if the command fails) and TryPopFriendInvitationNotificationInfo (0x75003d89f0, slot 0x1B8 = cmd 141; 128-2 means "none",
-        // anything else but success aborts). Offline: an event that never fires and nothing to pop.
-        s.add_cmd(140, "GetFriendInvitationStorageChannelEvent", [](Request&, Response& rsp) -> uint32_t {
-            rsp.out_copy.push_back(never_event().new_handle());
-            return 0;
-        });
-        s.add_cmd(141, "TryPopFromFriendInvitationStorageChannel", [](Request&, Response&) -> uint32_t { return kNoData; });
-        s.add_cmd(150, "GetNotificationStorageChannelEvent", [](Request&, Response& rsp) -> uint32_t {
-            rsp.out_copy.push_back(never_event().new_handle());
-            return 0;
-        });
-        s.add_cmd(151, "TryPopFromNotificationStorageChannel", [](Request&, Response&) -> uint32_t { return kNoData; });
-        s.add_cmd(160, "GetHealthWarningDisappearedSystemEvent", [](Request&, Response& rsp) -> uint32_t {
-            rsp.out_copy.push_back(never_event().new_handle());
-            return 0;
-        });
-        s.add_cmd(170, "SetHdcpAuthenticationActivated", ignored("SetHdcpAuthenticationActivated"));
-        s.add_cmd(210, "GetUnknownEvent210", [](Request&, Response& rsp) -> uint32_t {
-            rsp.out_copy.push_back(never_event().new_handle());
-            return 0;
-        });
+        ignored(s, 124, "EnableApplicationAllThreadDumpOnCrash");
+        process_event(s, 130, "GetGpuErrorDetectedSystemEvent", &Proc::never);
+        process_event(s, 140, "GetFriendInvitationStorageChannelEvent", &Proc::never);
+        s.add_cmd(141, "TryPopFromFriendInvitationStorageChannel", [](Req&, Rsp&) -> uint32_t { return kNoData; });
+        process_event(s, 150, "GetNotificationStorageChannelEvent", &Proc::never);
+        s.add_cmd(151, "TryPopFromNotificationStorageChannel", [](Req&, Rsp&) -> uint32_t { return kNoData; });
+        process_event(s, 160, "GetHealthWarningDisappearedSystemEvent", &Proc::never);
+        ignored(s, 170, "SetHdcpAuthenticationActivated");
+        process_event(s, 210, "GetUnknownEvent210", &Proc::never);
+        ignored(s, 320, "Cmd320", 2);
+        ignored(s, 321, "Cmd321", 1);
     });
 }
 
-// IApplicationProxy: the interfaces of one application. Display, process-winding and debug functions are empty here.
-ServicePtr make_application_proxy() {
-    return make_iface("IApplicationProxy", [](Service& s) {
-        s.add_cmd(0, "GetCommonStateGetter", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push_object(make_common_state_getter());
+// [am] graphics_scale, read once per process: 20 or 30, anything else 10.
+uint32_t graphics_scale() {
+    static const uint32_t v = [] {
+        const int64_t s = config_get_int("am", "graphics_scale", 10);
+        return s == 20 || s == 30 ? static_cast<uint32_t>(s) : 10u;
+    }();
+    return v;
+}
+
+std::shared_ptr<ipc::Service> make_graphics_scaling() {
+    return make_iface("IGraphicsScalingParametersFunctions", [](ipc::Service& s) {
+        s.add_cmd(10, "GetGraphicsScalingParameters", [](Req&, Rsp& rsp) -> uint32_t {
+            rsp.push<uint32_t>(graphics_scale());
+            rsp.push<uint32_t>(0);
+            rsp.push<uint64_t>(0);
             return 0;
         });
-        s.add_cmd(1, "GetSelfController", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push_object(make_self_controller());
-            return 0;
-        });
-        s.add_cmd(2, "GetWindowController", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push_object(make_window_controller());
-            return 0;
-        });
-        s.add_cmd(3, "GetAudioController", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push_object(make_audio_controller());
-            return 0;
-        });
-        s.add_cmd(4, "GetDisplayController", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push_object(make_iface("IDisplayController", [](Service&) {}));
-            return 0;
-        });
-        // Switch 2 (switchbrew [S2]): 40 IPerformanceFunctions, 60 IGraphicsScalingParametersFunctions. Commands unknown so far:
-        // stub objects that log what the game asks of them.
-        s.add_cmd(40, "GetPerformanceFunctions", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push_object(std::make_shared<ipc::StubService>("IPerformanceFunctions"));
-            return 0;
-        });
-        s.add_cmd(60, "GetGraphicsScalingParametersFunctions", [](Request&, Response& rsp) -> uint32_t {
-            // nn::oe::GetCurrentGraphicsScale (sdk) maps the first word of cmd 10 to a scale level: 10 -> 0, 20 -> 1, 30 -> 2 (anything else
-            // aborts). Level 0 is the console's full-quality one: Pokopia's dynamic resolution (main 0x710022d338 / 0x710022cd20) tops out
-            // at its level 30 (1920x1080) at scale 0 docked, 24 (1728x972) at scale 1 and 22 (1664x936) at scale 2. [am] graphics_scale
-            // (10, 20 or 30) picks another answer.
-            rsp.push_object(make_iface("IGraphicsScalingParametersFunctions", [](Service& g) {
-                g.add_cmd(10, "GetGraphicsScalingParameters", [](Request&, Response& r) -> uint32_t {
-                    static const uint32_t answer = [] {
-                        const int64_t v = nxrt::config_get_int("am", "graphics_scale", 10);
-                        return (v == 20 || v == 30) ? static_cast<uint32_t>(v) : 10u;
-                    }();
-                    r.push<uint32_t>(answer);
-                    r.push<uint32_t>(0);
-                    r.push<uint64_t>(0);
-                    return 0;
-                });
-                g.add_cmd(1050, "SetGraphicsScalingNotification (S2)", [](Request&, Response&) -> uint32_t { return 0; });
-            }));
-            return 0;
-        });
-        s.add_cmd(10, "GetProcessWindingController", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push_object(make_iface("IProcessWindingController", [](Service&) {}));
-            return 0;
-        });
-        s.add_cmd(11, "GetLibraryAppletCreator", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push_object(make_library_applet_creator());
-            return 0;
-        });
-        s.add_cmd(20, "GetApplicationFunctions", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push_object(make_application_functions());
-            return 0;
-        });
-        s.add_cmd(1000, "GetDebugFunctions", [](Request&, Response& rsp) -> uint32_t {
-            rsp.push_object(make_iface("IDebugFunctions", [](Service&) {}));
-            return 0;
-        });
+        s.add_cmd(1050, "SetGraphicsScalingNotification (S2)", [](Req&, Rsp&) -> uint32_t { return 0; });
     });
 }
 
-// appletOE: IApplicationProxyService, OpenApplicationProxy(pid, process copy). appletAE: IAllSystemAppletProxiesService, whose
-// OpenSystemApplicationProxy (350) answers the same proxy.
-ServicePtr make_applet_service(const char* name, bool is_system) {
-    return make_iface(name, [is_system](Service& s) {
-        const uint32_t open_cmd = is_system ? 350u : 0u;
-        s.add_cmd(open_cmd, is_system ? "OpenSystemApplicationProxy" : "OpenApplicationProxy",
-                  [](Request& req, Response& rsp) -> uint32_t {
-                      close_copies(req);   // the process handle is not kept
-                      rsp.push_object(make_application_proxy());
-                      return 0;
-                  });
-        if (!is_system)   // Switch 2 SDKs open the proxy with OpenApplicationProxy2 (10); same answer
-            s.add_cmd(10, "OpenApplicationProxy2", [](Request& req, Response& rsp) -> uint32_t {
-                close_copies(req);
+std::shared_ptr<ipc::Service> make_application_proxy() {
+    return make_iface("IApplicationProxy", [](ipc::Service& s) {
+        const auto getter = [&s](uint32_t id, const char* name, std::shared_ptr<ipc::Service> (*make)()) {
+            s.add_cmd(id, name, [make](Req&, Rsp& rsp) -> uint32_t {
+                rsp.push_object(make());
+                return 0;
+            });
+        };
+        getter(0, "GetCommonStateGetter", make_common_state_getter);
+        getter(1, "GetSelfController", make_self_controller);
+        getter(2, "GetWindowController", make_window_controller);
+        getter(3, "GetAudioController", make_audio_controller);
+        getter(4, "GetDisplayController", [] { return empty_iface("IDisplayController"); });
+        getter(10, "GetProcessWindingController", [] { return empty_iface("IProcessWindingController"); });
+        getter(11, "GetLibraryAppletCreator", make_library_applet_creator);
+        getter(20, "GetApplicationFunctions", make_application_functions);
+        getter(40, "GetPerformanceFunctions",
+               [] { return std::static_pointer_cast<ipc::Service>(std::make_shared<ipc::StubService>("IPerformanceFunctions")); });
+        getter(60, "GetGraphicsScalingParametersFunctions", make_graphics_scaling);
+        getter(1000, "GetDebugFunctions", [] { return empty_iface("IDebugFunctions"); });
+    });
+}
+
+// appletOE / appletAE: each open answers a new proxy (the process handle passed along is the client's: not used, not closed).
+std::shared_ptr<ipc::Service> make_proxy_service(const char* name, std::initializer_list<std::pair<uint32_t, const char*>> opens) {
+    return make_iface(name, [opens](ipc::Service& s) {
+        for (const auto& o : opens)
+            s.add_cmd(o.first, o.second, [](Req&, Rsp& rsp) -> uint32_t {
                 rsp.push_object(make_application_proxy());
                 return 0;
             });
@@ -1394,45 +1928,64 @@ ServicePtr make_applet_service(const char* name, bool is_system) {
 }  // namespace
 
 void register_am() {
-    add("appletOE", [] { return make_applet_service("appletOE", false); });
-    add("appletAE", [] { return make_applet_service("appletAE", true); });
+    add("appletOE", [] { return make_proxy_service("appletOE", {{0, "OpenApplicationProxy"}, {10, "OpenApplicationProxy2"}}); });
+    add("appletAE", [] { return make_proxy_service("appletAE", {{350, "OpenSystemApplicationProxy"}}); });
 }
 
 void am_reset() {
-    std::lock_guard<std::mutex> lk(mu());
-    st() = fresh_state();
+    Guard g(am_lock());
+    proc_slot() = start_state();
 }
-
-namespace swkbdui {
-void enable_prompt(bool on) { prompt_flag().store(on); }
-bool prompt_enabled() { return prompt_flag().load(); }
-}  // namespace swkbdui
 
 namespace amctl {
 
 void set_docked(bool docked) {
-    std::lock_guard<std::mutex> lk(mu());
-    st().docked = docked;
-    if (st().operation_notify) queue_message(kMsgOperationModeChanged);
-    if (st().performance_notify) queue_message(kMsgPerformanceModeChanged);
+    {
+        Guard g(am_lock());
+        proc().docked = docked;
+    }
+    hid_mode_changed();   // the npads' style events first (hid reads the mode back: not under am's lock)
+    Guard g(am_lock());
+    Proc& p = proc();
+    if (p.mode_notify) queue_message(p, kMsgOperationMode);
+    if (p.perf_notify) queue_message(p, kMsgPerformanceMode);
 }
 
 void set_focus(bool in_focus) {
-    std::lock_guard<std::mutex> lk(mu());
-    st().focus = in_focus ? kFocusInFocus : kFocusOutOfFocus;
-    queue_message(kMsgFocusStateChanged);
+    Guard g(am_lock());
+    Proc& p = proc();
+    p.host_focus = in_focus;
+    refresh_focus(p);
+}
+
+void applet_open(bool open) {
+    Guard g(am_lock());
+    Proc& p = proc();
+    if (open) applet_opened(p);
+    else applet_closed(p);
+}
+
+void set_exit_hook(void (*fn)(int code, const char* why)) {
+    g_on_exit.store(fn);   // null: a plain exit
 }
 
 bool docked() {
-    std::lock_guard<std::mutex> lk(mu());
-    return st().docked;
+    Guard g(am_lock());
+    return proc().docked;
 }
 
 bool in_focus() {
-    std::lock_guard<std::mutex> lk(mu());
-    return st().focus == kFocusInFocus;
+    Guard g(am_lock());
+    return proc().focus == kInFocus;
 }
 
 }  // namespace amctl
+
+namespace swkbdui {
+
+void enable_prompt(bool on) { g_swkbd_prompt.store(on); }
+bool prompt_enabled() { return g_swkbd_prompt.load(); }
+
+}  // namespace swkbdui
 
 }  // namespace nxrt::services

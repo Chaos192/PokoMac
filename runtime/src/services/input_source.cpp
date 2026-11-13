@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // The input source the hid service reads (include/nxrt/input_source.h), and the vibration sink the hid service forwards to.
 #include <atomic>
 #include <mutex>

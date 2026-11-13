@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // Switch 2 Joy-Con 2 mouse ("Nmouse" / "Jcms") from the PC mouse. The hid service reports one virtual Joy-Con 2 (R) that works as a
 // mouse and writes its state into the game's Nmouse transfer memory (layout: docs/hid_mouse_sw2.md). The play layer feeds it the host
 // pointer once per frame; whoever owns the mouse camera asks here whether it must hand the mouse over.
@@ -41,6 +43,9 @@ void jc2_mouse_request(bool want);
 bool jc2_mouse_wants_pointer();
 // True while the virtual Joy-Con 2 mouse is on its surface (the game sees mouse input): the camera must not use the mouse counts.
 bool jc2_mouse_active();
+// True once the game has set up the Joy-Con 2 mouse (InitializeNmouse) and lists it (mode auto or on): a real Joy-Con 2 then turns its own
+// mouse sensor on (nxrt/sw2, as the console does only for a game that uses it).
+bool jc2_mouse_listed();
 
 // The coordinate space of the pointer x, y the game reads (game layer, any thread). The pointer range from InitializeNmouse stays what the
 // state reports, but a game that unprojects x, y with its own screen size (Pokopia: its render size) needs x, y in that size.

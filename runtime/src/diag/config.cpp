@@ -309,6 +309,8 @@ bool config_cache_env(bool on) {
     return g_cache_on.load(std::memory_order_relaxed);
 }
 
+std::string config_get_path(const char* section, const char* key, const char* def) { return config_get_str(section, key, def); }
+
 std::string run_report_dir() {
     namespace fs = std::filesystem;
     auto folder_of = [](const std::string& file) {

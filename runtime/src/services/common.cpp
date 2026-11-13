@@ -356,6 +356,12 @@ const TitleProfile& profile() {
     return g_prof;
 }
 
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+int program_index_now() {
+    if (config_has("am", "program_index")) return static_cast<int>(config_get_int("am", "program_index", 0));
+    return static_cast<int>(program_id_now() & 0xFF);   // program id = the application's id + the index (an application id ends in 000)
+}
+
 uint64_t program_id_now() {
     if (config_has("process", "program_id")) return static_cast<uint64_t>(config_get_int("process", "program_id", 0));
     return static_cast<uint64_t>(config_get_int("title", "program_id", static_cast<int64_t>(game_defaults().program_id)));

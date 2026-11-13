@@ -875,6 +875,19 @@ uint32_t ensure_account_save(uint64_t uid_hi, uint64_t uid_lo, bool* created) {
     return r;
 }
 
+// am CreateCacheStorage (AnySwitch's am.cpp asks it). Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+uint32_t create_cache_storage(uint16_t index, int64_t size, int64_t journal) {
+    SaveAttr a;
+    a.application_id = profile().application_id;
+    a.type = 5;
+    a.index = index;
+    std::memcpy(a.raw, &a.application_id, 8);
+    a.raw[32] = 5;
+    std::memcpy(a.raw + 34, &index, 2);
+    const uint32_t r = create_save(a, size, journal, profile().save_data_owner_id);
+    return r == fs::rc::kPathAlreadyExists ? 0 : r;
+}
+
 uint32_t account_save_size(uint64_t uid_hi, uint64_t uid_lo, int64_t* size, int64_t* journal) {
     SaveAttr a;
     std::memcpy(a.uid, &uid_hi, 8);
