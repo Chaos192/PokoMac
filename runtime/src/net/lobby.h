@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // The lobby under the ldn HLE (multiplayer phase 2): rooms (= LDN networks) on a relay server, and the vnet::Link that carries a room's
 // UDP datagrams. Game-independent.
 //
@@ -72,6 +74,9 @@ struct Room {
     uint8_t security_mode = 0;
     std::vector<RoomNode> nodes;   // in the server's order (node 0, the host, first)
     std::vector<uint8_t> adv;
+    // 0 from a relay over the wire (one reader thread: its states come in order). The LoopbackRelay numbers its states, as it hands
+    // them out on the threads of whichever clients caused them: a receiver drops a state that comes after a newer one.
+    uint64_t seq = 0;
 };
 
 struct RoomConfig {

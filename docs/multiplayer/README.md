@@ -62,6 +62,31 @@ link as pokopia-native does. Either way they are checked end to end with the roo
 The launcher's Link Play page keeps the old protocol under **Advanced** (`[net] protocol = linkplay`), for a session where everyone still
 has an earlier build of this port. It cannot meet pokopia-native players.
 
+## Other ways to play local wireless (`[net] protocol`)
+
+Pokopia's default stays `native` (pokopia-native's protocol, above), unchanged. These modes come from AnySwitch (by Chaos192,
+[github.com/Chaos192/AnySwitch](https://github.com/Chaos192/AnySwitch)); they carry the game's local wireless (`ldn`) another way, chosen
+in `pkp.ini` and applied the next time the game starts. Nothing in them contacts Nintendo.
+
+- **`protocol = lan`: with Ryujinx players and consoles running ldn_mitm, on the same network.** Local wireless over the LAN in
+  **ldn_mitm**'s format: the protocol of the ldn_mitm Atmosphère module and of Ryujinx's "ldn_mitm" multiplayer mode. Everyone on the
+  network sees everyone's rooms; there is no relay and no room code. `lan_ip = auto` (the first up interface with a private address, or
+  one of this machine's IPv4 addresses) and `lan_peers = <IPv4>[,...]` (hosts to look for when the network drops broadcasts). Ports: UDP
+  and TCP 11452, the game's own UDP ports on the LAN address, and UDP 11453 for TCP between two PokoMac or AnySwitch players. Allow the
+  game on private networks at the firewall prompt. The host enforces the room's player limit and the accept policy, and a player learns
+  when the host left.
+- **`protocol = ryuldn`: with Ryujinx players over the internet.** Rooms on a Ryujinx LDN master server ("RyuLDN"): `ryuldn_server =
+  <host>[:port]` (port 30456 by default; empty: off) and `ryuldn_passphrase = Ryujinx-xxxxxxxx` for Ryujinx's private rooms. Rooms,
+  scans and the game's UDP go through that server. Not yet: TCP between players, Ryujinx's direct peer-to-peer links, the accept filter.
+- **`protocol = linkplay`** (the old protocol above) also gains AnySwitch's fixes: a host can host again right after a session on macOS
+  (the relay's listener reuses its address), the host refuses a refused station by address and name, host socket timeouts on BSD
+  sockets, TCP between local wireless nodes (vtcp: one segment resent after a timeout, then slow start; early segments wait outside the
+  receive window), private networks (CreateNetworkPrivate / ConnectPrivate), and the room's status for the launcher (`net-status.json`,
+  `net-control.txt` beside `pkp.log`).
+
+Tests, all on this machine's loopback: `nxrt_services_test` (families `ldn`, `ldn_ryu`, `lanroom`, `bsd_mmsg`, `net`) and
+`python tools/net/ldn_pair_test.py --exe <nxrt_services_test> --tmp <folder>` (two processes: relay, host-left, lan, crash, mitm).
+
 ## Common problems
 
 - **The host is not found:** pick **Visit by address** and type the host's address. Check the firewall prompt and the Private network profile.

@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // Offline network services (S3c): nifm, bsd, bsdcfg, ssl, nim:eca, friend, prepo, pctl, bcat, ldn, nsd, sfdnsres, ntc, ngct, ngc, notif.
 // The console has no network connection, no friends and no BCAT data. Every command answers what a console in that state gives. The one
 // exceptions are ldn (local wireless over the relay server: services/ldn.cpp registers ldn:u's objects, this file the name) and bsd's UDP
@@ -16,6 +18,7 @@
 // context count, the pki ids) lives in st(); network_reset() puts it back to the start-up value (and closes every socket, drops the
 // current vnet link and the ldn relay connection). Per-datagram traffic is logged at Debug with tag "net" (vsock.cpp).
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <initializer_list>
@@ -31,7 +34,9 @@
 #include "nxrt/log.h"
 #include "../net/vnet.h"
 #include "../net/vsock.h"
+#include "bsd_mmsg.h"
 #include "coop.h"
+#include "lan_room.h"
 #include "ldn.h"
 #include "services_internal.h"
 
@@ -47,7 +52,7 @@ constexpr uint32_t kSslInvalidOption = res(123, 126);         // ssl InvalidOpti
 constexpr uint32_t kFsPathNotFound = res(2, 1002);            // fs PathNotFound 2002: the bcat delivery cache is empty
 constexpr uint32_t kBsdNetDown = 100;                         // ENETDOWN (Linux errno numbers, as Switchbrew's bsd page says)
 constexpr uint32_t kNetdbHostNotFound = 1;                    // HOST_NOT_FOUND
-constexpr int32_t kEaiNoName = -2;                            // EAI_NONAME
+constexpr int32_t kEaiNoName = 8;                             // EAI_NONAME: the console's resolver numbers them as FreeBSD does
 
 // ---- process state -----------------------------------------------------------------------------------------------------------------------
 struct NetState {
@@ -74,10 +79,62 @@ void note(const char* svc, uint32_t id, const char* name) {
     NXLOG_I("net", "%s cmd %u %s: answered offline (first use)", svc, id, name);
 }
 
-// [net] online_test, read once: nifm and ntc report online (nothing reaches the network: bsd and BCAT answer as before).
-bool online_test() {
-    static const bool on = config_get_bool("net", "online_test", false);
-    return on;
+// [net] online_test: nifm and ntc report online (nothing reaches the network: bsd and BCAT answer as before). Read per call (the setting
+// does not change while a game runs; tests change it between cases). PokoMac has no host redirection (AnySwitch's net/redirect.h).
+bool online_test() { return config_get_bool("net", "online_test", false); }
+
+// ---- the network nifm offers the game ----------------------------------------------------------------------------------------------------
+// One state behind every nifm answer, read at each call (not when the service object is made), from these sources in order:
+//   the LAN room (nifm_set_lan_source: online-servers' services/lan_room, a game's own LAN mode over a relay room): its address and mask;
+//   [net] online_test (online_test above): online on 10.0.0.2/24, gateway 10.0.0.1 (no host address is shown);
+//   otherwise no connection (nifm 110-300), as before.
+std::atomic<NifmLanSource>& lan_source() {
+    static std::atomic<NifmLanSource> f{nullptr};
+    return f;
+}
+
+struct NifmNow {
+    bool online = false;
+    uint32_t ip = 0, mask = 0, gateway = 0;   // host order
+};
+
+NifmNow nifm_now() {
+    NifmNow n;
+    if (const NifmLanSource f = lan_source().load()) {
+        uint32_t ip = 0, mask = 0;
+        if (f(&ip, &mask)) {
+            n.online = true;
+            n.ip = ip;
+            n.mask = mask;
+            return n;
+        }
+    }
+    if (online_test()) {
+        n.online = true;
+        n.ip = 0x0A000002;
+        n.mask = 0xFFFFFF00;
+        n.gateway = 0x0A000001;
+    }
+    return n;
+}
+
+// nn::nifm::IpV4Address: the four bytes in network order (Ryujinx Nifm/StaticService/Types/IpV4Address.cs).
+void put_ip(std::vector<uint8_t>& b, uint32_t ip) {
+    for (int k = 24; k >= 0; k -= 8) b.push_back(static_cast<uint8_t>(ip >> k));
+}
+
+// IpAddressSetting (0xD: u8 dhcp, address, mask, gateway) then DnsSetting (9: u8 dynamic, primary, secondary): 0x16 bytes
+// (Ryujinx Nifm/StaticService/Types/IpAddressSetting.cs, DnsSetting.cs; Lichii nifm.cpp pushes the same two raw).
+std::vector<uint8_t> ip_config(const NifmNow& n) {
+    std::vector<uint8_t> b;
+    b.push_back(1);
+    put_ip(b, n.ip);
+    put_ip(b, n.mask);
+    put_ip(b, n.gateway);
+    b.push_back(0);
+    put_ip(b, 0);
+    put_ip(b, 0);
+    return b;
 }
 
 constexpr int kMaxCallLogs = 50;
@@ -271,6 +328,17 @@ struct TwoEvents {
     ServiceEvent b;
 };
 
+// A request's evaluation (nxnative services.md "Network requests stay on hold before they settle"): on the console nifm evaluates a
+// submitted request while it serves the queries, so the first query after Submit still finds it OnHold, and a game that starts a thread
+// that submits before it publishes its own state relies on that (Pikmin 4's BCAT runnable: answered settled at once, the thread's
+// "unavailable" was overwritten and the boot waited for good, 1 boot in 6). So: the first GetRequestState after Submit answers OnHold and
+// the state-change events are signalled (a waiter wakes and asks again), the next answers settled. Settled by query count, not by time:
+// a game that bounds its wait by the number of queries (Hades: 2,000) ends it either way.
+struct RequestEval {
+    std::mutex mu;
+    bool on_hold = false;   // submitted and not yet queried
+};
+
 // =============================================================================================================================================
 // nifm: nifm:u, nifm:a, nifm:s (IStaticService). Switchbrew "Network Interface services", ScarletNX nifm.swipc, Ryujinx Nifm/.
 // No connection: GetCurrentIpAddress and the other address/profile answers return nifm 300 (NoInternetConnection); with [net] online_test = on
@@ -295,16 +363,63 @@ std::shared_ptr<ipc::Service> make_scan_request() {
 }
 
 std::shared_ptr<ipc::Service> make_request() {
-    const bool online = online_test();
     auto ev = std::make_shared<TwoEvents>();
-    return make_iface("nn::nifm::detail::IRequest", [ev, online](ipc::Service& s) {
+    auto eval = std::make_shared<RequestEval>();
+    return make_iface("nn::nifm::detail::IRequest", [ev, eval](ipc::Service& s) {
+        // 1 = Free: nothing was accepted; 2 = OnHold: being evaluated; 3 = Accepted (nifm_now online)
+        cmd(s, "nifm", 0, "GetRequestState", [ev, eval](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            const bool online = nifm_now().online;
+            bool hold;
+            {
+                std::lock_guard<std::mutex> lk(eval->mu);
+                hold = eval->on_hold;
+                eval->on_hold = false;
+            }
+            if (hold) {   // settled by the next query: the state changes, so its events fire
+                ev->a.signal();
+                ev->b.signal();
+            }
+            rsp.push(static_cast<uint32_t>(hold ? 2 : online ? 3 : 1));
+            return 0;
+        });
+        cmd(s, "nifm", 1, "GetResult", [eval](ipc::Request&, ipc::Response&) -> uint32_t {
+            const bool online = nifm_now().online;
+            std::lock_guard<std::mutex> lk(eval->mu);
+            eval->on_hold = false;   // the result is asked for: evaluated
+            return online ? 0 : kNifmNoConnection;
+        });
+        cmd(s, "nifm", 3, "Cancel", [eval](ipc::Request&, ipc::Response&) -> uint32_t {
+            std::lock_guard<std::mutex> lk(eval->mu);
+            eval->on_hold = false;
+            return 0;
+        });
+        cmd(s, "nifm", 4, "Submit", [eval](ipc::Request&, ipc::Response&) -> uint32_t {
+            nifm_now();   // the sources hear of the request now (the LAN room joins its relay room on the first one)
+            std::lock_guard<std::mutex> lk(eval->mu);
+            eval->on_hold = true;
+            return 0;
+        });
+        // SetRequirement (5: the 0x24-byte Requirement) and SetRequirementPreset (6: u32 preset) are accepted; each distinct preset, and
+        // each distinct requirement's first 16 bytes, is logged once, so a run shows which one a game's local-network mode asks for
+        // (nn::nifm::SetLocalNetworkMode) and which its internet sign-in asks for.
+        cmd(s, "nifm", 6, "SetRequirementPreset", [](ipc::Request& req, ipc::Response&) -> uint32_t {
+            static std::mutex mu;
+            static std::set<uint32_t> seen;
+            const uint32_t preset = req.arg<uint32_t>(0);
+            std::lock_guard<std::mutex> lk(mu);
+            if (seen.insert(preset).second) NXLOG_I("net", "nifm: a request with requirement preset %u", preset);
+            return 0;
+        });
+        cmd(s, "nifm", 5, "SetRequirement", [](ipc::Request& req, ipc::Response&) -> uint32_t {
+            static std::mutex mu;
+            static std::set<std::string> seen;
+            char hex[33] = {};
+            for (size_t i = 0; i < 16; ++i) std::snprintf(hex + 2 * i, 3, "%02x", req.arg<uint8_t>(i));
+            std::lock_guard<std::mutex> lk(mu);
+            if (seen.insert(hex).second) NXLOG_I("net", "nifm: a request with requirement %s...", hex);
+            return 0;
+        });
         rows(s, "nifm", {
-            {0, "GetRequestState", K::U32, static_cast<uint64_t>(online ? 3 : 1)},      // 1 = Free: nothing was accepted; 3 = Accepted (online_test)
-            {1, "GetResult", online ? K::Ok : K::Fail, kNifmNoConnection},
-            {3, "Cancel", K::Ok},
-            {4, "Submit", K::Ok},
-            {5, "SetRequirement", K::Ok},
-            {6, "SetRequirementPreset", K::Ok},
             {8, "SetPriority", K::Ok},
             {9, "SetNetworkProfileId", K::Ok},
             {10, "SetRejectable", K::Ok},
@@ -340,10 +455,9 @@ std::shared_ptr<ipc::Service> make_request() {
 }
 
 std::shared_ptr<ipc::Service> make_general() {
-    const bool online = online_test();
     const uint32_t client_id = alloc_client_id();
     auto ev = std::make_shared<ServiceEvent>();
-    return make_iface("nn::nifm::detail::IGeneralService", [client_id, ev, online](ipc::Service& s) {
+    return make_iface("nn::nifm::detail::IGeneralService", [client_id, ev](ipc::Service& s) {
         cmd(s, "nifm", 1, "GetClientId", [client_id](ipc::Request& req, ipc::Response&) -> uint32_t {
             buf_write(req.out_buf(0), &client_id, sizeof client_id);
             return 0;
@@ -360,25 +474,65 @@ std::shared_ptr<ipc::Service> make_general() {
             rsp.out_copy.push_back(ev->new_handle());
             return 0;
         });
+        // GetCurrentNetworkProfile -> buffer 0x1A, NetworkProfileData (0x17C: IpSettingData 0xC2 = IpAddressSetting, DnsSetting, 0xAA
+        // ProxySetting, u16 MTU; u128 uuid; 64 B name; 4 B; WirelessSettingData 0x65; 1 B): Ryujinx Nifm/StaticService/IGeneralService.cs
+        cmd(s, "nifm", 5, "GetCurrentNetworkProfile", [](ipc::Request& req, ipc::Response&) -> uint32_t {
+            const NifmNow n = nifm_now();
+            if (!n.online) return kNifmNoConnection;
+            std::vector<uint8_t> p = ip_config(n);
+            p.resize(0xC2, 0);                                  // ProxySetting and MTU: none
+            static const uint8_t kUuid[16] = {'P', 'o', 'k', 'o', 'M', 'a', 'c', 0, 0, 0x4E, 0x45, 0x54, 0x01, 0, 0, 1};
+            p.insert(p.end(), kUuid, kUuid + 16);
+            const char kName[] = "PokoMac";
+            p.insert(p.end(), kName, kName + sizeof kName - 1);
+            p.resize(0x17C, 0);
+            buf_write(req.out_buf(0), p.data(), p.size());
+            return 0;
+        });
+        cmd(s, "nifm", 12, "GetCurrentIpAddress", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            const NifmNow n = nifm_now();
+            if (!n.online) return kNifmNoConnection;
+            std::vector<uint8_t> b;
+            put_ip(b, n.ip);
+            rsp.out.insert(rsp.out.end(), b.begin(), b.end());
+            return 0;
+        });
+        cmd(s, "nifm", 15, "GetCurrentIpConfigInfo", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            const NifmNow n = nifm_now();
+            if (!n.online) return kNifmNoConnection;
+            const std::vector<uint8_t> b = ip_config(n);
+            rsp.out.insert(rsp.out.end(), b.begin(), b.end());
+            return 0;
+        });
+        cmd(s, "nifm", 18, "GetInternetConnectionStatus", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            if (!nifm_now().online) return kNifmNoConnection;
+            const uint8_t st[3] = {1, 3, 4};                    // Wifi, strength 3, Connected (Ryujinx's answer)
+            rsp.out.insert(rsp.out.end(), st, st + sizeof st);
+            return 0;
+        });
+        for (uint32_t id : {21u, 22u}) {
+            cmd(s, "nifm", id, id == 21 ? "IsAnyInternetRequestAccepted" : "IsAnyForegroundRequestAccepted",
+                [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+                    rsp.push(static_cast<uint8_t>(nifm_now().online ? 1 : 0));
+                    return 0;
+                });
+        }
+        cmd(s, "nifm", 33, "ConfirmSystemAvailability", [](ipc::Request&, ipc::Response&) -> uint32_t {
+            return nifm_now().online ? 0 : kNifmNoConnection;
+        });
         rows(s, "nifm", {
-            {5, "GetCurrentNetworkProfile", K::Fail, kNifmNoConnection},
             {6, "EnumerateNetworkInterfaces", K::S32, 0},
             {7, "EnumerateNetworkProfiles", K::S32, 0},
             {8, "GetNetworkProfile", K::Fail, kNifmNoConnection},
             {9, "SetNetworkProfile", K::Zeros, 0, 16},          // returns a Uuid (16 zero bytes); the profile is not kept
             {10, "RemoveNetworkProfile", K::Ok},
             {11, "GetScanDataOld", K::S32, 0},
-            {12, "GetCurrentIpAddress", online ? K::Bytes : K::Fail, online ? 0x0200000Aull : kNifmNoConnection, 4},   // online_test: 10.0.0.2
             {13, "GetCurrentAccessPointOld", K::Fail, kNifmNoConnection},
             {14, "CreateTemporaryNetworkProfile", K::Fail, kNifmNoConnection},
-            {15, "GetCurrentIpConfigInfo", K::Fail, kNifmNoConnection},
             {16, "SetWirelessCommunicationEnabled", K::Ok},
             {17, "IsWirelessCommunicationEnabled", K::U8, 1},   // radio on, no access point
-            {18, "GetInternetConnectionStatus", online ? K::Bytes : K::Fail, online ? 0x040301ull : kNifmNoConnection, 3},   // online_test: Wifi, strength 3, Connected
             {19, "SetEthernetCommunicationEnabled", K::Ok},
             {20, "IsEthernetCommunicationEnabled", K::U8, 0},   // no adapter
-            {21, "IsAnyInternetRequestAccepted", K::U8, static_cast<uint64_t>(online ? 1 : 0)},
-            {22, "IsAnyForegroundRequestAccepted", K::U8, static_cast<uint64_t>(online ? 1 : 0)},
             {23, "PutToSleep", K::Ok},
             {24, "WakeUp", K::Ok},
             {25, "GetSsidListVersion", K::U32, 0},
@@ -388,7 +542,6 @@ std::shared_ptr<ipc::Service> make_general() {
             {29, "SetWirelessCommunicationEnabledForTest", K::Ok},
             {30, "SetEthernetCommunicationEnabledForTest", K::Ok},
             {32, "GetTelemetryInfo", K::Ok},
-            {33, "ConfirmSystemAvailability", online ? K::Ok : K::Fail, kNifmNoConnection},
             {34, "SetBackgroundRequestEnabled", K::Ok},
             {35, "GetScanData", K::S32, 0},
             {36, "GetCurrentAccessPoint", K::Fail, kNifmNoConnection},
@@ -413,6 +566,8 @@ std::shared_ptr<ipc::Service> make_general() {
             {55, "GetDefaultNetworkEmulationProfileId", K::U32, 0},
             {56, "GetNetworkEmulationProfile", K::Fail, kNifmNoConnection},
             {57, "SetWowlTcpKeepAliveTimeout", K::Ok},
+            // 101 (SDK 21+, no name known): Lichii answers success with 32 zero words; Ocarina of Time's network setup aborts on a refusal
+            {101, "Cmd101", K::Zeros, 0, 0x80},
         });
     });
 }
@@ -486,7 +641,7 @@ uint32_t bsd_recv(ipc::Response& rsp, int fd, int flags, const ipc::Buffer& data
 // every command on one of them goes to coop_vnet_*, everything else stays on the vsock table. The module answers >= 0 or -errno in
 // FreeBSD numbers; bsd answers Linux numbers (as vsock does), so they are translated. It has no connected sockets: Send/Write on one
 // answers EDESTADDRREQ, Connect, GetPeerName and Shutdown ENETDOWN (pokopia-native's answer). Poll and Select wait on the module when
-// every descriptor in the set is one of its; any other set keeps the offline answer (-1, ENETDOWN).
+// every descriptor in the set is one of its; any other set waits on the socket table (vsock.h).
 static_assert(vsock::kMaxSockets <= COOP_FD_BASE, "vsock descriptors (0..kMaxSockets-1) must stay below the co-op module's");
 
 constexpr int kCoopFamily = 2, kCoopDgram = 2;
@@ -543,7 +698,15 @@ uint32_t bsd_poll(ipc::Request& req, ipc::Response& rsp) {
         any = true;
         if (!virt || !coop_fd(p.fd)) virt = false;
     }
-    if (!virt || !any) return bsd_ret(rsp, {-1, kBsdNetDown});
+    if (!virt || !any) {
+        // The descriptors of the socket table (UDP sockets, event descriptors), or none at all: poll waits on them (vsock.h), as the
+        // console's does with no network. gRPC (SDK 22 titles) polls its event descriptors this way; a set it cannot wait on would fail.
+        static_assert(sizeof(coop_pollfd) == sizeof(vsock::PollFd), "pollfd layouts");
+        if (fds.size() != nfds || buf_read(req.in_buf(0), fds.data(), want) != want) return bsd_ret(rsp, {-1, vsock::kEinval});
+        const vsock::Ret r = vsock::stack().poll(reinterpret_cast<vsock::PollFd*>(fds.data()), fds.size(), timeout);
+        if (!r.err) buf_write(req.out_buf(0), fds.data(), want);
+        return bsd_ret(rsp, r);
+    }
     const vsock::Ret r = coop_r(coop_vnet_poll(n, fds.data(), fds.size(), timeout));
     if (!r.err) buf_write(req.out_buf(0), fds.data(), want);
     return bsd_ret(rsp, r);
@@ -570,9 +733,16 @@ uint32_t bsd_select(ipc::Request& req, ipc::Response& rsp) {
             if (!virt || !coop_fd(fd)) virt = false;
         }
     }
-    if (!virt || !any) return bsd_ret(rsp, {-1, kBsdNetDown});
     int64_t ms = no_timeout ? -1 : sec * 1000 + usec / 1000;
     if (ms > 0x7fffffff) ms = 0x7fffffff;
+    if (!virt || !any) {   // the socket table's descriptors, or none: as Poll above
+        const vsock::Ret r = vsock::stack().select(nfds, have[0] ? sets[0] : nullptr, have[1] ? sets[1] : nullptr, have[2] ? sets[2] : nullptr,
+                                                   static_cast<int>(ms));
+        if (!r.err)
+            for (int k = 0; k < 3; ++k)
+                if (have[k]) buf_write(req.out_buf(static_cast<size_t>(k)), sets[k], sizeof sets[k]);
+        return bsd_ret(rsp, r);
+    }
     const vsock::Ret r = coop_r(coop_vnet_select(n, nfds, have[0] ? sets[0] : nullptr, have[1] ? sets[1] : nullptr,
                                                  have[2] ? sets[2] : nullptr, static_cast<int>(ms)));
     if (!r.err)
@@ -633,10 +803,22 @@ void add_bsd_udp(ipc::Service& s) {
         if (const uint32_t e = read_sockaddr(req.in_buf(0), a)) return bsd_ret(rsp, addr_fail(fd, e));
         return bsd_ret(rsp, vsock::stack().bind(fd, a));
     });
+    // Listen (u32 fd, s32 backlog) and Accept (u32 fd; the peer's sockaddr in buffer 0, then u32 addrlen): TCP over the loopback (vsock.h)
+    cmd(s, "bsd", 18, "Listen", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+        if (coop_fd(req.arg<int32_t>(0))) return bsd_ret(rsp, {-1, vsock::kEopnotsupp});
+        return bsd_ret(rsp, vsock::stack().listen(req.arg<int32_t>(0), req.arg<int32_t>(4)));
+    });
+    cmd(s, "bsd", 12, "Accept", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+        vsock::Addr from;
+        const vsock::Ret r = coop_fd(req.arg<int32_t>(0)) ? vsock::Ret{-1, vsock::kEopnotsupp} : vsock::stack().accept(req.arg<int32_t>(0), &from);
+        bsd_ret(rsp, r);
+        rsp.push(r.err ? uint32_t{0} : write_sockaddr(req.out_buf(0), from));
+        return 0;
+    });
     cmd(s, "bsd", 14, "Connect", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
         const int fd = req.arg<int32_t>(0);
         vsock::Addr a;
-        if (read_sockaddr(req.in_buf(0), a) == 0) ask_connect(a);
+        if (read_sockaddr(req.in_buf(0), a) == 0 && (a.ip >> 24) != 127) ask_connect(a);   // the loopback is this console's own
         if (coop_fd(fd)) return bsd_ret(rsp, {-1, kBsdNetDown});
         if (const uint32_t e = read_sockaddr(req.in_buf(0), a)) return bsd_ret(rsp, addr_fail(fd, e));
         return bsd_ret(rsp, vsock::stack().connect(fd, a));
@@ -720,6 +902,11 @@ void add_bsd_udp(ipc::Service& s) {
     });
     cmd(s, "bsd", 5, "Select", bsd_select);
     cmd(s, "bsd", 6, "Poll", bsd_poll);
+    // EventFd (u64 initval, u32 flags): an event descriptor in the socket table (vsock.h). It needs no network, and gRPC's pollers in SDK
+    // 22 titles abort without one (Ocarina of Time under grpc_init; nxnative services.md "EventFd needs no network", MIT).
+    cmd(s, "bsd", 31, "EventFd", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+        return bsd_ret(rsp, vsock::stack().eventfd(req.arg<uint64_t>(0), req.arg<uint32_t>(8)));
+    });
 }
 
 std::shared_ptr<ipc::Service> make_bsd() {
@@ -734,15 +921,10 @@ std::shared_ptr<ipc::Service> make_bsd() {
             {1, "StartMonitoring", K::Ok},
             {4, "Open", K::Errno},
             {7, "Sysctl", K::Errno, 0, 1},
-            {12, "Accept", K::Errno, 0, 1},
-            {18, "Listen", K::Errno},
             {19, "Ioctl", K::Errno},
             {23, "ShutdownAllSockets", K::Errno},
             {27, "DuplicateSocket", K::Errno},
             {28, "GetResourceStatistics", K::Zeros, 0, 8},
-            {29, "RecvMMsg", K::Errno},
-            {30, "SendMMsg", K::Errno},
-            {31, "EventFd", K::Errno},
             {32, "RegisterResourceStatisticsName", K::U32, 0},
             {33, "RegisterClientShared", K::U32, 0},
             {34, "GetSocketStatistics", K::Errno},
@@ -758,6 +940,15 @@ std::shared_ptr<ipc::Service> make_bsd() {
             {44, "Cmd44", K::Errno},
             {200, "SetThreadCoreMask", K::Ok},
             {201, "GetThreadCoreMask", K::U32, 0},
+        });
+        // 29 RecvMMsg, 30 SendMMsg on the socket table's descriptors (bsd_mmsg.h); the co-op module's have none (ENETDOWN, as before)
+        cmd(s, "bsd", 29, "RecvMMsg", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            if (coop_fd(req.arg<int32_t>(0))) return bsd_ret(rsp, {-1, kBsdNetDown});
+            return mmsg::recvmmsg(req, rsp, mmsg::offline(req.arg<int32_t>(0)));
+        });
+        cmd(s, "bsd", 30, "SendMMsg", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            if (coop_fd(req.arg<int32_t>(0))) return bsd_ret(rsp, {-1, kBsdNetDown});
+            return mmsg::sendmmsg(req, rsp, mmsg::offline(req.arg<int32_t>(0)));
         });
     });
 }
@@ -838,7 +1029,7 @@ std::shared_ptr<ipc::Service> make_ssl_connection(const std::shared_ptr<int>& co
                 {12, "Pending", K::S32, 0},
                 {13, "Peek", K::Fail, kSslInvalidSocket},
                 {14, "Poll", K::U32, 0},
-                {15, "GetVerifyCertError", K::U32, 0},
+                {15, "GetVerifyCertError", K::Ok},                  // no output: the result is the error (Switchbrew, Lichii)
                 {16, "GetNeededServerCertBufferSize", K::U32, 0},
                 {17, "SetSessionCacheMode", K::Ok},
                 {18, "GetSessionCacheMode", K::U32, 0},
@@ -896,14 +1087,52 @@ std::shared_ptr<ipc::Service> make_ssl_service() {
 // nim:eca: the shop (ECA) interface. Creation succeeds; the shop objects answer their creation commands, nothing needs the network.
 // =============================================================================================================================================
 
-std::shared_ptr<ipc::Service> make_shop_async() {
-    return make_iface("nn::ec::IShopServiceAsync", [](ipc::Service&) {});   // no command table is read yet: any command is unhandled
+// nn::ec::IShopServiceAsync (Lichii nim/nim.cpp): one shop request. Request completes at once and signals the completion event the
+// accessor handed out with the object; the response is "{}" (an empty JSON object: Lichii found the SDK fails on an empty body) and the
+// error code 0, so the game sees an empty shop rather than a transfer that never ends. Nothing is sent anywhere.
+struct ShopAsync {
+    ServiceEvent done;
+    std::mutex mu;
+    std::string data;
+};
+std::shared_ptr<ipc::Service> make_shop_async(const std::shared_ptr<ShopAsync>& a) {
+    return make_iface("nn::ec::IShopServiceAsync", [a](ipc::Service& s) {
+        cmd(s, "nim:eca", 0, "Cancel", [](ipc::Request&, ipc::Response&) -> uint32_t { return 0; });
+        cmd(s, "nim:eca", 1, "GetSize", [a](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            std::lock_guard<std::mutex> lk(a->mu);
+            rsp.push<uint64_t>(a->data.size());
+            return 0;
+        });
+        cmd(s, "nim:eca", 2, "Read", [a](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            const uint64_t off = req.arg<uint64_t>(0);
+            std::lock_guard<std::mutex> lk(a->mu);
+            uint64_t n = 0;
+            if (off < a->data.size()) n = buf_write(req.out_buf(0), a->data.data() + off, a->data.size() - off);
+            rsp.push<uint64_t>(n);
+            return 0;
+        });
+        cmd(s, "nim:eca", 3, "GetErrorCode", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.push<uint32_t>(0);
+            return 0;
+        });
+        cmd(s, "nim:eca", 4, "Request", [a](ipc::Request&, ipc::Response&) -> uint32_t {
+            {
+                std::lock_guard<std::mutex> lk(a->mu);
+                a->data = "{}";
+            }
+            a->done.signal();
+            return 0;
+        });
+        cmd(s, "nim:eca", 5, "Prepare", [](ipc::Request&, ipc::Response&) -> uint32_t { return 0; });
+    });
 }
 
 std::shared_ptr<ipc::Service> make_shop_accessor() {
     return make_iface("nn::ec::IShopServiceAccessor", [](ipc::Service& s) {
         cmd(s, "nim:eca", 0, "CreateAsyncInterface", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-            rsp.push_object(make_shop_async());
+            auto a = std::make_shared<ShopAsync>();
+            rsp.out_copy.push_back(a->done.new_handle());   // the completion event, then the object (Lichii: copy handle + interface)
+            rsp.push_object(make_shop_async(a));
             return 0;
         });
     });
@@ -999,8 +1228,8 @@ std::shared_ptr<ipc::Service> make_friend_service() {
             {20500, "GetProfileExtraListV1", K::S32, 0},
             {20501, "GetRelationship", K::Ok},
             {20502, "GetProfileExtraListV2", K::S32, 0},
-            {20600, "GetUserPresenceViewV1", K::Ok},
-            {20601, "GetUserPresenceViewV2", K::Ok},
+            {20600, "GetUserPresenceViewV1", K::BufZero, 0, 0x400},   // the view (0xE0 bytes, Lichii) zeroed: offline, no presence
+            {20601, "GetUserPresenceViewV2", K::BufZero, 0, 0x400},
             {20700, "GetPlayHistoryListV1", K::S32, 0},
             {20701, "GetPlayHistoryStatistics", K::Ok},
             {20702, "GetPlayHistoryListV2", K::S32, 0},
@@ -1074,7 +1303,7 @@ std::shared_ptr<ipc::Service> make_friend_notification() {
         });
         rows(s, "friend", {
             {1, "Clear", K::Ok},
-            {2, "Pop", K::Zeros, 0, 16},          // SizedNotificationInfo, all zero: nothing is queued
+            {2, "Pop", K::Fail, res(124, 15)},    // nothing is queued: ResultNoNotifications (Lichii), not an all-zero notification
         });
     });
 }
@@ -1102,8 +1331,17 @@ std::shared_ptr<ipc::Service> make_friend_creator() {
 
 std::shared_ptr<ipc::Service> make_prepo() {
     return make_iface("nn::prepo::detail::ipc::IPrepoService", [](ipc::Service& s) {
+        // every form of SaveReport (Lichii's prepo.cpp ids: 10100..10105 the older layouts, 10106 / 10107 the current one, which SDK
+        // 21+ titles send: Ocarina of Time) is accepted and dropped
         rows(s, "prepo", {
-            {10105, "SaveReportWithUser", K::Ok},
+            {10100, "SaveReportOld", K::Ok},
+            {10101, "SaveReportWithUserOld", K::Ok},
+            {10102, "SaveReportOld2", K::Ok},
+            {10103, "SaveReportWithUserOld2", K::Ok},
+            {10104, "SaveReportOld3", K::Ok},
+            {10105, "SaveReportWithUserOld3", K::Ok},
+            {10106, "SaveReport", K::Ok},
+            {10107, "SaveReportWithUser", K::Ok},
             {10200, "RequestImmediateTransmission", K::Ok},
             {10400, "GetSystemSessionId", K::U64, 0},
         });
@@ -1143,7 +1381,7 @@ std::shared_ptr<ipc::Service> make_pctl_service() {
             {1015, "ConfirmPlayableApplicationVideo", K::Ok},
             {1016, "ConfirmShowNewsPermission", K::Ok},
             {1017, "EndFreeCommunication", K::Ok},
-            {1018, "IsFreeCommunicationAvailable", K::U8, 1},
+            {1018, "IsFreeCommunicationAvailable", K::Ok},          // no output: result 0 is "available" (Switchbrew, Lichii)
             {1019, "ConfirmLaunchApplicationPermission", K::Ok},
             {1020, "ConfirmLaunchSharedApplicationPermission", K::Ok},
             {1021, "TryBeginFreeCommunicationForStreamPlay", K::Ok},
@@ -1153,7 +1391,7 @@ std::shared_ptr<ipc::Service> make_pctl_service() {
             {1032, "GetSafetyLevel", K::S32, 0},
             {1033, "SetSafetyLevel", K::Ok},
             {1034, "GetSafetyLevelSettings", K::Ok},
-            {1035, "GetCurrentSettings", K::Ok},
+            {1035, "GetCurrentSettings", K::Zeros, 0, 3},           // RestrictionSettings: rating age 0, nothing restricted
             {1036, "SetCustomSafetyLevelSettings", K::Ok},
             {1037, "GetDefaultRatingOrganization", K::U32, 0},
             {1038, "SetDefaultRatingOrganization", K::Ok},
@@ -1178,7 +1416,7 @@ std::shared_ptr<ipc::Service> make_pctl_service() {
             {1203, "SetPinCode", K::Ok},
             {1204, "GenerateInquiryCode", K::Ok},
             {1205, "CheckMasterKey", K::Ok},
-            {1206, "GetPinCodeLength", K::Ok},
+            {1206, "GetPinCodeLength", K::S32, 0},                  // no PIN set
             {1403, "IsPairingActive", K::U8, 0},
             {1453, "IsPlayTimerEnabled", K::U8, 0},
         });
@@ -1330,7 +1568,7 @@ std::shared_ptr<ipc::Service> make_nsd() {
         });
         rows(s, "nsd", {
             {15, "SetChangeEnvironmentIdentifierDisabled", K::Ok},
-            {100, "GetApplicationServerEnvironmentType", K::U8, 0},
+            {100, "GetApplicationServerEnvironmentType", K::U8, 1},   // 1 = Lp, the retail servers (Ryujinx Nsd/IManager.cs, Lichii nsd.cpp)
         });
         // Resolve(fqdn_in) -> fqdn_out is the same bytes; ResolveEx answers the same with inner_result 0.
         auto copy_name = [](ipc::Request& req) {
@@ -1353,7 +1591,9 @@ std::shared_ptr<ipc::Service> make_nsd() {
 }
 
 // =============================================================================================================================================
-// sfdnsres: sfdnsres (IResolver). Every lookup fails: host not found (netdb 1, EAI_NONAME). Error text commands answer the glibc strings.
+// sfdnsres: sfdnsres (IResolver). Every lookup fails: host not found (netdb 1, EAI_NONAME). getaddrinfo errors are FreeBSD's numbers
+// (EAI_AGAIN 2, EAI_FAIL 4, EAI_MEMORY 6, EAI_NODATA 7, EAI_NONAME 8: Ryujinx Sockets/Sfdnsres/Types/GaiError.cs, Lichii sockets.h
+// GetAddrInfoError) and GetGaiStringErrorRequest answers FreeBSD's gai_strerror text for them.
 // =============================================================================================================================================
 
 std::string netdb_text(int32_t e) {
@@ -1368,17 +1608,21 @@ std::string netdb_text(int32_t e) {
 
 std::string gai_text(int32_t e) {
     switch (e) {
-        case -1: return "Invalid value for ai_flags";
-        case -2: return "Name or service not known";
-        case -3: return "Temporary failure in name resolution";
-        case -4: return "Non-recoverable failure in name resolution";
-        case -5: return "No address associated with hostname";
-        case -6: return "ai_family not supported";
-        case -7: return "ai_socktype not supported";
-        case -8: return "Servicename not supported for ai_socktype";
-        case -9: return "Address family for hostname not supported";
-        case -10: return "Memory allocation failure";
-        case -11: return "System error";
+        case 0: return "Success";
+        case 1: return "Address family for hostname not supported";
+        case 2: return "Temporary failure in name resolution";
+        case 3: return "Invalid value for ai_flags";
+        case 4: return "Non-recoverable failure in name resolution";
+        case 5: return "ai_family not supported";
+        case 6: return "Memory allocation failure";
+        case 7: return "No address associated with hostname";
+        case 8: return "hostname nor servname provided, or not known";
+        case 9: return "servname not supported for ai_socktype";
+        case 10: return "ai_socktype not supported";
+        case 11: return "System error returned in errno";
+        case 12: return "Invalid value for hints";
+        case 13: return "Resolved protocol is unknown";
+        case 14: return "Argument buffer overflow";
         default: return "Unknown error";
     }
 }
@@ -1565,6 +1809,8 @@ std::shared_ptr<ipc::Service> make_notif() {
 // Registration and reset.
 // =============================================================================================================================================
 
+void nifm_set_lan_source(NifmLanSource f) { lan_source().store(f); }
+
 void register_network() {
     const bool offline = config_get_bool("net", "offline", true);
     NXLOG_I("net", "network services: [net] offline=%s (no connection, no friends, no BCAT data in either mode)", offline ? "true" : "false");
@@ -1588,6 +1834,7 @@ void register_network() {
     add("ngct:u", [] { return make_ngct(); });
     add("ngc:u", [] { return make_ngc(); });
     add("notif:a", [] { return make_notif(); });
+    nifm_set_lan_source(&lanroom::source);   // [net] lan = room: a game's own LAN mode over a relay room (services/lan_room.h)
 }
 
 void network_reset() {
@@ -1599,6 +1846,7 @@ void network_reset() {
     s.next_cancel_handle = 1;
     s.next_pki_id = 1;
     s.ssl_contexts = 0;
+    lanroom::reset();   // leaves the LAN room, drops its relay connection (services/lan_room.cpp)
     ldn_reset();   // drops the relay connection (services/ldn.cpp)
     vnet::set_current_link(nullptr);
     vsock::stack().reset();

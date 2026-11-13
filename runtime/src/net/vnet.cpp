@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // The virtual LAN: Link receiver plumbing, the in-process LoopbackHub and the process-wide current link (see vnet.h).
 // Lock order: the current-link lock, then a link's receiver lock, then whatever the receiver takes (the socket table's lock).
 #include "vnet.h"
@@ -195,8 +197,16 @@ namespace {
 struct Current {
     std::mutex mu;
     std::shared_ptr<Link> link;
+    std::shared_ptr<Link> base;   // what "no link" means (set_base_link): null unless something set one
     Receiver inbound;
 };
+
+void switch_locked(Current& c, std::shared_ptr<Link> link) {
+    if (c.link == link) return;
+    if (c.link) c.link->set_receiver(nullptr);
+    c.link = std::move(link);
+    if (c.link) c.link->set_receiver(c.inbound);
+}
 Current& cur() {
     static Current c;
     return c;
@@ -206,10 +216,15 @@ Current& cur() {
 void set_current_link(std::shared_ptr<Link> link) {
     Current& c = cur();
     std::lock_guard<std::mutex> lk(c.mu);
-    if (c.link == link) return;
-    if (c.link) c.link->set_receiver(nullptr);
-    c.link = std::move(link);
-    if (c.link) c.link->set_receiver(c.inbound);
+    switch_locked(c, link ? std::move(link) : c.base);
+}
+
+void set_base_link(std::shared_ptr<Link> link) {
+    Current& c = cur();
+    std::lock_guard<std::mutex> lk(c.mu);
+    const bool on_base = c.link == c.base;   // nothing else (a local wireless room) is current: the new base takes over at once
+    c.base = std::move(link);
+    if (on_base) switch_locked(c, c.base);
 }
 
 std::shared_ptr<Link> current_link() {

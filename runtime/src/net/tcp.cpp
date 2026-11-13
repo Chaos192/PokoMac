@@ -1,13 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // Winsock implementation of net/tcp.h.
 #include "tcp.h"
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
+#include "host_timeo.h"
+
 #include <mutex>
 
+#if defined(_WIN32)   // Windows link directives (an ELF linker such as lld would look for these libraries)
 #pragma comment(lib, "ws2_32.lib")
+#endif
 
 namespace nxrt::tcp {
 namespace {
@@ -83,8 +89,7 @@ Handle dial(const std::string& host, uint16_t port, int timeout_ms, int send_tim
     ioctlsocket(s, FIONBIO, &nb);
     const BOOL one = TRUE;
     setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&one), sizeof one);   // small game datagrams: no Nagle delay
-    const DWORD sto = static_cast<DWORD>(send_timeout_ms);
-    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&sto), sizeof sto);
+    nxrt::net::set_host_timeout(s, SO_SNDTIMEO, send_timeout_ms);   // a DWORD is no timeout at all on BSD sockets (host_timeo.h)
     return static_cast<Handle>(s);
 }
 

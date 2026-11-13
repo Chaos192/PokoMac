@@ -1,12 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // Winsock implementation of net/udp.h.
 #include "udp.h"
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
+
+#include "host_timeo.h"
 #include <mstcpip.h>
 
+#if defined(_WIN32)   // Windows link directives (an ELF linker such as lld would look for these libraries)
 #pragma comment(lib, "ws2_32.lib")
+#endif
 
 #ifndef SIO_UDP_CONNRESET
 #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)   // mstcpip.h, hidden behind some SDK guards
@@ -40,8 +46,7 @@ Handle open(uint32_t ip, uint16_t port, int recv_timeout_ms, std::string* err) {
         *err = "cannot reach the relay's UDP port";
         return kBad;
     }
-    const DWORD rto = static_cast<DWORD>(recv_timeout_ms);
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&rto), sizeof rto);
+    nxrt::net::set_host_timeout(s, SO_RCVTIMEO, recv_timeout_ms);   // a DWORD is no timeout at all on BSD sockets (host_timeo.h)
     return static_cast<Handle>(s);
 }
 

@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // The relay server inside the runtime ([net] server = auto: the game that hosts runs it), and LAN discovery of relays. Game-independent.
 //
 //   RelayServer     a C++ port of the launcher's relay (launcher/src-tauri/src/relay/server.rs, protocol v3 in relay/mod.rs): the same
@@ -25,7 +27,9 @@
 namespace nxrt::vnet {
 
 struct RelayServerOptions {
-    uint16_t port = kRelayDefaultPort;   // TCP and UDP, on 0.0.0.0
+    uint16_t port = kRelayDefaultPort;   // TCP and UDP
+    uint32_t listen_ip = 0;              // host order; 0 = every address (0.0.0.0). 127.0.0.1: this PC only (tests; nothing for a
+                                         // firewall to ask about), a LAN address: that network only
     std::string password;                // empty: none
     std::string nickname = "Relay";      // the discovery reply's host name
     std::string server_version = "nxrt relay";
@@ -61,7 +65,9 @@ struct FoundRelay {
 
 // Broadcasts a request to 255.255.255.255:port, every up IPv4 interface's directed broadcast and 127.0.0.1:port, and collects replies
 // for wait_ms (the whole window), one entry per address:port.
-std::vector<FoundRelay> discover_relays(uint16_t port, int wait_ms);
+// bind_ip (host order): the request socket's address; 0 = every address. On the loopback (127.0.0.1) only a relay on this machine is
+// asked: nothing listens beyond it (a test on a PC whose firewall must not ask).
+std::vector<FoundRelay> discover_relays(uint16_t port, int wait_ms, uint32_t bind_ip = 0);
 
 struct LocalAddr {
     uint32_t ip = 0, mask = 0;   // host order

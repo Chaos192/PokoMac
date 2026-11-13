@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // The virtual LAN the bsd HLE's sockets run on (multiplayer phase 1). A Link moves whole UDP datagrams between virtual IPs
 // (169.254.R.N/24, the addresses ldn hands out); it carries no TCP and knows no ports beyond the two fields of a Datagram.
 //
@@ -43,6 +45,12 @@ public:
     virtual bool send(const Datagram& d) = 0;
     // Where inbound datagrams go (null = dropped). Replacing it waits for a delivery in progress to finish.
     void set_receiver(Receiver r);
+    // The network the link's addresses are on: its mask (broadcasts are its host part all ones) and which destinations it carries. The
+    // virtual LAN (relay rooms, the hub): 169.254.0.0/16 in /24 rooms. A real LAN (mitm::make_lan_link): its subnet.
+    virtual uint32_t netmask() const { return 0xFFFFFF00u; }
+    virtual bool reaches(uint32_t dst) const { return (dst >> 16) == 0xA9FEu; }
+    // A game socket bound this port (the socket table tells it, outside its lock): a link that needs a host socket per port opens it.
+    virtual void open_port(uint16_t /*port*/) {}
 
 protected:
     void deliver(const Datagram& d);   // for implementations: hands an inbound datagram to the receiver
@@ -99,8 +107,13 @@ private:
 };
 
 // ---- the process-wide current link ----------------------------------------------------------------------------------------------------
-// Setting a link wires it to the process inbound receiver; replacing or clearing it unwires the old one.
+// Setting a link wires it to the process inbound receiver; replacing or clearing it unwires the old one. Clearing it (null) goes back to
+// the base link when one is set.
 void set_current_link(std::shared_ptr<Link> link);
+// The link the sockets use when nothing else is current (a game's own LAN mode carried over a relay room, services/lan_room): null =
+// none (the default). Set while the base is current (or nothing is), it becomes current at once; while another link is current, it
+// takes over when that one is cleared.
+void set_base_link(std::shared_ptr<Link> link);
 std::shared_ptr<Link> current_link();
 // The receiver of the current link (vsock::stack() installs it once).
 void set_inbound(Receiver r);

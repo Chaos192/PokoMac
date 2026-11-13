@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // relay_server.h: the embedded relay, a port of launcher/src-tauri/src/relay/server.rs (same frames, room rules, UDP path and limits; the
 // semantics are documented in launcher/src-tauri/src/relay/mod.rs), and LAN discovery. Winsock.
 #include "relay_server.h"
@@ -13,6 +15,8 @@
 #endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
+
+#include "host_timeo.h"
 #include <mstcpip.h>
 #include <iphlpapi.h>
 #include <windows.h>
@@ -35,9 +39,11 @@
 #include "nxrt/log.h"
 #include "relay_wire.h"
 
+#if defined(_WIN32)   // Windows link directives (an ELF linker such as lld would look for these libraries)
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "bcrypt")
+#endif
 
 #ifndef SIO_UDP_CONNRESET
 #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)   // mstcpip.h, hidden behind some SDK guards
@@ -755,8 +761,7 @@ struct RelayServer::Impl {
     void admit(SOCKET s, uint32_t ip, uint16_t peer_port) {
         const BOOL one = TRUE;
         ::setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&one), sizeof one);
-        const DWORD sto = kWriteTimeoutMs;
-        ::setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&sto), sizeof sto);
+        net::set_host_timeout(s, SO_SNDTIMEO, kWriteTimeoutMs);   // a DWORD is no timeout at all on BSD sockets (host_timeo.h)
         auto c = std::make_shared<Client>();
         c->sock = s;
         c->ip = ip;
@@ -901,16 +906,24 @@ std::unique_ptr<RelayServer> RelayServer::start(const RelayServerOptions& opt, s
     }
     // No SO_EXCLUSIVEADDRUSE: it fails the bind while connections of an earlier run sit in TIME_WAIT (a host restarting the game within a
     // minute could not host); Windows' default already refuses a second bind over a live socket (the launcher relay binds the same way).
-    // Wine (Linux sockets): a listener bind fails on TIME_WAIT without SO_REUSEADDR, which there still refuses a live listener.
+    // Wine (Linux sockets) and the POSIX builds (macOS, Linux, Android: nxwin's sockets are the system's): a listener bind fails on
+    // TIME_WAIT without SO_REUSEADDR, which there still refuses a live listener. Measured on macOS: a host that ended a session and hosts
+    // again within ~30 s got "port 39660 is in use" with only TIME_WAIT entries on the port (netstat), and then took the dead port for
+    // another relay on this machine.
     auto bind_any = [&](SOCKET s, bool listener) {
-        if (listener && host_is_wine()) {
+#ifdef _WIN32
+        const bool reuse = listener && host_is_wine();
+#else
+        const bool reuse = listener;
+#endif
+        if (reuse) {
             const BOOL on = TRUE;
             ::setsockopt(s, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&on), sizeof on);
         }
         sockaddr_in a{};
         a.sin_family = AF_INET;
         a.sin_port = htons(opt.port);
-        a.sin_addr.s_addr = htonl(INADDR_ANY);
+        a.sin_addr.s_addr = htonl(opt.listen_ip);   // 0 = INADDR_ANY
         return ::bind(s, reinterpret_cast<const sockaddr*>(&a), sizeof a) == 0 ? 0 : WSAGetLastError();
     };
     const SOCKET l = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -952,7 +965,7 @@ std::unique_ptr<RelayServer> RelayServer::start(const RelayServerOptions& opt, s
     Impl* p = im.get();
     p->accept_t = std::thread([p] { p->accept_loop(); });
     if (p->usock != INVALID_SOCKET) p->udp_t = std::thread([p] { p->udp_loop(); });
-    NXLOG_I("net", "relay: listening on 0.0.0.0:%u (TCP%s)", opt.port, p->usock != INVALID_SOCKET ? " and UDP" : "");
+    NXLOG_I("net", "relay: listening on %s:%u (TCP%s)", ip_str(opt.listen_ip).c_str(), opt.port, p->usock != INVALID_SOCKET ? " and UDP" : "");
     return std::unique_ptr<RelayServer>(new RelayServer(std::move(im)));
 }
 
@@ -1020,7 +1033,7 @@ std::vector<LocalAddr> local_ipv4() {
     return out;
 }
 
-std::vector<FoundRelay> discover_relays(uint16_t port, int wait_ms) {
+std::vector<FoundRelay> discover_relays(uint16_t port, int wait_ms, uint32_t bind_ip) {
     std::vector<FoundRelay> out;
     WSADATA wd;   // one WSAStartup per call, undone below (Winsock counts them)
     if (WSAStartup(MAKEWORD(2, 2), &wd) != 0) return out;
@@ -1036,7 +1049,7 @@ std::vector<FoundRelay> discover_relays(uint16_t port, int wait_ms) {
     ::WSAIoctl(s, SIO_UDP_CONNRESET, &off, sizeof off, nullptr, 0, &got, nullptr, nullptr);
     sockaddr_in any{};
     any.sin_family = AF_INET;
-    any.sin_addr.s_addr = htonl(INADDR_ANY);
+    any.sin_addr.s_addr = htonl(bind_ip ? bind_ip : INADDR_ANY);
     if (::bind(s, reinterpret_cast<const sockaddr*>(&any), sizeof any) != 0) {
         ::closesocket(s);
         WSACleanup();

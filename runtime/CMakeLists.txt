@@ -107,6 +107,22 @@ if(NXRT_TEST_PYTHON)
     include(tests/missed/missed_test.cmake)
 endif()
 
+# Service tests (tests/services; the harness and the network tests ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch): IPC
+# requests through the runtime's dispatch. The network tests run on the loopback only (local wireless, Link Play relay, LAN, RyuLDN
+# against a fake master, nifm and bsd offline answers). Not part of a game build's default target.
+option(NXRT_BUILD_TESTS "Build the service tests (nxrt_services_test)" ON)
+if(NXRT_BUILD_TESTS)
+    file(GLOB NXRT_SVC_TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/services/*.cpp")
+    add_executable(nxrt_services_test EXCLUDE_FROM_ALL ${NXRT_SVC_TEST_SOURCES})
+    target_link_libraries(nxrt_services_test PRIVATE nxrt)
+    target_include_directories(nxrt_services_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests/services" "${CMAKE_CURRENT_SOURCE_DIR}/src/services")
+    if(WIN32)
+        target_link_options(nxrt_services_test PRIVATE /HIGHENTROPYVA:NO /STACK:16777216)   # guest ranges stay free, as for the game exe
+    elseif(APPLE)
+        target_link_options(nxrt_services_test PRIVATE "-Wl,-platform_version,macos,12.0,12.0")
+    endif()
+endif()
+
 if(NXRT_BUILD_GAMES)
     foreach(_game ${NXRT_GAMES})
         add_subdirectory(games/${_game})

@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // ldn: ldn:u (IUserServiceCreator -> IUserLocalCommunicationService), Nintendo local wireless, carried by a vnet::Lobby (multiplayer
 // phase 2): a network the game creates is a room on the relay server, a scan lists the server's rooms, a connect joins one, and while the
 // node is in a room its lobby link is the current vnet link, so the bsd UDP sockets reach the other nodes (169.254.R.N/24).
@@ -27,6 +29,9 @@
 // Host: the current link is a vnet::HoldLink in front of the lobby's, so datagrams from a node that just joined wait (up to kHoldMs) until
 // the game has read a GetNetworkInfo / GetNetworkInfoLatestUpdate listing it; KTGL drops a sender outside its member table (design from
 // pokopia-native (MIT) windows/src/coop/coop_mpnet.c, ACCEPT_WAIT_MS / cmp_host_accepts, @7c3655d).
+// Private networks (CreateNetworkPrivate / ConnectPrivate): the game's SecurityParameter is the network's (GetSecurityParameter, the
+// NetworkInfo session id); the room carries the session id at the end of its advertise data on the wire (with_private / private_of), so
+// stations find it by it; the game never sees that trailer. Station accept policy and filter: on_room_state.
 // [net] room_code: the lobby's room key (vnet::room_key); a room hosted with one is hidden from players without it. A Connect refused for a
 // wrong code answers ConnectNotFound.
 // Session variant (services_api.h ldnapi): a game module's opt-in gameplay change that every player must share rides in bits 12..14 of the
@@ -74,6 +79,9 @@
 #include "nxrt/services.h"
 #include "nxrt/services_api.h"
 #include "coop.h"
+#include "ldn_ryu.h"
+#include "net_status.h"
+#include "../net/lan_mitm.h"
 #include "../net/relay_server.h"
 #include "../net/vnet.h"
 #include "services_internal.h"
@@ -206,7 +214,7 @@ static_assert(sizeof(SecurityConfig) == 0x44 && sizeof(SecurityParameter) == 0x2
 
 // Raw argument offsets (CMIF, natural alignment: NetworkConfig is 8-aligned).
 constexpr size_t kCreateUser = 0x44, kCreateNetCfg = 0x78;                                 // CreateNetwork
-constexpr size_t kCreatePrivUser = 0x64, kCreatePrivNetCfg = 0x98;   // CreateNetworkPrivate (SecurityParameter at 0x44: unused)
+constexpr size_t kCreatePrivSecParam = 0x44, kCreatePrivUser = 0x64, kCreatePrivNetCfg = 0x98;   // CreateNetworkPrivate (+ AddressList: unused)
 constexpr size_t kConnectUser = 0x44, kConnectVersion = 0x74;                              // Connect
 constexpr size_t kConnPrivSecParam = 0x44, kConnPrivUser = 0x64, kConnPrivVersion = 0x94, kConnPrivNetCfg = 0xA0;   // ConnectPrivate
 constexpr uint32_t kSubnetMask = 0xFFFFFF00;   // the game asks MakeSubnetMask(24) too
@@ -277,7 +285,7 @@ LobbySlot& slot() {
     return s;
 }
 
-// room-code.txt beside the log (the game folder for pkp.exe): the code in use, for the launcher to show (launcher room_code_host).
+// room-code.txt: the code in use, for the launcher to show (launcher room_code_host): beside the log (the game folder for pkp).
 std::string room_code_file() {
     const std::string log = log_path();
     const size_t cut = log.find_last_of("/\\");
@@ -422,15 +430,33 @@ void firewall_hint() {
 // Auto mode, CreateNetwork: the relay in this process on 0.0.0.0:39660, started on the first call that can start it and never stopped
 // (it runs until the process exits). A port already taken (the launcher's relay on this PC, another game) is that relay's: it is used as it
 // is. Either way the host is a relay client to 127.0.0.1:39660.
+// [net] host_listen: the address the embedded relay listens on. Empty or "all" (the default): every address. An IPv4 address: that one
+// only (127.0.0.1: this PC alone, two copies of a game on one PC; a firewall has nothing to ask about). Not an address: every address.
+uint32_t host_listen_ip() {
+    static const uint32_t ip = [] {
+        const std::string v = lower(config_get_str("net", "host_listen", ""));
+        if (v.empty() || v == "all") return 0u;
+        unsigned a, b, c, d;
+        char tail;
+        if (std::sscanf(v.c_str(), "%u.%u.%u.%u%c", &a, &b, &c, &d, &tail) == 4 && a < 256 && b < 256 && c < 256 && d < 256)
+            return vnet::ip(static_cast<uint8_t>(a), static_cast<uint8_t>(b), static_cast<uint8_t>(c), static_cast<uint8_t>(d));
+        NXLOG_W("net", "ldn: [net] host_listen = \"%s\" is not an IPv4 address: every address", v.c_str());
+        return 0u;
+    }();
+    return ip;
+}
+
 std::shared_ptr<vnet::Lobby> host_relay() {
     static std::mutex mu;
     static vnet::RelayServer* server = nullptr;   // deliberately never deleted
     static std::string last;
+    const uint32_t listen = host_listen_ip();
     {
         std::lock_guard<std::mutex> lk(mu);
         if (!server) {
             vnet::RelayServerOptions o;
             o.port = vnet::kRelayDefaultPort;
+            o.listen_ip = listen;
             o.password = config_get_str("net", "password", "");
             o.nickname = nickname();
             // the random instance id makes relay_tag() unique per relay
@@ -441,7 +467,7 @@ std::shared_ptr<vnet::Lobby> host_relay() {
                 server = srv.release();
                 last.clear();
                 for (const vnet::LocalAddr& a : vnet::local_ipv4())
-                    if (!vnet::is_link_local(a.ip))
+                    if (!vnet::is_link_local(a.ip) && (!listen || listen == a.ip))
                         NXLOG_I("net", "ldn: hosting: visitors with [net] server set reach this PC at %s:%u (%s)", vnet::ip_str(a.ip).c_str(),
                                 server->port(), a.adapter.c_str());
                 firewall_hint();
@@ -452,7 +478,7 @@ std::shared_ptr<vnet::Lobby> host_relay() {
             }
         }
     }
-    return auto_relay("127.0.0.1", vnet::kRelayDefaultPort);
+    return auto_relay(listen ? vnet::ip_str(listen) : std::string("127.0.0.1"), vnet::kRelayDefaultPort);
 }
 
 // Auto mode, Scan: the last LAN discovery, a new one at most every kDiscoveryEveryMs (waiting kDiscoveryWaitMs for answers). The relays
@@ -475,7 +501,9 @@ std::vector<vnet::FoundRelay> discover_cached() {
     std::lock_guard<std::mutex> lk(d.mu);
     const auto now = std::chrono::steady_clock::now();
     if (!d.ran || now - d.at >= std::chrono::milliseconds(kDiscoveryEveryMs)) {
-        d.found = vnet::discover_relays(vnet::kRelayDefaultPort, kDiscoveryWaitMs);
+        // [net] host_listen = 127.0.0.1 (this PC only): discovery asks this machine's relay only, from the loopback (no socket on the LAN)
+        const uint32_t hl = host_listen_ip();
+        d.found = vnet::discover_relays(vnet::kRelayDefaultPort, kDiscoveryWaitMs, (hl >> 24) == 127 ? hl : 0);
         d.at = std::chrono::steady_clock::now();
         d.ran = true;
         std::string seen = "-";
@@ -599,6 +627,32 @@ SessionRef session_of(const uint8_t (&sid)[16]) {
     return s;
 }
 
+// Private networks (CreateNetworkPrivate / ConnectPrivate): the game decides the session id itself and hands it to its stations out of
+// band, and a station connects by it without a scan. The relay knows rooms by number only, so a private room carries its session id at
+// the end of its advertise data on the wire: the game's data, the 16-byte session id, then "pkP1". Every node strips it before the game
+// sees the data (make_info); a room with it shows that session id, and Connect / ConnectPrivate find the room by it (the Scans' table).
+// Older builds see 20 more advertise bytes. A game whose own advertise data leaves no room for it (more than 364 bytes) gets a normal
+// room: its stations still find it by Scan, not by ConnectPrivate alone.
+constexpr uint8_t kPrivMagic[4] = {'p', 'k', 'P', '1'};
+constexpr size_t kPrivTrailer = 16 + sizeof kPrivMagic;
+using SessionKey = std::array<uint8_t, 16>;
+
+std::vector<uint8_t> with_private(const std::vector<uint8_t>& adv, const uint8_t* sid) {
+    std::vector<uint8_t> v = adv;
+    v.insert(v.end(), sid, sid + 16);
+    v.insert(v.end(), kPrivMagic, kPrivMagic + sizeof kPrivMagic);
+    return v;
+}
+
+// The session id a room's advertise data carries (private room), and the length of the game's own part of the data.
+bool private_of(const std::vector<uint8_t>& adv, SessionKey* sid, size_t* game_len) {
+    *game_len = adv.size();
+    if (adv.size() < kPrivTrailer || std::memcmp(adv.data() + adv.size() - sizeof kPrivMagic, kPrivMagic, sizeof kPrivMagic) != 0) return false;
+    std::memcpy(sid->data(), adv.data() + adv.size() - kPrivTrailer, 16);
+    *game_len = adv.size() - kPrivTrailer;
+    return true;
+}
+
 // A node MAC (02:00:a9:fe:R:N from the relay) with a relay tag: bytes 1..3 become the tag's first three, so two relays' room R differ in
 // the BSSID and the node table too. Tag 0: unchanged.
 std::array<uint8_t, 6> tagged_mac(std::array<uint8_t, 6> m, uint64_t tag) {
@@ -639,6 +693,9 @@ NetworkInfo make_info(const vnet::Room& r, uint8_t accept_policy, uint32_t own_v
     ni.common.channel = kChannels[r.room_id % 3];
     ni.common.link_level = 3;
     ni.common.network_type = 2;
+    SessionKey psid{};
+    size_t adv_len = r.adv.size();
+    if (private_of(r.adv, &psid, &adv_len)) std::memcpy(ni.id.session_id, psid.data(), 16);
     const auto sp = vnet::sha256(ni.id.session_id, sizeof ni.id.session_id);
     std::memcpy(ni.ldn.security_parameter, sp.data(), 16);
     ni.ldn.security_mode = r.security_mode;
@@ -655,7 +712,7 @@ NetworkInfo make_info(const vnet::Room& r, uint8_t accept_policy, uint32_t own_v
         d.local_comm_version = game_version(r.comm_version);
         ++ni.ldn.node_count;
     }
-    const size_t adv = r.adv.size() < sizeof ni.ldn.advertise_data ? r.adv.size() : sizeof ni.ldn.advertise_data;
+    const size_t adv = adv_len < sizeof ni.ldn.advertise_data ? adv_len : sizeof ni.ldn.advertise_data;
     ni.ldn.advertise_data_size = static_cast<uint16_t>(adv);
     if (adv) std::memcpy(ni.ldn.advertise_data, r.adv.data(), adv);
     ni.ldn.authentication_id = net;
@@ -731,7 +788,8 @@ private:
     uint32_t reject(ipc::Request&, ipc::Response&);
     uint32_t set_advertise_data(ipc::Request&, ipc::Response&);
     uint32_t set_accept_policy(ipc::Request&, ipc::Response&);
-    uint32_t accept_filter(ipc::Request&, ipc::Response&);
+    uint32_t add_accept_filter(ipc::Request&, ipc::Response&);
+    uint32_t clear_accept_filter(ipc::Request&, ipc::Response&);
     uint32_t open_station(ipc::Request&, ipc::Response&);
     uint32_t close_station(ipc::Request&, ipc::Response&);
     uint32_t connect(ipc::Request&, ipc::Response&);
@@ -740,15 +798,28 @@ private:
     uint32_t initialize(ipc::Request&, ipc::Response&);
     uint32_t finalize(ipc::Request&, ipc::Response&);
 
-    uint32_t create(const SecurityConfig& sec, const UserConfig& user, const NetworkConfig& cfg);
-    uint32_t join(const SessionRef& sref, int16_t room_version, const SecurityConfig& sec, const UserConfig& user, int32_t version);
+    uint32_t create(const SecurityConfig& sec, const UserConfig& user, const NetworkConfig& cfg, const SecurityParameter* priv = nullptr);
+    uint32_t join(const SessionRef& sref, int16_t room_version, const SecurityConfig& sec, const UserConfig& user, int32_t version,
+                  const SecurityParameter* priv = nullptr);
+    // The rooms a Scan lists (every relay found in auto mode outside a room, else the lobby's; own_room left out), with their relay tags;
+    // notes their wire versions, relays and private session ids.
+    std::vector<std::pair<vnet::Room, uint64_t>> scan_rooms(uint64_t lcid, uint16_t scene);
+    SessionRef ref_of(const uint8_t (&sid)[16]);   // a session id from a NetworkInfo: ours ("pkpR"), or a private room's from a Scan
     void on_room_state(const vnet::Room& r);
     void on_left(vnet::LeftReason why);
+    bool admits(const std::array<uint8_t, 6>& mac) const;   // caller holds mu: the station accept policy and filter let this MAC join
     void apply_room(const vnet::Room& r);       // caller holds mu
     void set_state(uint32_t s);                 // caller holds mu
     void admit_read();                          // caller holds mu: the game read info_, let its nodes' held datagrams through
     void drop_hold();                           // caller holds mu: the host's hold link is unhooked and gone
     void leave_network(uint32_t next, int16_t reason);   // caller holds op_mu (not mu)
+    // net-status.json's "link_play" part (services/net_status: the launcher's room page): status_locked() under mu_ notes that it
+    // changed; flush_status() with neither mu_ held nor inside a lobby sink's lock writes it (after each command, each lobby event).
+    void status_locked() { status_dirty_ = true; }
+    void flush_status();
+    // net-control.txt "leave" (net_status::on_command "ldn"): out of the room as when the console's system takes the radio
+    // (host: DestroyedBySystem, station: DisconnectedBySystem); the game sees the disconnect and its own menus go on from there.
+    void leave_from_launcher();
     vnet::LobbyEvents make_events();
     void adopt(std::shared_ptr<vnet::Lobby> next);       // caller holds op_mu (not mu): auto mode moves to another relay
     bool in_network() const { return state_ == kAccessPointCreated || state_ == kStationConnected; }
@@ -762,7 +833,12 @@ private:
     std::shared_ptr<vnet::Lobby> lobby_;
     bool auto_ = false;                  // [net] server = auto (set by Initialize): lobby_ follows host_relay() / Connect
     std::vector<uint8_t> adv_;          // host: SetAdvertiseData before or after CreateNetwork
-    uint8_t accept_policy_ = 0;
+    uint8_t accept_policy_ = 0;          // SetStationAcceptPolicy: 0 accept all, 1 reject all, 2 filter = blacklist, 3 filter = whitelist
+    std::set<std::array<uint8_t, 6>> filter_;   // AddAcceptFilterEntry: station MACs, as the game reads them in the node table
+    // host: the nodes the policy refused (address, player name), until the room state no longer lists them. The name too: a node that
+    // joins later can get the same address (the lowest free slot) before the relay's state without the refused one has come in.
+    std::set<std::pair<uint32_t, std::string>> refused_;
+    int last_left_ = -1;                 // station: the LeftReason of a room the lobby left while Connect still waited on it (-1: none)
     std::string user_name_;              // the UserConfig name of the last create/connect
     uint32_t room_id_ = 0, vip_ = 0;
     NetworkInfo info_{};
@@ -773,6 +849,11 @@ private:
                                                                     // listed it (the session variant)
     std::map<uint64_t, std::pair<std::string, uint16_t>> tag_relay_;   // auto: relay tag -> its address, from the Scans so far
     uint64_t tag_ = 0;                   // the relay tag of the room this node is in
+    bool status_dirty_ = false;
+    uint64_t last_seq_ = 0;              // the last room state applied (vnet::Room::seq; 0: a relay over the wire)
+    bool priv_ = false;                  // this node is in a private network: priv_sp_ is the game's SecurityParameter
+    SecurityParameter priv_sp_{};
+    std::map<SessionKey, SessionRef> priv_ref_;   // private rooms' session ids -> their room and relay, from the Scans so far
     bool offline_ = false;               // no lobby ever ([net] protocol = native with the co-op module off): the offline answers
 };
 
@@ -783,8 +864,50 @@ void Ldn::cmd(ipc::Service& s, uint32_t id, const char* name, H h) {
         auto self = w.lock();
         if (!self) return kInvalidState;
         std::lock_guard<std::mutex> op(self->op_mu_);
-        return ((*self).*h)(req, rsp);
+        const uint32_t r = ((*self).*h)(req, rsp);
+        self->flush_status();
+        return r;
     });
+}
+
+// {"state":"off|idle|hosting|visiting","room":N,"address":"169.254.R.N","players":[...],"max":N,"relay":"host:port","udp":bool,
+// "reason":N} (the contract with the launcher, coord app round 2): players are the node table's names in node order (the host first),
+// relay the relay the room is on ("this PC" for a relay inside this game), reason the last DisconnectReason.
+void Ldn::flush_status() {
+    std::string j;
+    std::shared_ptr<vnet::Lobby> lobby;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!status_dirty_) return;
+        status_dirty_ = false;
+        const char* st = state_ == kNone ? "off" : state_ == kAccessPointCreated ? "hosting" : state_ == kStationConnected ? "visiting" : "idle";
+        j = std::string("{\"state\":\"") + st + "\"";
+        if (in_network()) {
+            j += ",\"room\":" + std::to_string(room_id_) + ",\"address\":" + net_status::json_str(vnet::ip_str(vip_)) + ",\"players\":[";
+            bool first = true;
+            for (int i = 0; i < 8; ++i) {
+                const NodeInfo& n = info_.ldn.nodes[i];
+                if (!n.is_connected) continue;
+                j += (first ? "" : ",") + net_status::json_str(std::string(n.user_name, strnlen(n.user_name, sizeof n.user_name)));
+                first = false;
+            }
+            j += "],\"max\":" + std::to_string(info_.ldn.node_count_max);
+            std::string relay;
+            if (state_ == kAccessPointCreated && auto_) {
+                relay = "this PC";
+            } else if (const auto it = tag_relay_.find(tag_); it != tag_relay_.end()) {
+                relay = it->second.first + ":" + std::to_string(it->second.second);
+            } else {
+                relay = config_get_str("net", "server", "auto");
+            }
+            j += ",\"relay\":" + net_status::json_str(relay);
+            lobby = lobby_;
+        }
+        j += ",\"reason\":" + std::to_string(reason_);
+    }
+    if (lobby) j += std::string(",\"udp\":") + (lobby->udp_active() ? "true" : "false");
+    j += "}";
+    net_status::set_part("link_play", j);
 }
 
 void Ldn::add_commands(ipc::Service& s) {
@@ -809,8 +932,8 @@ void Ldn::add_commands(ipc::Service& s) {
     cmd(s, 205, "Reject", &Ldn::reject);
     cmd(s, 206, "SetAdvertiseData", &Ldn::set_advertise_data);
     cmd(s, 207, "SetStationAcceptPolicy", &Ldn::set_accept_policy);
-    cmd(s, 208, "AddAcceptFilterEntry", &Ldn::accept_filter);
-    cmd(s, 209, "ClearAcceptFilter", &Ldn::accept_filter);
+    cmd(s, 208, "AddAcceptFilterEntry", &Ldn::add_accept_filter);
+    cmd(s, 209, "ClearAcceptFilter", &Ldn::clear_accept_filter);
     cmd(s, 300, "OpenStation", &Ldn::open_station);
     cmd(s, 301, "CloseStation", &Ldn::close_station);
     cmd(s, 302, "Connect", &Ldn::connect);
@@ -840,6 +963,7 @@ void Ldn::drop_hold() {
 void Ldn::set_state(uint32_t s) {
     if (state_ != s) NXLOG_I("net", "ldn: state %u -> %u", state_, s);
     state_ = s;
+    status_locked();
     ev_.signal();
 }
 
@@ -881,18 +1005,77 @@ void Ldn::adopt(std::shared_ptr<vnet::Lobby> next) {
 
 // ---- lobby events (lobby thread) ------------------------------------------------------------------------------------------------------
 
-void Ldn::on_room_state(const vnet::Room& r) {
-    std::lock_guard<std::mutex> lk(mu_);
-    room_cv_.notify_all();
-    if (!in_network() || r.room_id != room_id_) return;
-    apply_room(r);
-    ev_.signal();
+// The host enforces its station accept policy (SetStationAcceptPolicy, AddAcceptFilterEntry) on every node that joins: a node the policy
+// refuses never reaches the game's node table (its datagrams stay held, kHoldMs) and is rejected through the relay, which turns it away
+// from this room for good (its Connect answers ConnectRejected: join() below). Nodes already in the room stay when the policy changes,
+// as on the console; policy 1 rejects every newcomer (pokopia-native's coop_ldn.c does the same at its connect), 2 and 3 compare the
+// node's MAC as the game sees it (make_info: tagged_mac) with the filter.
+bool Ldn::admits(const std::array<uint8_t, 6>& mac) const {
+    switch (accept_policy_) {
+        case 1: return false;
+        case 2: return filter_.count(mac) == 0;
+        case 3: return filter_.count(mac) != 0;
+        default: return true;
+    }
+}
+
+void Ldn::on_room_state(const vnet::Room& r0) {
+    std::vector<std::pair<uint32_t, std::string>> refuse;
+    std::shared_ptr<vnet::Lobby> lobby;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        room_cv_.notify_all();
+        if (!in_network() || r0.room_id != room_id_) return;
+        // a state older than one already applied (an in-process relay delivers on several threads): the newer one stands
+        if (r0.seq && r0.seq < last_seq_) return;
+        vnet::Room r = r0;
+        if (state_ == kAccessPointCreated) {
+            std::set<std::pair<uint32_t, std::string>> listed;
+            for (const vnet::RoomNode& n : r.nodes) listed.insert({n.vip, n.nickname});
+            for (auto it = refused_.begin(); it != refused_.end();) it = listed.count(*it) ? std::next(it) : refused_.erase(it);
+            const auto known = [&](uint32_t vip) { return std::find(node_vip_.begin(), node_vip_.end(), vip) != node_vip_.end(); };
+            for (auto it = r.nodes.begin(); it != r.nodes.end();) {
+                const std::pair<uint32_t, std::string> key{it->vip, it->nickname};
+                const bool fresh = it->node_id != 0 && it->vip != vip_ && !known(it->vip);
+                if (fresh && !refused_.count(key) && !admits(tagged_mac(it->mac, tag_))) {
+                    refused_.insert(key);
+                    refuse.push_back(key);
+                    NXLOG_I("net", "ldn: %s (%s) refused by the station accept policy %u", vnet::ip_str(it->vip).c_str(), it->nickname.c_str(),
+                            accept_policy_);
+                }
+                it = refused_.count(key) ? r.nodes.erase(it) : std::next(it);
+            }
+        }
+        apply_room(r);
+        ev_.signal();
+        lobby = lobby_;
+    }
+    // Off the lobby's event thread: a sink must not call into its own lobby (a loopback relay delivers the room state that follows on
+    // the calling thread, inside this sink's delivery). The relay keeps the node out from the REJECT on; the game never saw it.
+    // The relay's REJECT names an address only: a node is rejected only while the room still lists that address with that player, so a
+    // late thread never turns away the next player who got the slot.
+    if (lobby && !refuse.empty())
+        std::thread([lobby, refuse] {
+            for (const auto& [vip, nick] : refuse) {
+                const vnet::Room now = lobby->room();
+                const bool still = std::any_of(now.nodes.begin(), now.nodes.end(), [&](const vnet::RoomNode& n) { return n.vip == vip && n.nickname == nick; });
+                if (still) lobby->reject(vip);
+            }
+        }).detach();
+    // the status file is written off this sink's thread too: net_status's writer must not run under a lock a lobby sink holds
+    if (auto self = weak_from_this().lock())
+        std::thread([self] { self->flush_status(); }).detach();
 }
 
 void Ldn::on_left(vnet::LeftReason why) {
     std::lock_guard<std::mutex> lk(mu_);
     room_cv_.notify_all();
-    if (!in_network()) return;
+    if (!in_network()) {
+        last_left_ = static_cast<int>(why);   // a Connect still waiting on its room (join) reads it
+        return;
+    }
+    if (auto self = weak_from_this().lock())
+        std::thread([self] { self->flush_status(); }).detach();   // after this sink (it takes mu_ itself)
     int16_t reason = kSignalLost;
     switch (why) {
         case vnet::LeftReason::HostClosed: reason = kDestroyedByUser; break;
@@ -911,7 +1094,13 @@ void Ldn::on_left(vnet::LeftReason why) {
 }
 
 void Ldn::apply_room(const vnet::Room& r) {
+    status_locked();
+    if (r.seq > last_seq_) last_seq_ = r.seq;
     info_ = make_info(r, accept_policy_, vip_, user_name_, tag_);
+    if (priv_) {   // the SecurityParameter the game created (host) or connected (station) with
+        std::memcpy(info_.ldn.security_parameter, priv_sp_.data, 16);
+        std::memcpy(info_.id.session_id, priv_sp_.session_id, 16);
+    }
     std::array<uint32_t, 8> now{};
     for (const vnet::RoomNode& n : r.nodes)
         if (n.node_id < 8) now[n.node_id] = n.vip;
@@ -1001,17 +1190,11 @@ uint32_t Ldn::get_latest_update(ipc::Request& req, ipc::Response&) {
 // ---- scan ----------------------------------------------------------------------------------------------------------------------------
 
 uint32_t Ldn::scan(ipc::Request& req, ipc::Response& rsp) {
-    bool all;   // all: auto mode outside a room, the rooms of every relay on the LAN
-    std::shared_ptr<vnet::Lobby> lobby;
-    uint32_t own_room;
     {
         std::lock_guard<std::mutex> lk(mu_);
         if (state_ == kNone) return kInvalidState;
         // With no lobby every initialized state answers an empty scan (the offline stub's answer); with one (or auto), Switchbrew's 2..5.
         if ((lobby_ || auto_) && (state_ < kAccessPoint || state_ > kStationConnected)) return kInvalidState;
-        all = auto_ && !in_network();
-        lobby = lobby_;
-        own_room = room_id_;
     }
     const ScanFilter f = arg_at<ScanFilter>(req, 8);   // after the s16 channel, 8-aligned
     const ipc::Buffer out = req.out_buf(0);
@@ -1019,14 +1202,39 @@ uint32_t Ldn::scan(ipc::Request& req, ipc::Response& rsp) {
     const uint64_t lcid = (f.flag & kFilterLocalCommunicationId) ? f.id.intent.local_comm_id : 0;
     const uint16_t scene = (f.flag & kFilterSceneId) ? f.id.intent.scene_id : 0xFFFF;
     uint16_t count = 0;
+    if (cap)
+        for (const auto& [r, tag] : scan_rooms(lcid, scene)) {
+            if (count >= cap) break;
+            const NetworkInfo ni = make_info(r, 0, 0, {}, tag);
+            if (!filter_match(f, ni)) continue;
+            std::memcpy(buf_mut(out) + count * sizeof(NetworkInfo), &ni, sizeof ni);
+            ++count;
+        }
+    rsp.push(static_cast<uint32_t>(count));   // s16 total (the high half is zero)
+    return 0;
+}
+
+std::vector<std::pair<vnet::Room, uint64_t>> Ldn::scan_rooms(uint64_t lcid, uint16_t scene) {
+    bool all;   // auto mode outside a room: the rooms of every relay on the LAN
+    std::shared_ptr<vnet::Lobby> lobby;
+    uint32_t own_room;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        all = auto_ && !in_network();
+        lobby = lobby_;
+        own_room = room_id_;
+    }
+    std::vector<std::pair<vnet::Room, uint64_t>> res;
     auto put = [&](const vnet::Room& r, uint64_t tag) {
-        if (count >= cap) return;
-        const NetworkInfo ni = make_info(r, 0, 0, {}, tag);
-        if (!filter_match(f, ni)) return;
-        std::memcpy(buf_mut(out) + count * sizeof(NetworkInfo), &ni, sizeof ni);
-        ++count;
+        SessionKey sid;
+        size_t n = 0;
+        if (private_of(r.adv, &sid, &n)) {
+            std::lock_guard<std::mutex> lk(mu_);
+            priv_ref_[sid] = SessionRef{r.room_id, tag};
+        }
+        res.emplace_back(r, tag);
     };
-    if (all && cap) {
+    if (all) {
         // Every relay found, merged. One relay reached by two addresses (a relay on this PC answers on 127.0.0.1 and on its LAN address,
         // a PC on two networks on both) has one tag: it is listed once, by its loopback address if it has one.
         std::vector<RelayRooms> got = scan_relays(discover_cached(), lcid, scene);
@@ -1045,7 +1253,7 @@ uint32_t Ldn::scan(ipc::Request& req, ipc::Response& rsp) {
         }
         for (const RelayRooms& rr : got)
             for (const vnet::Room& r : rr.rooms) put(r, rr.tag);
-    } else if (lobby && cap) {
+    } else if (lobby) {
         std::vector<vnet::Room> rooms;
         const int e = lobby->scan(lcid, scene, &rooms);
         if (e) NXLOG_D("net", "ldn: scan failed: %s", vnet::lobby_err_str(e));
@@ -1057,8 +1265,17 @@ uint32_t Ldn::scan(ipc::Request& req, ipc::Response& rsp) {
         for (const vnet::Room& r : rooms)
             if (r.room_id != own_room) put(r, tag);
     }
-    rsp.push(static_cast<uint32_t>(count));   // s16 total (the high half is zero)
-    return 0;
+    return res;
+}
+
+SessionRef Ldn::ref_of(const uint8_t (&sid)[16]) {
+    const SessionRef s = session_of(sid);
+    if (s.room) return s;
+    SessionKey k;
+    std::memcpy(k.data(), sid, 16);
+    std::lock_guard<std::mutex> lk(mu_);
+    const auto it = priv_ref_.find(k);
+    return it == priv_ref_.end() ? SessionRef{} : it->second;
 }
 
 // ---- access point ----------------------------------------------------------------------------------------------------------------------
@@ -1092,6 +1309,9 @@ uint32_t Ldn::close_access_point(ipc::Request&, ipc::Response&) {
     {
         std::lock_guard<std::mutex> lk(mu_);
         if (state_ != kAccessPoint && state_ != kAccessPointCreated) return kInvalidState;
+        accept_policy_ = 0;   // the access point's settings go with it (pokopia-native resets the policy on the way to Initialized)
+        filter_.clear();
+        refused_.clear();
     }
     leave_network(kInitialized, kDestroyedByUser);
     return 0;
@@ -1101,11 +1321,15 @@ uint32_t Ldn::create_network(ipc::Request& req, ipc::Response&) {
     return create(arg_at<SecurityConfig>(req, 0), arg_at<UserConfig>(req, kCreateUser), arg_at<NetworkConfig>(req, kCreateNetCfg));
 }
 
+// CreateNetworkPrivate(SecurityConfig, SecurityParameter, UserConfig, NetworkConfig; AddressList in a buffer): the session id and
+// security data are the game's (GetSecurityParameter answers them, its stations ConnectPrivate with them). The address list is the
+// console's static addressing for a private network; the relay hands out the addresses here, as for any room.
 uint32_t Ldn::create_network_private(ipc::Request& req, ipc::Response&) {
-    return create(arg_at<SecurityConfig>(req, 0), arg_at<UserConfig>(req, kCreatePrivUser), arg_at<NetworkConfig>(req, kCreatePrivNetCfg));
+    const SecurityParameter sp = arg_at<SecurityParameter>(req, kCreatePrivSecParam);
+    return create(arg_at<SecurityConfig>(req, 0), arg_at<UserConfig>(req, kCreatePrivUser), arg_at<NetworkConfig>(req, kCreatePrivNetCfg), &sp);
 }
 
-uint32_t Ldn::create(const SecurityConfig& sec, const UserConfig& user, const NetworkConfig& cfg) {
+uint32_t Ldn::create(const SecurityConfig& sec, const UserConfig& user, const NetworkConfig& cfg, const SecurityParameter* priv) {
     bool host_auto;
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -1128,6 +1352,12 @@ uint32_t Ldn::create(const SecurityConfig& sec, const UserConfig& user, const Ne
         rc.security_mode = static_cast<uint8_t>(sec.mode);
         rc.pass_hash = vnet::passphrase_hash(sec.passphrase, sec.passphrase_size);
         rc.adv = adv_;
+        priv_ = priv != nullptr;
+        if (priv) {
+            priv_sp_ = *priv;
+            if (adv_.size() + kPrivTrailer <= vnet::kMaxAdvertise) rc.adv = with_private(adv_, priv->session_id);
+            else NXLOG_W("net", "ldn: CreateNetworkPrivate: %zu bytes of advertise data leave no room for the session id: stations find it by Scan only", adv_.size());
+        }
         user_name_.assign(user.user_name, strnlen(user.user_name, 32));
     }
     vnet::Joined j;
@@ -1154,7 +1384,7 @@ uint32_t Ldn::create(const SecurityConfig& sec, const UserConfig& user, const Ne
         r.comm_version = rc.comm_version;
         r.node_count_max = rc.node_count_max;
         r.security_mode = rc.security_mode;
-        r.adv = rc.adv;
+        r.adv = rc.adv;   // with a private room's session id: make_info shows the game's part
         r.nodes = {{0, j.vip, {0x02, 0x00, 0xA9, 0xFE, static_cast<uint8_t>(j.vip >> 8), static_cast<uint8_t>(j.vip)}, user_name_}};
     }
     drop_hold();
@@ -1211,21 +1441,44 @@ uint32_t Ldn::set_advertise_data(ipc::Request& req, ipc::Response&) {
             if (!adv.empty()) std::memcpy(info_.ldn.advertise_data, adv.data(), adv.size());
         }
     }
-    if (lobby) lobby->set_advertise(adv);
+    if (lobby) {
+        bool priv;
+        uint8_t sid[16];
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            priv = priv_ && state_ == kAccessPointCreated && adv.size() + kPrivTrailer <= vnet::kMaxAdvertise;
+            std::memcpy(sid, priv_sp_.session_id, 16);
+        }
+        lobby->set_advertise(priv ? with_private(adv, sid) : adv);
+    }
     return 0;
 }
 
 uint32_t Ldn::set_accept_policy(ipc::Request& req, ipc::Response&) {
     std::lock_guard<std::mutex> lk(mu_);
+    const uint8_t p = req.arg<uint8_t>(0);
+    if (p > 3) return kInvalidArgument;   // AcceptPolicy 0..3 (Ryujinx Ldn/Types/AcceptPolicy.cs; pokopia-native coop_ldn.c refuses others)
     if (state_ != kAccessPoint && state_ != kAccessPointCreated) return kInvalidState;
-    accept_policy_ = req.arg<uint8_t>(0);   // stored and reported; the relay has no accept policy yet (everyone may join)
+    accept_policy_ = p;                     // reported in NetworkInfo, enforced on the next joins (on_room_state)
     info_.ldn.station_accept_policy = accept_policy_;
     return 0;
 }
 
-uint32_t Ldn::accept_filter(ipc::Request&, ipc::Response&) {
+// AddAcceptFilterEntry(MacAddress): a 6-byte station MAC in the raw arguments.
+uint32_t Ldn::add_accept_filter(ipc::Request& req, ipc::Response&) {
     std::lock_guard<std::mutex> lk(mu_);
-    return state_ == kAccessPoint || state_ == kAccessPointCreated ? 0 : kInvalidState;
+    if (state_ != kAccessPoint && state_ != kAccessPointCreated) return kInvalidState;
+    std::array<uint8_t, 6> mac{};
+    for (size_t i = 0; i < 6; ++i) mac[i] = req.arg<uint8_t>(i);
+    filter_.insert(mac);
+    return 0;
+}
+
+uint32_t Ldn::clear_accept_filter(ipc::Request&, ipc::Response&) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (state_ != kAccessPoint && state_ != kAccessPointCreated) return kInvalidState;
+    filter_.clear();
+    return 0;
 }
 
 // ---- station ----------------------------------------------------------------------------------------------------------------------------
@@ -1249,18 +1502,28 @@ uint32_t Ldn::close_station(ipc::Request&, ipc::Response&) {
 uint32_t Ldn::connect(ipc::Request& req, ipc::Response&) {
     NetworkInfo ni{};
     buf_read(req.in_buf(0), &ni, sizeof ni);
-    return join(session_of(ni.id.session_id), ni.ldn.nodes[0].local_comm_version, arg_at<SecurityConfig>(req, 0),
+    return join(ref_of(ni.id.session_id), ni.ldn.nodes[0].local_comm_version, arg_at<SecurityConfig>(req, 0),
                 arg_at<UserConfig>(req, kConnectUser), req.arg<int32_t>(kConnectVersion));
 }
 
 uint32_t Ldn::connect_private(ipc::Request& req, ipc::Response&) {
     const SecurityParameter sp = arg_at<SecurityParameter>(req, kConnPrivSecParam);
     const NetworkConfig cfg = arg_at<NetworkConfig>(req, kConnPrivNetCfg);
-    return join(session_of(sp.session_id), static_cast<int16_t>(cfg.local_comm_version), arg_at<SecurityConfig>(req, 0),
-                arg_at<UserConfig>(req, kConnPrivUser), req.arg<int32_t>(kConnPrivVersion));
+    SessionRef ref = ref_of(sp.session_id);
+    if (!ref.room) {   // not seen yet: the station looks for it, as the console's station does before it associates
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            if (state_ != kStation) return kInvalidState;
+        }
+        scan_rooms(cfg.intent.local_comm_id, cfg.intent.scene_id);
+        ref = ref_of(sp.session_id);
+    }
+    return join(ref, static_cast<int16_t>(cfg.local_comm_version), arg_at<SecurityConfig>(req, 0), arg_at<UserConfig>(req, kConnPrivUser),
+                req.arg<int32_t>(kConnPrivVersion), &sp);
 }
 
-uint32_t Ldn::join(const SessionRef& sref, int16_t room_version, const SecurityConfig& sec, const UserConfig& user, int32_t version) {
+uint32_t Ldn::join(const SessionRef& sref, int16_t room_version, const SecurityConfig& sec, const UserConfig& user, int32_t version,
+                   const SecurityParameter* priv) {
     const uint32_t room_id = sref.room;
     bool is_auto;
     {
@@ -1302,7 +1565,13 @@ uint32_t Ldn::join(const SessionRef& sref, int16_t room_version, const SecurityC
     }
     vnet::Joined j;
     const int16_t wire = wire_version(static_cast<int16_t>(version));
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        last_left_ = -1;
+    }
+    const auto join_start = std::chrono::steady_clock::now();
     const int e = lobby->join(room_id, wire, vnet::passphrase_hash(sec.passphrase, sec.passphrase_size), &j);
+    const auto join_rtt = std::chrono::steady_clock::now() - join_start;
     if (e) {
         NXLOG_I("net", "ldn: Connect to room %u failed: %s", room_id, vnet::lobby_err_str(e));
         if (e == vnet::kLobbyVersion) {
@@ -1347,12 +1616,39 @@ uint32_t Ldn::join(const SessionRef& sref, int16_t room_version, const SecurityC
         if (r.room_id != j.room_id || room_lists(r, j.vip) || std::chrono::steady_clock::now() >= deadline) break;
         room_cv_.wait_for(lk, std::chrono::milliseconds(50));
     }
+    // The lobby clears its room before its "left" sink runs (on_left notes the reason in last_left_): a room seen gone waits a moment for
+    // the reason, so a REJECT is told from a lost connection whatever thread got there first.
+    const auto left_reason = [&] {
+        if (last_left_ < 0) room_cv_.wait_for(lk, std::chrono::milliseconds(500), [&] { return last_left_ >= 0; });
+        return last_left_;
+    };
     if (r.room_id != j.room_id || !room_lists(r, j.vip)) {
+        const bool rejected = r.room_id != j.room_id && left_reason() == static_cast<int>(vnet::LeftReason::Rejected);   // on_room_state
         lk.unlock();
         NXLOG_I("net", "ldn: Connect to room %u: %s, leaving", j.room_id,
-                r.room_id != j.room_id ? "out of the room before its state came" : "no room state listing this node within 5 s");
+                rejected ? "the host's accept policy refused this node"
+                : r.room_id != j.room_id ? "out of the room before its state came" : "no room state listing this node within 5 s");
         lobby->leave();
-        return kConnectFailure;
+        return rejected ? kConnectRejected : kConnectFailure;
+    }
+    // The host's station accept policy (on_room_state) answers a join with a REJECT one relay round trip after it saw the node: the
+    // console's access point refuses the association, so Connect waits that long (twice the JOIN's own round trip, 100 ms .. 1 s) and
+    // answers ConnectRejected when the lobby is turned out meanwhile. The link is current during the wait, so the host's first datagrams
+    // are not lost. A room left for another reason in that time fails the Connect as a lost connection would. A REJECT that comes later
+    // (a host on a loaded machine) puts the station out of the network at once with DisconnectReason Rejected (on_left).
+    vnet::set_current_link(lobby->link());
+    {
+        const auto grace = std::clamp<std::chrono::steady_clock::duration>(2 * join_rtt, std::chrono::milliseconds(100), std::chrono::seconds(1));
+        const auto until = std::chrono::steady_clock::now() + grace;
+        while (lobby->room().room_id == j.room_id && last_left_ < 0 && std::chrono::steady_clock::now() < until)
+            room_cv_.wait_until(lk, std::min(until, std::chrono::steady_clock::now() + std::chrono::milliseconds(20)));
+        if (lobby->room().room_id != j.room_id || last_left_ >= 0) {
+            const bool rejected = left_reason() == static_cast<int>(vnet::LeftReason::Rejected);
+            if (const auto cur = vnet::current_link(); cur && cur == lobby->link()) vnet::set_current_link(nullptr);
+            NXLOG_I("net", "ldn: Connect to room %u: %s", j.room_id, rejected ? "the host's accept policy refused this node" : "out of the room at once");
+            return rejected ? kConnectRejected : kConnectFailure;
+        }
+        r = lobby->room();
     }
     tag_ = relay_tag(*lobby);   // after JOIN the WELCOME is in: the same value the host computed
     room_id_ = j.room_id;
@@ -1360,8 +1656,9 @@ uint32_t Ldn::join(const SessionRef& sref, int16_t room_version, const SecurityC
     reason_ = kReasonNone;
     node_vip_ = {};
     latest_ = {};
+    priv_ = priv != nullptr;
+    if (priv) priv_sp_ = *priv;
     apply_room(r);
-    vnet::set_current_link(lobby->link());
     NXLOG_I("net", "ldn: joined room %u as %s (node %u)", room_id_, vnet::ip_str(vip_).c_str(), j.node_id);
     set_state(kStationConnected);
     return 0;
@@ -1378,7 +1675,40 @@ uint32_t Ldn::disconnect(ipc::Request&, ipc::Response&) {
 
 // ---- lifetime ---------------------------------------------------------------------------------------------------------------------------
 
+// Every Ldn that has been initialized, for the launcher's "leave" (net-control.txt), which is registered with each Initialize.
+std::mutex g_live_mu;
+std::vector<std::weak_ptr<Ldn>> g_live;
+
+void Ldn::leave_from_launcher() {
+    std::lock_guard<std::mutex> op(op_mu_);
+    uint32_t st;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        st = state_;
+    }
+    if (st == kAccessPointCreated) leave_network(kAccessPoint, kDestroyedBySystem);
+    else if (st == kStationConnected) leave_network(kStation, kDisconnectedBySystem);
+    else return;
+    NXLOG_I("net", "ldn: left the room on the launcher's leave command");
+    flush_status();
+}
+
 uint32_t Ldn::initialize(ipc::Request&, ipc::Response&) {
+    {
+        std::lock_guard<std::mutex> lk(g_live_mu);
+        g_live.erase(std::remove_if(g_live.begin(), g_live.end(), [](const std::weak_ptr<Ldn>& w) { return w.expired(); }), g_live.end());
+        g_live.push_back(weak_from_this());
+    }
+    net_status::on_command("ldn", [](const std::string& c) {
+        if (c != "leave") return;   // "join": a game joins from its own menus
+        std::vector<std::shared_ptr<Ldn>> live;
+        {
+            std::lock_guard<std::mutex> lk(g_live_mu);
+            for (const auto& w : g_live)
+                if (auto l = w.lock()) live.push_back(std::move(l));
+        }
+        for (const auto& l : live) l->leave_from_launcher();
+    });
     std::shared_ptr<vnet::Lobby> lobby;
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -1433,19 +1763,21 @@ void Ldn::shutdown() {
 // Link Play (relay) thing and are not sent here: the game's version goes out as the game gave it.
 // Story co-op (pokopia-native's "Story co-op (experimental)", docs/story-coop.md; ldnapi::set_story_mod, armed by games/pkp/pkp_linkplay.cpp)
 // adds COOP_STORY_MOD after the Interact name, so both on give pokopia-native's fingerprint c75a2da0380038c1.
-// Not mapped (the module has no counterpart; pokopia-native cuts them too): CreateNetworkPrivate (DeviceNotAvailable), ConnectPrivate
-// (ConnectNotFound), the accept filter (accepted in access point states and ignored). GetNetworkInfoLatestUpdate's per-node flags are
+// The module has no private networks (pokopia-native cuts them): CreateNetworkPrivate makes a network with the module's session id and
+// ConnectPrivate joins the one network of the config's game and scene a Scan finds. Not mapped: the accept filter (accepted in access
+// point states and ignored; the policy itself is the module's). GetNetworkInfoLatestUpdate's per-node flags are
 // built here from the node tables the game reads.
 // =============================================================================================================================================
 
+// [net] protocol, read when a service object is made (a game's setting does not change while it runs; tests change it between cases).
 bool native_protocol() {
-    static const bool native = [] {
-        const std::string p = lower(config_get_str("net", "protocol", "native"));
-        if (p == "linkplay") return false;
-        if (p != "native") NXLOG_W("net", "ldn: [net] protocol = \"%s\" is not native or linkplay: native", p.c_str());
-        return true;
-    }();
-    return native;
+    const std::string p = lower(config_get_str("net", "protocol", "native"));
+    if (p == "linkplay" || p == "lan" || p == "ryuldn") return false;
+    if (p != "native") {
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true)) NXLOG_W("net", "ldn: [net] protocol = \"%s\" is not native or linkplay: native", p.c_str());
+    }
+    return true;
 }
 
 struct NativeSlot {
@@ -1805,11 +2137,550 @@ void NativeLdn::add_commands(ipc::Service& s) {
     cmd(s, 403, "SetOperationMode", &NativeLdn::accept);
 }
 
+// =============================================================================================================================================
+// [net] protocol = lan: ldn:u over a real LAN in ldn_mitm's format (net/lan_mitm.h), with Ryujinx's ldn_mitm mode and consoles running
+// ldn_mitm on the same network. The host owns the NetworkInfo (built here after Ryujinx LdnMitm/LanDiscovery.cs, MIT: BSSID and node
+// MACs 02:00 + the LAN address, a random 32-byte SSID and session id, channel 6 unless the game asks for one, link level 3, network type
+// 2) and syncs it to its stations; node addresses are the machines' LAN addresses, and the game's sockets run there (mitm::make_lan_link).
+// Config: [net] lan_ip = auto | <IPv4> (the interface), lan_peers = <IPv4>[,<IPv4>...] (scanned by unicast too: a network that drops
+// broadcasts; two copies on one PC on 127.0.0.1 / 127.0.0.2). Scan waits up to 1 s for the first answer, 33 ms after it (Ryujinx's).
+// Station accept policy and filter, node_count_max and Reject: enforced by the host (a refused station's link closes: ConnectRejected).
+// CreateNetworkPrivate: the game's SecurityParameter is the network's; ConnectPrivate: the scan's network with that session id. TCP between
+// AnySwitch nodes rides vtcp on UDP 11453 (a console or Ryujinx peer gets no TCP from it).
+// =============================================================================================================================================
+class MitmLdn : public std::enable_shared_from_this<MitmLdn> {
+public:
+    void add_commands(ipc::Service& s);
+    void shutdown() {
+        std::unique_ptr<vnet::mitm::Net> net;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            net = std::move(net_);
+            if (in_network()) vnet::set_current_link(nullptr);
+            state_ = kNone;
+        }
+        net.reset();   // closes its links, joins its threads (their events see no net any more)
+    }
+
+private:
+    using H = uint32_t (MitmLdn::*)(ipc::Request&, ipc::Response&);
+    void cmd(ipc::Service& s, uint32_t id, const char* name, H h) {
+        std::weak_ptr<MitmLdn> w = weak_from_this();
+        s.add_cmd(id, name, [w, id, name, h](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            note(id, name);
+            auto self = w.lock();
+            if (!self) return kInvalidState;
+            std::lock_guard<std::mutex> op(self->op_mu_);
+            return ((*self).*h)(req, rsp);
+        });
+    }
+    bool in_network() const { return state_ == kAccessPointCreated || state_ == kStationConnected; }
+    void set_state(uint32_t s) {
+        if (state_ != s) NXLOG_I("net", "ldn (lan): state %u -> %u", state_, s);
+        state_ = s;
+        ev_.signal();
+    }
+    NetworkInfo info_locked() const {
+        NetworkInfo ni{};
+        if (net_) {
+            const vnet::mitm::Info i = net_->info();
+            std::memcpy(&ni, i.data(), sizeof ni);
+        }
+        return ni;
+    }
+    void saw(const NetworkInfo& ni) {   // the node joins and leaves since the table the game last read (GetNetworkInfoLatestUpdate)
+        for (size_t i = 0; i < 8; ++i) {
+            const uint32_t now = ni.ldn.nodes[i].is_connected ? ni.ldn.nodes[i].ipv4 : 0;
+            if (now == seen_[i]) continue;
+            if (seen_[i]) latest_[i] |= kNodeDisconnect;
+            if (now) latest_[i] |= kNodeConnect;
+            seen_[i] = now;
+        }
+    }
+    std::array<uint8_t, 6> mac_of(uint32_t ip) const {
+        return {0x02, 0x00, static_cast<uint8_t>(ip >> 24), static_cast<uint8_t>(ip >> 16), static_cast<uint8_t>(ip >> 8), static_cast<uint8_t>(ip)};
+    }
+    bool admits(const vnet::mitm::Node& n) {   // the accept policy on a station's MAC (its link's thread)
+        std::lock_guard<std::mutex> lk(mu_);
+        std::array<uint8_t, 6> mac;
+        std::memcpy(mac.data(), n.data() + vnet::mitm::kNodeMac, 6);
+        switch (policy_) {
+            case 1: return false;
+            case 2: return !filter_.count(mac);
+            case 3: return filter_.count(mac) != 0;
+            default: return true;
+        }
+    }
+    NodeInfo own_node(const UserConfig& user, uint16_t version) const {
+        NodeInfo n{};
+        n.ipv4 = ip_;
+        const auto mac = mac_of(ip_);
+        std::memcpy(n.mac, mac.data(), 6);
+        n.is_connected = 1;
+        std::memcpy(n.user_name, user.user_name, std::min(sizeof n.user_name, sizeof user.user_name));
+        n.user_name[sizeof n.user_name - 1] = 0;
+        n.local_comm_version = static_cast<int16_t>(version);
+        return n;
+    }
+    static void random_bytes(uint8_t* p, size_t n) {
+        static std::mutex m;
+        static std::mt19937_64 rng{std::random_device{}()};
+        std::lock_guard<std::mutex> lk(m);
+        for (size_t i = 0; i < n; ++i) p[i] = static_cast<uint8_t>(rng());
+    }
+
+    uint32_t initialize(ipc::Request&, ipc::Response&) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (state_ != kNone) return 0;
+        std::string why;
+        uint32_t ip = 0, mask = 0;
+        if (!vnet::mitm::pick_interface(config_get_str("net", "lan_ip", "auto"), &ip, &mask, &why)) {
+            NXLOG_W("net", "ldn (lan): %s: local wireless off", why.c_str());
+            set_state(kInitialized);   // the state machine runs; Scan finds nothing, CreateNetwork answers DeviceNotAvailable
+            return 0;
+        }
+        std::vector<uint32_t> peers;
+        const std::string ps = config_get_str("net", "lan_peers", "");
+        for (size_t at = 0; at < ps.size();) {
+            const size_t end = std::min(ps.find_first_of(",; ", at), ps.size());
+            unsigned a, b, c, d;
+            if (std::sscanf(ps.substr(at, end - at).c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) == 4) peers.push_back((a << 24) | (b << 16) | (c << 8) | d);
+            at = end + 1;
+        }
+        std::weak_ptr<MitmLdn> w = weak_from_this();
+        vnet::mitm::Net::Events ev;
+        ev.changed = [w] {
+            if (auto s = w.lock()) s->ev_.signal();
+        };
+        ev.lost = [w](bool orderly) {
+            if (auto s = w.lock()) s->lost(orderly);
+        };
+        ev.admit = [w](const vnet::mitm::Node& n) {
+            auto s = w.lock();
+            return s && s->admits(n);
+        };
+        net_ = vnet::mitm::Net::start(ip, mask, peers, std::move(ev), &why);
+        if (!net_) {
+            NXLOG_W("net", "ldn (lan): %s: local wireless off", why.c_str());
+        } else {
+            ip_ = ip;
+            mask_ = mask;
+            link_ = vnet::mitm::make_lan_link(ip, mask);
+            NXLOG_I("net", "ldn (lan): ldn_mitm LAN play on %s/%d%s", vnet::ip_str(ip).c_str(), __builtin_popcount(mask),
+                    peers.empty() ? "" : " (and the [net] lan_peers)");
+        }
+        reason_ = kReasonNone;
+        set_state(kInitialized);
+        return 0;
+    }
+    uint32_t finalize(ipc::Request&, ipc::Response&) {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            if (state_ == kNone) return kInvalidState;
+        }
+        shutdown();
+        return 0;
+    }
+    void lost(bool orderly) {   // the host's link closed under a connected station
+        std::lock_guard<std::mutex> lk(mu_);
+        if (state_ != kStationConnected) return;
+        vnet::set_current_link(nullptr);
+        reason_ = orderly ? kDestroyedByUser : kSignalLost;
+        NXLOG_I("net", "ldn (lan): the host left (reason %d)", reason_);
+        seen_ = {};
+        set_state(kStation);
+    }
+
+    uint32_t get_state(ipc::Request&, ipc::Response& rsp) {
+        std::lock_guard<std::mutex> lk(mu_);
+        rsp.push(state_);
+        return 0;
+    }
+    uint32_t get_network_info(ipc::Request& req, ipc::Response&) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!in_network()) return kInvalidState;
+        const NetworkInfo ni = info_locked();
+        buf_write(req.out_buf(0), &ni, sizeof ni);
+        saw(ni);
+        return 0;
+    }
+    uint32_t get_latest_update(ipc::Request& req, ipc::Response&) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!in_network()) return kInvalidState;
+        const NetworkInfo ni = info_locked();
+        buf_write(req.out_buf(0), &ni, sizeof ni);
+        saw(ni);
+        NodeLatestUpdate up[8] = {};
+        for (size_t i = 0; i < 8; ++i) up[i].state_change = latest_[i];
+        latest_ = {};
+        buf_write(req.out_buf(1), up, sizeof up);
+        return 0;
+    }
+    uint32_t get_ipv4(ipc::Request&, ipc::Response& rsp) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!in_network()) return kInvalidState;
+        rsp.push(ip_);
+        rsp.push(mask_);
+        return 0;
+    }
+    uint32_t get_disconnect_reason(ipc::Request&, ipc::Response& rsp) {
+        std::lock_guard<std::mutex> lk(mu_);
+        rsp.push(reason_);
+        return 0;
+    }
+    uint32_t get_security_parameter(ipc::Request&, ipc::Response& rsp) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!in_network()) return kInvalidState;
+        const NetworkInfo ni = info_locked();
+        SecurityParameter sp{};
+        std::memcpy(sp.data, ni.ldn.security_parameter, 16);
+        std::memcpy(sp.session_id, ni.id.session_id, 16);
+        rsp.push(sp);
+        return 0;
+    }
+    uint32_t get_network_config(ipc::Request&, ipc::Response& rsp) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!in_network()) return kInvalidState;
+        const NetworkInfo ni = info_locked();
+        NetworkConfig c{};
+        c.intent = ni.id.intent;
+        c.channel = static_cast<uint16_t>(ni.common.channel);
+        c.node_count_max = ni.ldn.node_count_max;
+        c.local_comm_version = static_cast<uint16_t>(ni.ldn.nodes[0].local_comm_version);
+        rsp.push(c);
+        return 0;
+    }
+    uint32_t attach_event(ipc::Request&, ipc::Response& rsp) {
+        rsp.out_copy.push_back(ev_.new_handle());
+        return 0;
+    }
+    uint32_t accept(ipc::Request&, ipc::Response&) { return 0; }
+
+    // Scan: the hosts that answer on the LAN, filtered as the console filters (the ldn_mitm host does not filter).
+    std::vector<NetworkInfo> scan_infos(const ScanFilter& f) {
+        vnet::mitm::Net* net;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            net = net_.get();
+        }
+        std::vector<NetworkInfo> out;
+        if (!net) return out;
+        for (const vnet::mitm::Info& i : net->scan(1000, 33)) {
+            NetworkInfo ni;
+            std::memcpy(&ni, i.data(), sizeof ni);
+            if ((f.flag & kFilterLocalCommunicationId) && ni.id.intent.local_comm_id != f.id.intent.local_comm_id) continue;
+            if ((f.flag & kFilterSceneId) && ni.id.intent.scene_id != f.id.intent.scene_id) continue;
+            if (!filter_match(f, ni)) continue;
+            out.push_back(ni);
+        }
+        return out;
+    }
+    uint32_t scan(ipc::Request& req, ipc::Response& rsp) {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            if (state_ == kNone) return kInvalidState;
+            if (net_ && (state_ < kAccessPoint || state_ > kStationConnected)) return kInvalidState;
+        }
+        const ScanFilter f = arg_at<ScanFilter>(req, 8);
+        const ipc::Buffer out = req.out_buf(0);
+        const size_t cap = static_cast<size_t>(out.size / sizeof(NetworkInfo));
+        uint32_t count = 0;
+        if (cap)
+            for (const NetworkInfo& ni : scan_infos(f)) {
+                if (count >= cap) break;
+                std::memcpy(buf_mut(out) + count * sizeof(NetworkInfo), &ni, sizeof ni);
+                ++count;
+            }
+        rsp.push(count);
+        return 0;
+    }
+
+    uint32_t open_access_point(ipc::Request&, ipc::Response&) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (state_ != kInitialized) return kInvalidState;
+        set_state(kAccessPoint);
+        return 0;
+    }
+    // Closing the network joins the net's threads, which call back into admits() and lost() (they take mu_): never with mu_ held. The
+    // commands are serialised by op_mu_, so the state only moves under a station's lost() meanwhile.
+    void net_close(bool host) {
+        vnet::mitm::Net* net;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            net = net_.get();
+            vnet::set_current_link(nullptr);
+        }
+        if (net) {
+            if (host) net->host_close();
+            else net->disconnect();
+        }
+    }
+    uint32_t close_access_point(ipc::Request&, ipc::Response&) {
+        uint32_t st;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            st = state_;
+        }
+        if (st != kAccessPoint && st != kAccessPointCreated) return kInvalidState;
+        if (st == kAccessPointCreated) net_close(true);
+        std::lock_guard<std::mutex> lk(mu_);
+        policy_ = 0;
+        filter_.clear();
+        set_state(kInitialized);
+        return 0;
+    }
+    uint32_t create_network(ipc::Request& req, ipc::Response&) {
+        return create(arg_at<SecurityConfig>(req, 0), arg_at<UserConfig>(req, kCreateUser), arg_at<NetworkConfig>(req, kCreateNetCfg), nullptr);
+    }
+    uint32_t create_network_private(ipc::Request& req, ipc::Response&) {
+        const SecurityParameter sp = arg_at<SecurityParameter>(req, kCreatePrivSecParam);
+        return create(arg_at<SecurityConfig>(req, 0), arg_at<UserConfig>(req, kCreatePrivUser), arg_at<NetworkConfig>(req, kCreatePrivNetCfg), &sp);
+    }
+    uint32_t create(const SecurityConfig& sec, const UserConfig& user, const NetworkConfig& cfg, const SecurityParameter* priv) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (state_ != kAccessPoint) return kInvalidState;
+        if (cfg.node_count_max < 1 || cfg.node_count_max > 8) return kInvalidArgument;
+        if (!net_) return kDeviceNotAvailable;
+        NetworkInfo ni{};
+        ni.id.intent = cfg.intent;
+        if (priv) {
+            std::memcpy(ni.id.session_id, priv->session_id, 16);
+            std::memcpy(ni.ldn.security_parameter, priv->data, 16);
+        } else {
+            random_bytes(ni.id.session_id, 16);
+        }
+        const auto mac = mac_of(ip_);
+        std::memcpy(ni.common.bssid, mac.data(), 6);
+        ni.common.ssid.length = 32;
+        random_bytes(reinterpret_cast<uint8_t*>(ni.common.ssid.raw), 32);
+        ni.common.channel = cfg.channel ? static_cast<int16_t>(cfg.channel) : 6;
+        ni.common.link_level = 3;
+        ni.common.network_type = 2;
+        ni.ldn.security_mode = static_cast<uint16_t>(sec.mode);
+        ni.ldn.station_accept_policy = policy_;
+        ni.ldn.node_count_max = cfg.node_count_max;
+        ni.ldn.nodes[0] = own_node(user, cfg.local_comm_version);
+        ni.ldn.node_count = 1;
+        ni.ldn.advertise_data_size = static_cast<uint16_t>(adv_.size());
+        if (!adv_.empty()) std::memcpy(ni.ldn.advertise_data, adv_.data(), adv_.size());
+        vnet::mitm::Info i;
+        std::memcpy(i.data(), &ni, sizeof ni);
+        std::string why;
+        if (!net_->host(i, &why)) {
+            NXLOG_W("net", "ldn (lan): CreateNetwork: %s", why.c_str());
+            return kDeviceNotAvailable;
+        }
+        seen_ = {};
+        latest_ = {};
+        reason_ = kReasonNone;
+        vnet::set_current_link(link_);
+        NXLOG_I("net", "ldn (lan): created a network on %s for up to %u players", vnet::ip_str(ip_).c_str(), cfg.node_count_max);
+        set_state(kAccessPointCreated);
+        return 0;
+    }
+    uint32_t destroy_network(ipc::Request&, ipc::Response&) {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            if (state_ != kAccessPointCreated) return kInvalidState;
+        }
+        net_close(true);
+        std::lock_guard<std::mutex> lk(mu_);
+        reason_ = kDestroyedByUser;
+        seen_ = {};
+        set_state(kAccessPoint);
+        return 0;
+    }
+    uint32_t reject(ipc::Request& req, ipc::Response&) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (state_ != kAccessPointCreated) return kInvalidState;
+        return net_->host_reject(req.arg<uint32_t>(0)) ? 0 : kNodeNotFound;
+    }
+    uint32_t set_advertise_data(ipc::Request& req, ipc::Response&) {
+        const ipc::Buffer b = req.in_buf(0);
+        if (b.size > vnet::kMaxAdvertise) return kInvalidArgument;
+        std::lock_guard<std::mutex> lk(mu_);
+        if (state_ != kAccessPoint && state_ != kAccessPointCreated) return kInvalidState;
+        adv_.assign(buf_ptr(b), buf_ptr(b) + (b.addr ? b.size : 0));
+        if (state_ == kAccessPointCreated) {
+            NetworkInfo ni = info_locked();
+            std::memset(ni.ldn.advertise_data, 0, sizeof ni.ldn.advertise_data);
+            ni.ldn.advertise_data_size = static_cast<uint16_t>(adv_.size());
+            if (!adv_.empty()) std::memcpy(ni.ldn.advertise_data, adv_.data(), adv_.size());
+            vnet::mitm::Info i;
+            std::memcpy(i.data(), &ni, sizeof ni);
+            net_->host_update(i);   // SyncNetwork to every station (Ryujinx re-sends it too)
+        }
+        return 0;
+    }
+    uint32_t set_accept_policy(ipc::Request& req, ipc::Response&) {
+        std::lock_guard<std::mutex> lk(mu_);
+        const uint8_t p = req.arg<uint8_t>(0);
+        if (p > 3) return kInvalidArgument;
+        if (state_ != kAccessPoint && state_ != kAccessPointCreated) return kInvalidState;
+        policy_ = p;
+        if (state_ == kAccessPointCreated) {
+            NetworkInfo ni = info_locked();
+            ni.ldn.station_accept_policy = p;
+            vnet::mitm::Info i;
+            std::memcpy(i.data(), &ni, sizeof ni);
+            net_->host_update(i);
+        }
+        return 0;
+    }
+    uint32_t add_accept_filter(ipc::Request& req, ipc::Response&) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (state_ != kAccessPoint && state_ != kAccessPointCreated) return kInvalidState;
+        std::array<uint8_t, 6> mac{};
+        for (size_t i = 0; i < 6; ++i) mac[i] = req.arg<uint8_t>(i);
+        filter_.insert(mac);
+        return 0;
+    }
+    uint32_t clear_accept_filter(ipc::Request&, ipc::Response&) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (state_ != kAccessPoint && state_ != kAccessPointCreated) return kInvalidState;
+        filter_.clear();
+        return 0;
+    }
+
+    uint32_t open_station(ipc::Request&, ipc::Response&) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (state_ != kInitialized) return kInvalidState;
+        set_state(kStation);
+        return 0;
+    }
+    uint32_t close_station(ipc::Request&, ipc::Response&) {
+        uint32_t st;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            st = state_;
+        }
+        if (st != kStation && st != kStationConnected) return kInvalidState;
+        if (st == kStationConnected) net_close(false);
+        std::lock_guard<std::mutex> lk(mu_);
+        reason_ = kDisconnectedByUser;
+        set_state(kInitialized);
+        return 0;
+    }
+    uint32_t connect(ipc::Request& req, ipc::Response&) {
+        NetworkInfo ni{};
+        buf_read(req.in_buf(0), &ni, sizeof ni);
+        return join(ni, arg_at<UserConfig>(req, kConnectUser), req.arg<int32_t>(kConnectVersion));
+    }
+    uint32_t connect_private(ipc::Request& req, ipc::Response&) {
+        const SecurityParameter sp = arg_at<SecurityParameter>(req, kConnPrivSecParam);
+        const NetworkConfig cfg = arg_at<NetworkConfig>(req, kConnPrivNetCfg);
+        ScanFilter f{};
+        std::memcpy(f.id.session_id, sp.session_id, 16);
+        f.id.intent = cfg.intent;
+        f.flag = kFilterSessionId | kFilterLocalCommunicationId;
+        for (const NetworkInfo& ni : scan_infos(f)) return join(ni, arg_at<UserConfig>(req, kConnPrivUser), req.arg<int32_t>(kConnPrivVersion));
+        return kConnectNotFound;
+    }
+    uint32_t join(const NetworkInfo& ni, const UserConfig& user, int32_t version) {
+        vnet::mitm::Net* net;
+        vnet::mitm::Node self;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            if (state_ != kStation) return kInvalidState;
+            if (!net_) return kConnectNotFound;
+            net = net_.get();
+            const NodeInfo n = own_node(user, static_cast<uint16_t>(version));
+            std::memcpy(self.data(), &n, sizeof n);
+        }
+        const uint32_t host = ni.ldn.nodes[0].ipv4;
+        const int r = net->connect(host, self, 4000);   // Ryujinx waits 4 s for the host's first SyncNetwork
+        if (r) {
+            NXLOG_I("net", "ldn (lan): Connect to %s: %s", vnet::ip_str(host).c_str(), r == 1 ? "no answer" : r == 2 ? "turned away" : "no connection");
+            return r == 1 ? kConnectTimeout : r == 2 ? kConnectRejected : kConnectFailure;
+        }
+        std::lock_guard<std::mutex> lk(mu_);
+        seen_ = {};
+        latest_ = {};
+        reason_ = kReasonNone;
+        vnet::set_current_link(link_);
+        NXLOG_I("net", "ldn (lan): joined %s's network as %s", vnet::ip_str(host).c_str(), vnet::ip_str(ip_).c_str());
+        set_state(kStationConnected);
+        return 0;
+    }
+    uint32_t disconnect(ipc::Request&, ipc::Response&) {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            if (state_ != kStationConnected) return kInvalidState;
+        }
+        net_close(false);
+        std::lock_guard<std::mutex> lk(mu_);
+        reason_ = kDisconnectedByUser;
+        seen_ = {};
+        set_state(kStation);
+        return 0;
+    }
+
+    std::mutex op_mu_;
+    std::mutex mu_;
+    ServiceEvent ev_;
+    uint32_t state_ = kNone;
+    int16_t reason_ = kReasonNone;
+    std::unique_ptr<vnet::mitm::Net> net_;
+    std::shared_ptr<vnet::Link> link_;
+    uint32_t ip_ = 0, mask_ = 0;
+    std::vector<uint8_t> adv_;
+    uint8_t policy_ = 0;
+    std::set<std::array<uint8_t, 6>> filter_;
+    std::array<uint32_t, 8> seen_{};
+    std::array<uint8_t, 8> latest_{};
+};
+
+void MitmLdn::add_commands(ipc::Service& s) {
+    cmd(s, 0, "GetState", &MitmLdn::get_state);
+    cmd(s, 1, "GetNetworkInfo", &MitmLdn::get_network_info);
+    cmd(s, 2, "GetIpv4Address", &MitmLdn::get_ipv4);
+    cmd(s, 3, "GetDisconnectReason", &MitmLdn::get_disconnect_reason);
+    cmd(s, 4, "GetSecurityParameter", &MitmLdn::get_security_parameter);
+    cmd(s, 5, "GetNetworkConfig", &MitmLdn::get_network_config);
+    cmd(s, 100, "AttachStateChangeEvent", &MitmLdn::attach_event);
+    cmd(s, 101, "GetNetworkInfoLatestUpdate", &MitmLdn::get_latest_update);
+    cmd(s, 102, "Scan", &MitmLdn::scan);
+    cmd(s, 103, "ScanPrivate", &MitmLdn::scan);
+    cmd(s, 104, "SetWirelessControllerRestriction", &MitmLdn::accept);
+    cmd(s, 105, "SetWirelessAudioPolicy", &MitmLdn::accept);
+    cmd(s, 106, "SetProtocol", &MitmLdn::accept);
+    cmd(s, 200, "OpenAccessPoint", &MitmLdn::open_access_point);
+    cmd(s, 201, "CloseAccessPoint", &MitmLdn::close_access_point);
+    cmd(s, 202, "CreateNetwork", &MitmLdn::create_network);
+    cmd(s, 203, "CreateNetworkPrivate", &MitmLdn::create_network_private);
+    cmd(s, 204, "DestroyNetwork", &MitmLdn::destroy_network);
+    cmd(s, 205, "Reject", &MitmLdn::reject);
+    cmd(s, 206, "SetAdvertiseData", &MitmLdn::set_advertise_data);
+    cmd(s, 207, "SetStationAcceptPolicy", &MitmLdn::set_accept_policy);
+    cmd(s, 208, "AddAcceptFilterEntry", &MitmLdn::add_accept_filter);
+    cmd(s, 209, "ClearAcceptFilter", &MitmLdn::clear_accept_filter);
+    cmd(s, 300, "OpenStation", &MitmLdn::open_station);
+    cmd(s, 301, "CloseStation", &MitmLdn::close_station);
+    cmd(s, 302, "Connect", &MitmLdn::connect);
+    cmd(s, 303, "ConnectPrivate", &MitmLdn::connect_private);
+    cmd(s, 304, "Disconnect", &MitmLdn::disconnect);
+    cmd(s, 400, "Initialize", &MitmLdn::initialize);
+    cmd(s, 401, "Finalize", &MitmLdn::finalize);
+    cmd(s, 402, "InitializeWithVersion", &MitmLdn::initialize);
+    cmd(s, 403, "SetOperationMode", &MitmLdn::accept);
+}
+
 // [net] protocol picks the backend per service object: native = NativeLdn on the process's coop node (or, with the module off, Ldn with
-// no lobby: the offline answers), linkplay = Ldn on the relay lobby.
+// no lobby: the offline answers), linkplay = Ldn on the relay lobby, lan = MitmLdn (ldn_mitm on a real LAN), ryuldn = a Ryujinx LDN
+// master server (services/ldn_ryu.h).
 class LdnService final : public ipc::Service {
 public:
     LdnService() : ipc::Service("nn::ldn::detail::IUserLocalCommunicationService") {
+        const std::string proto = lower(config_get_str("net", "protocol", "native"));
+        if (proto == "lan") {
+            mitm_ = std::make_shared<MitmLdn>();
+            mitm_->add_commands(*this);
+            return;
+        }
+        if (proto == "ryuldn") {   // a Ryujinx LDN master server (services/ldn_ryu.h)
+            ryu_ = ldn_ryu_backend(*this);
+            return;
+        }
         coop_node* n = native_protocol() ? native_node() : nullptr;
         if (n) {
             native_ = std::make_shared<NativeLdn>(n);
@@ -1822,11 +2693,15 @@ public:
     void on_close() override {
         if (native_) native_->shutdown();
         if (ldn_) ldn_->shutdown();
+        if (mitm_) mitm_->shutdown();
+        if (ryu_) ryu_->shutdown();
     }
 
 private:
     std::shared_ptr<Ldn> ldn_;
     std::shared_ptr<NativeLdn> native_;
+    std::shared_ptr<MitmLdn> mitm_;
+    std::shared_ptr<LdnRyuBackend> ryu_;
 };
 
 }  // namespace

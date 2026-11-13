@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // Lobby implementations (see lobby.h): the relay protocol v3 client and the in-process LoopbackRelay, plus SHA-256 for the passphrase hash.
 // Relay wire format: relay_wire.h (shared with the embedded server, relay_server.cpp).
 // SHA-256 follows FIPS 180-4 (the round constants and the initial hash are the standard's).
@@ -763,6 +765,7 @@ std::shared_ptr<Lobby> make_relay_client(const RelayOptions& opt) { return std::
 class LoopbackLobby;
 
 struct LoopbackRelay::State {
+    uint64_t seq = 0;   // the last room state handed out (Room::seq)
     struct RoomS {
         Room info;
         std::array<uint8_t, 16> hash{};
@@ -938,6 +941,7 @@ private:
     }
 
     void push_state(State::RoomS& r, Work* w) {
+        r.info.seq = ++st_->seq;   // caller holds the relay lock: the states of one relay in the order they were made
         for (auto& [n, m] : r.members) {
             m->snapshot_ = r.info;
             auto self = m->shared_from_this();
