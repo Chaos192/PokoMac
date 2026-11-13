@@ -21,7 +21,7 @@
 #       Resources/tools/                        as in the Windows package, read only (host.rs; downloads go to Application Support):
 #         build/pkp_build.py, dump_hashes.json  the first-run build (mods.py, apply_ips.py: the mod manager, docs/MODS.md;
 #                                               cheats_fetch.py: the cheat file fetcher, docs/CHEATS.md)
-#         build/recomp/...                      the lifter (nxrecomp, include/nxrecomp, games/pkp, LICENSE)
+#         build/recomp/...                      the lifter (nxrecomp, include/nxrecomp, games/pkp, LICENSE, lifter_cli.py)
 #         build/sdk/libpkp_rt.dylib, pkp_stub.cpp, pkp_rt_api.h   what pkp is linked from
 #         spirv_harness/spirv_harness (+ .NET)  the shader translator, osx-arm64 self-contained
 #         shaders/extract_corpus.py             the shader extractor
@@ -129,6 +129,7 @@ put "$root/game-build/src/pkp_rt_api.h" "$R/tools/build/sdk/pkp_rt_api.h"
 put "$root/game-build/src/pkp_stub.cpp" "$R/tools/build/sdk/pkp_stub.cpp"
 for f in pkp_build.py apply_ips.py mods.py cheats_fetch.py dump_hashes.json; do put "$root/game-build/release_b/$f" "$R/tools/build/$f"; done
 put "$root/recomp/LICENSE" "$R/tools/build/recomp/LICENSE"
+put "$root/recomp/lifter_cli.py" "$R/tools/build/recomp/lifter_cli.py"   # the lifter's own command line (pkp_build.py runs it)
 mirror "$root/recomp/nxrecomp" "$R/tools/build/recomp/nxrecomp" '*__pycache__*' '*.pyc'
 mirror "$root/recomp/include/nxrecomp" "$R/tools/build/recomp/include/nxrecomp"
 for f in CMakeLists.txt config.py main.sites; do put "$root/recomp/games/pkp/$f" "$R/tools/build/recomp/games/pkp/$f"; done

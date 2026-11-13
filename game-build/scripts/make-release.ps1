@@ -68,6 +68,7 @@ Put "$root\CHANGELOG.md" 'CHANGELOG.txt'
 Put "$root\tools\shaders\ampere\extract_corpus.py" 'tools\shaders\extract_corpus.py'
 Mirror "$root\runtime\assets\prompts" 'assets\prompts'   # button prompt icon pack prompt_icons.pak (Kenney CC0, licence in the folder)
 Put "$root\recomp\LICENSE" 'tools\build\recomp\LICENSE'
+Put "$root\recomp\lifter_cli.py" 'tools\build\recomp\lifter_cli.py'   # the lifter's own command line (pkp_build.py runs it)
 Mirror "$root\recomp\nxrecomp" 'tools\build\recomp\nxrecomp' @('*__pycache__*', '*.pyc')
 Mirror "$root\recomp\include\nxrecomp" 'tools\build\recomp\include\nxrecomp'
 foreach ($f in 'CMakeLists.txt', 'config.py', 'main.sites') { Put "$root\recomp\games\pkp\$f" "tools\build\recomp\games\pkp\$f" }

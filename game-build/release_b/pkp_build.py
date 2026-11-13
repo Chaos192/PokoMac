@@ -284,6 +284,47 @@ def popen(cmd, **kw):
                             creationflags=flags, **kw)
 
 
+# The lifter (recomp/nxrecomp) is a program of its own, recomp/lifter_cli.py (tools/build/recomp/lifter_cli.py in a release): this script
+# runs it and reads its answers, it never imports the lifter. Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch, bc2aacdd).
+def lifter_cmd(recomp, *args):
+    """The command line of the lifter run from the folder `recomp` (lifter_cli.py <recomp> <command> ...)."""
+    cli = os.path.join(os.path.abspath(recomp), 'lifter_cli.py')
+    if not os.path.isfile(cli):
+        raise Fail("The build tools are incomplete: %s (the lifter's command line) is missing. Download the release again so its tools "
+                   'are complete.' % cli)
+    return [sys.executable, '-IB', cli, os.path.abspath(recomp)] + list(args)
+
+
+def lifter_call(recomp, request, stem, on_line=None):
+    """One call of the lifter (lifter_cli.py call): the request as JSON in <stem>.request.json, each line the lifter logs to on_line, ->
+    its answer (<stem>.result.json). A call that fails raises Fail with its exit code and its last lines."""
+    req, res = stem + '.request.json', stem + '.result.json'
+    for f in (req, res):
+        if os.path.exists(f):
+            os.remove(f)
+    with open(req, 'w', encoding='utf-8') as f:
+        json.dump(dict(request, result=res), f)
+    try:
+        p = subprocess.Popen(lifter_cmd(recomp, 'call', req), stdout=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                             creationflags=CREATE_NO_WINDOW if os.name == 'nt' else 0)
+        tail = []
+        for raw in p.stdout:
+            line = raw.decode('utf-8', 'replace').rstrip('\r\n')
+            tail.append(line)
+            del tail[:-30]
+            if on_line:
+                on_line(line)
+        rc = p.wait()
+        r = read_json(res) if rc == 0 else None
+        if not isinstance(r, dict):
+            raise Fail('The lifter (%s) failed (exit %d):\n%s' % (request.get('op'), rc, '\n'.join(tail)))
+        return r
+    finally:
+        for f in (req, res):
+            if os.path.exists(f):
+                os.remove(f)
+
+
 class Runner:
     """Runs tool processes; kills them all when the cancel file appears."""
 
@@ -355,7 +396,7 @@ def lift(runner, exefs, gen, jobs, missed_dir=None, missed_txt=None, live_patch=
             args += ['--entries', missed_txt]
         if live_patch:
             args += ['--live-patch']
-        cmd = [sys.executable, '-I', os.path.abspath(__file__), '--lift-one', json.dumps(args)]
+        cmd = lifter_cmd(RECOMP, 'nxrecomp', *args)    # one lifter process (it runs its own pool), `python -m nxrecomp lift ...`
         rc, tail = runner.run(cmd, cwd=RECOMP)
         if rc != 0:
             raise Fail('Translating %s failed (exit %d):\n%s' % (name, rc, tail))
@@ -772,20 +813,19 @@ def ondemand(argv):
         log.write('[%s] %s\n' % (time.strftime('%H:%M:%S'), text))
         log.flush()
     try:
-        sys.path.insert(0, recomp)
-        from nxrecomp import ondemand as od
         work = a.out + '.work'
         os.makedirs(work, exist_ok=True)
         addr = int(a.addr, 16)
+        # the lifter (recomp nxrecomp/ondemand.py) makes the unit's source in work: lift_code or lift_at, in its own process
         if a.code:
             sites = []
             if a.sites:
                 with open(a.sites) as f:
                     sites = [int(t.split()[1], 16) for t in f if t.split() and t.split()[0] == 'inline']
-            with open(a.code, 'rb') as f:
-                r = od.lift_code(f.read(), int(a.base, 16), addr, work, a.name, log=say_, sites=sites)
+            q = {'op': 'od-code', 'code': a.code, 'base': int(a.base, 16), 'addr': addr, 'name': a.name, 'work': work, 'sites': sites}
         else:
-            r = od.lift_at(a.map, addr, work, a.input, log=say_)
+            q = {'op': 'od-at', 'map': a.map, 'addr': addr, 'work': work, 'input': a.input}
+        r = lifter_call(recomp, q, work, on_line=say_)
         t1 = time.time()
         tmp = a.out + '.tmp' + os.path.splitext(a.out)[1]
         p = subprocess.run(unit_command(r['source'], tmp, os.path.join(recomp, 'include')), env=unit_env(os.path.dirname(os.path.abspath(a.out))),
@@ -816,16 +856,11 @@ def main():
     ap.add_argument('--cache-mb', type=int, default=CACHE_MB, help='size cap of the compiled-object cache in MiB (0 = off)')
     ap.add_argument('--keep', action='store_true', help='keep the generated sources and objects')
     ap.add_argument('--check', action='store_true', help='only say whether <game>/build/done.json matches these tools')
-    ap.add_argument('--lift-one', help=argparse.SUPPRESS)
     ap.add_argument('--live-patch', dest='live_patch', action='store_true', default=True,
                     help='lift every function with the live-patch checks (recomp ctx.h NX_OV / NX_OVL), so the cheats overlay\'s code patches '
                          'reach every caller while the game runs (the default)')
     ap.add_argument('--no-live-patch', dest='live_patch', action='store_false', help=argparse.SUPPRESS)   # only to measure the checks' cost
     a = ap.parse_args()
-    if a.lift_one:                       # child process: one lifter run (keeps the lifter's own pool out of this process)
-        sys.path.insert(0, RECOMP)
-        from nxrecomp.__main__ import main as nx_main
-        return nx_main(json.loads(a.lift_one)) or 0
     if a.check:
         if not a.game:
             ap.error('--check needs --game')
