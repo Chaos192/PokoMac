@@ -46,6 +46,7 @@
 #include "nxrt/input.h"
 #include "nxrt/services_api.h"
 #include "nxrt/input_source.h"
+#include "nxrt/key_code_map.h"
 #include "nxrt/log.h"
 #include "nxrt/nvn_backend.h"
 #include "nxrt/overlay.h"
@@ -633,6 +634,31 @@ uint64_t switch_buttons_of(uint32_t src, const PadSettings& pad) {
     return out;
 }
 
+
+// The host's keyboard layout for the key code map a game asks the settings service for (key_code_map.h; ported from AnySwitch by Chaos192,
+// github.com/Chaos192/AnySwitch): what each key of the letter, digit and punctuation block prints alone and with Shift. Read at start and
+// when the window takes the focus again (the player may have switched layouts meanwhile).
+void publish_host_layout() {
+    hid::KeyChars chars[256] = {};
+    auto printable = [](SDL_Keycode k) -> char16_t {
+        if (k & SDLK_SCANCODE_MASK) return 0;
+        if (k < 0x20 || k == 0x7F || k > 0xFFFF || (k >= 0xD800 && k <= 0xDFFF)) return 0;
+        return static_cast<char16_t>(k);
+    };
+    int n = 0;
+    for (int u = 0x04; u <= 0x64; ++u) {
+        if (u > 0x38 && u != 0x64) continue;
+        const SDL_Scancode sc = static_cast<SDL_Scancode>(u);
+        const char16_t a = printable(SDL_GetKeyFromScancode(sc, SDL_KMOD_NONE, false));
+        char16_t b = printable(SDL_GetKeyFromScancode(sc, SDL_KMOD_LSHIFT, false));
+        if (a >= u'a' && a <= u'z' && (b == 0 || b == a)) b = static_cast<char16_t>(a - 0x20);   // a keymap with no shifted level
+        if (!b) b = a;
+        chars[u] = {a, b};
+        if (a) ++n;
+    }
+    if (n) hid::set_host_key_chars(chars);
+}
+
 void handle_event(const input::Event& e, uint64_t now) {
     G& st = g();
     using input::EventType;
@@ -745,6 +771,7 @@ void handle_event(const input::Event& e, uint64_t now) {
             break;
         case EventType::WindowFocusGained:
             audio::set_muted(false);
+            if (st.window) publish_host_layout();
             st.limiter.reset_schedule();
             break;
         case EventType::WindowRestored:
@@ -1563,6 +1590,7 @@ bool start(const StartOptions& opt) {
     st.engine->set_context(Ctx::Menu, now_ns());
     st.source_owner = std::make_unique<PlaySource>(st.engine.get());
     st.source = std::shared_ptr<hid::InputSource>(st.source_owner.get(), [](hid::InputSource*) {});   // owned by G
+    if (st.window) publish_host_layout();   // the key code map follows the host's layout (a game may read the map alone)
     hid::set_input_source(st.source);
     hid::set_vibration_sink(&vib_sink, nullptr);
     tt::set_mouse_sink(&input::mouse_delta_add);
