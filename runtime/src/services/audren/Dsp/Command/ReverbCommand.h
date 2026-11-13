@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // Port of Ryujinx.Audio/Renderer/Dsp/Command/ReverbCommand.cs (Ryubing fork, MIT). Scalar path (no SIMD in the C# file).
 // The C# static int[] index tables are kept verbatim as static constexpr arrays; the C# Span<T> parameters become Span<const int32_t>.
 #pragma once
@@ -101,8 +103,11 @@ class ReverbCommand : public ICommand {
         ReverbState& state = State[0];
 
         if (IsEffectEnabled) {
-            if (_parameter.status == UsageState::Invalid) {
-                state = ReverbState(_parameter, WorkBuffer, IsLongSizePreDelaySupported);
+            // Built at the first enabled run even when the status is past Invalid: an effect added disabled reaches Enabled without
+            // ever being built (its first command ran disabled), and running it then read empty delay lines (Ocarina of Time's area
+            // reverb, when the first level loads). Ryujinx's C# has the same gap.
+            if (_parameter.status == UsageState::Invalid || state.FdnDelayLines.empty()) {
+                ReplaceState(state, _parameter, WorkBuffer, IsLongSizePreDelaySupported);
             } else if (_parameter.status == UsageState::New) {
                 state.UpdateParameter(_parameter);
             }

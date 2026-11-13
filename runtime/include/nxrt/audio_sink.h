@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // Host audio output for the audio services (S3c). The audio services (audren / audout) produce interleaved 16-bit PCM and
 // hand it to the active AudioSink; the sink is pulled by the host device clock. The default sink discards samples (silence), which
 // is also what runs under tests. src/services/audio_xaudio2.cpp provides the XAudio2 sink (selected with [audio] sink = xaudio2).
 // Options (all under [audio], see docs/CONFIG.md): wav_dump (tee every frame into a WAV file), volume (process-wide master volume)
 // and device (which output endpoint the XAudio2 sink plays on).
 #pragma once
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -23,6 +26,9 @@ struct SinkStats {
     uint32_t queued_peak_frames = 0;   // most frames queued at one time (sinks that can measure it)
     uint32_t queued_low_frames = 0;    // fewest frames queued after playback had started (the margin against an underrun)
     uint32_t sample_rate = 0;          // the rate of the last open() (0: never opened); turns frame counts into milliseconds
+    uint64_t starved_frames = 0;       // device time without queued audio after playback had started (sinks that can measure it)
+    uint32_t longest_starve_frames = 0;   // the longest such gap
+    uint64_t device_reopens = 0;          // times the sink opened its output device again (lost, or the default moved; XAudio2)
 };
 
 class AudioSink {
@@ -43,6 +49,17 @@ public:
     virtual const char* name() const = 0;
     // The counters above. The base class has no write path of its own, so by default it reports zeros.
     virtual SinkStats stats() { return {}; }
+    // open() that counts the openings. The renderer, audout and the mix bus share the one host sink: each remembers opens() after its
+    // own open and opens again when someone else opened it since (another rate or channel count).
+    bool open_counted(uint32_t sample_rate, uint32_t channels) {
+        const bool ok = open(sample_rate, channels);
+        opens_.fetch_add(1, std::memory_order_acq_rel);
+        return ok;
+    }
+    uint64_t opens() const { return opens_.load(std::memory_order_acquire); }
+
+private:
+    std::atomic<uint64_t> opens_{0};
 };
 
 // The null sink: accepts everything, plays nothing, reports an empty queue. Counts frames for tests.
@@ -70,6 +87,9 @@ void set_sink(std::shared_ptr<AudioSink> s);          // replaces the active sin
 // a WAV tee (make_wav_tee).
 std::shared_ptr<AudioSink> sink();
 std::shared_ptr<AudioSink> make_xaudio2_sink();       // src/services/audio_xaudio2.cpp; nullptr when XAudio2 is unavailable
+// What the system's endpoint notification does when the default output device changes (tests): an XAudio2 sink on the default device
+// reopens on the new one.
+void xaudio2_default_device_changed(AudioSink& sink);
 // A simulated device: consumes queued frames at the sample rate (times 1 + skew_ppm / 1e6) on the host clock, counts the times it
 // ran dry and the lowest and highest queue level. No output. [audio] sink = paced ([audio] paced_ppm sets the skew); what the tests and
 // the underrun checks run on when no audio device is present. src/services/audio_paced.cpp.

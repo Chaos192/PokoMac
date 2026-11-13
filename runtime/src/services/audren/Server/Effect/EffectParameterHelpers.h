@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Shared support for the Server/Effect ports (S3c). It holds what the C# keeps on the parameter structs and interfaces
 // (IEffectInParameter, IEffectOutStatus, the IsChannelCount* members of the Parameter/Effect structs, the Statistics.Reset
 // methods, MemoryMarshal.Cast of SpecificData) and two runtime helpers with no C++ counterpart yet (the DSP cache
@@ -118,7 +119,7 @@ struct EffectParameterHelpers {
 
 // Storage for one DSP state object, the C++ stand-in for the C# `new T[1]` of the Effect classes. The DSP state types
 // (Dsp/State/*.h) only have constructors that take a parameter, so the slot starts as zeroed bytes (the C# default value)
-// and the command generator replaces it by assignment before first use, as the C# does with `state = new ...`. The slot
+// and the effect command constructs the state in it before first use (ReplaceState, the C#'s `state = new ...`). The slot
 // destroys whatever it holds when the owning effect is destroyed. The owning effect must not be copied or moved, because
 // the Span view points into this object.
 template <class T>

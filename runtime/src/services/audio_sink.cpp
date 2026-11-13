@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // The active host audio sink (include/nxrt/audio_sink.h): a NullSink until replaced. Also the process-wide master volume and the
 // stats line that each sink logs when it closes.
 #include <algorithm>
@@ -78,7 +80,12 @@ std::shared_ptr<AudioSink> sink() {
     std::unique_lock<std::mutex> lk(g_mu);
     if (!g_sink) {
         std::shared_ptr<AudioSink> chosen;
-        const std::string want = config_get_str("audio", "sink", "auto");
+        // A run without a window (--headless, [gfx] headless: tests and scripted runs) is silent unless a sink is asked for: a test on a
+        // machine someone is using must not play the game through its speakers. [audio] sink (NXRT_AUDIO_SINK) still chooses any sink.
+        const bool windowless =
+            config_get_str("boot", "gfx", config_get_bool("gfx", "headless", false) ? "headless" : "window") != "window";
+        const std::string want = config_get_str("audio", "sink", windowless ? "null" : "auto");
+        if (windowless && !config_has("audio", "sink")) NXLOG_I("audio", "no window: the null sink unless [audio] sink asks for one");
         if (want == "paced") {
             chosen = make_paced_sink(config_get_double("audio", "paced_ppm", 0.0));
         } else if (want == "xaudio2" || want == "auto") {
@@ -122,13 +129,14 @@ bool muted() { return g_muted.load(); }
 float effective_volume() { return g_muted.load() ? 0.0f : master_volume(); }
 
 std::string format_stats(const char* sink_name, const SinkStats& s) {
-    char buf[256];
+    char buf[384];
     std::snprintf(buf, sizeof buf,
-                  "sink %s: written %llu, accepted %llu, dropped %llu, underruns %llu, queued peak %u buffers, queue %u..%u frames",
+                  "sink %s: written %llu, accepted %llu, dropped %llu, underruns %llu (starved %llu frames, longest %u), queued peak %u buffers, "
+                  "queue %u..%u frames",
                   sink_name ? sink_name : "?", static_cast<unsigned long long>(s.frames_written),
                   static_cast<unsigned long long>(s.frames_accepted), static_cast<unsigned long long>(s.frames_dropped),
-                  static_cast<unsigned long long>(s.underruns), static_cast<unsigned>(s.queued_peak),
-                  static_cast<unsigned>(s.queued_low_frames), static_cast<unsigned>(s.queued_peak_frames));
+                  static_cast<unsigned long long>(s.underruns), static_cast<unsigned long long>(s.starved_frames), s.longest_starve_frames,
+                  static_cast<unsigned>(s.queued_peak), static_cast<unsigned>(s.queued_low_frames), static_cast<unsigned>(s.queued_peak_frames));
     return buf;
 }
 
@@ -187,11 +195,12 @@ private:
                     const double ms = 1000.0 / st.sample_rate;
                     const double avg = samples ? static_cast<double>(sum) / samples : 0.0;
                     NXLOG_I("audio",
-                            "sink %s: queue avg %.1f ms (%.1f..%.1f ms), underruns +%llu (%llu), dropped +%llu, written %.0f frames/s "
-                            "(rate %u)",
+                            "sink %s: queue avg %.1f ms (%.1f..%.1f ms), underruns +%llu (%llu), starved +%.1f ms (longest %.1f ms), dropped +%llu, "
+                            "written %.0f frames/s (rate %u)",
                             s->name(), avg * ms, (samples ? qmin : 0) * ms, qmax * ms,
                             static_cast<unsigned long long>(st.underruns - last.underruns),
                             static_cast<unsigned long long>(st.underruns),
+                            static_cast<double>(st.starved_frames - last.starved_frames) * ms, st.longest_starve_frames * ms,
                             static_cast<unsigned long long>(st.frames_dropped - last.frames_dropped),
                             (st.frames_written - last.frames_written) / secs, st.sample_rate);
                 }

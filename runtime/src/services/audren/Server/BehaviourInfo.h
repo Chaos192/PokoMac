@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // Port of Ryujinx.Audio/Renderer/Server/BehaviourInfo.cs (Ryubing fork, MIT). Feature gating by the user revision, the
 // behaviour flags, and the bounded list of ErrorInfo reported back to the user.
 #pragma once
@@ -29,8 +31,11 @@ class BehaviourInfo {
     static constexpr int32_t Revision13 = 13 << 24;
     static constexpr int32_t Revision14 = 14 << 24;
     static constexpr int32_t Revision15 = 15 << 24;
+    // REV16: the Switch 2's own renderer revision (Lichii's audio_core NativeCurrentRevision; its magic is 'R' 'E' 'v', lowercase v). SDK 22
+    // titles open their renderer with it (Ocarina of Time). It gates no feature in Lichii's table, so it behaves as REV15 here.
+    static constexpr int32_t Revision16 = 16 << 24;
     // Last revision supported by the implementation.
-    static constexpr int32_t LastRevision = Revision15;
+    static constexpr int32_t LastRevision = Revision16;
     // Target revision magic supported by the implementation.
     static constexpr int32_t ProcessRevision = BaseRevisionMagic + LastRevision;
 

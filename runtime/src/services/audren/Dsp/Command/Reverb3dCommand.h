@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // Port of Ryujinx.Audio/Renderer/Dsp/Command/Reverb3dCommand.cs (Ryubing fork, MIT). Scalar path (no SIMD in the C# file).
 // The C# static int[] index tables are kept verbatim as static constexpr arrays.
 #pragma once
@@ -95,8 +97,9 @@ class Reverb3dCommand : public ICommand {
         Reverb3dState& state = State[0];
 
         if (IsEffectEnabled) {
-            if (_parameter.parameter_status == UsageState::Invalid) {
-                state = Reverb3dState(_parameter, WorkBuffer);
+            // Built at the first enabled run even when the status is past Invalid (see ReverbCommand::Process).
+            if (_parameter.parameter_status == UsageState::Invalid || state.FdnDelayLines.empty()) {
+                ReplaceState(state, _parameter, WorkBuffer);
             } else if (_parameter.parameter_status == UsageState::New) {
                 state.UpdateParameter(_parameter);
             }

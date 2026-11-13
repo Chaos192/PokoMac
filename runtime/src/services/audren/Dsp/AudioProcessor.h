@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // Port of Ryujinx.Audio/Renderer/Dsp/AudioProcessor.cs (Ryubing fork, MIT): the DSP thread. It takes one CommandList per renderer
 // session, runs it against that session's output device, and paces itself to 5 ms frames (Constants.AudioProcessorMaxUpdateTimeTarget).
 //
@@ -11,6 +13,9 @@
 //   * C# CommandList.Dispose() becomes destroying the std::unique_ptr<CommandList> that Send() received.
 //   * C# `IHardwareDeviceDriver.GetRealDeviceDriver()` (compat layer) does not exist here; the driver passed is used directly.
 #pragma once
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -36,6 +41,9 @@ class AudioProcessor {
     static constexpr int32_t TargetBufferedFrames = 3;
     // Queue level the renderer keeps on a device that has a clock (see Wait): eight frames of 5 ms.
     static constexpr int64_t TargetQueuedNanoseconds = 40000000;
+    // On a device clock no frame starts sooner than this after the one before (see Wait), unless the queue is about to run dry.
+    static constexpr int64_t MinFrameSpacingNanoseconds = 4000000;
+    static constexpr int64_t LowQueuedNanoseconds = 10000000;
 
     enum class MailboxMessage : uint32_t {
         Start,
@@ -65,6 +73,25 @@ class AudioProcessor {
   private:
     int64_t _lastTime = 0;
     int64_t _playbackEnds = 0;
+    int64_t _lastFrameStart = 0;   // device-clock pacing: when Wait last let a frame start
+
+    // A sleep that ends close to its deadline. Windows rounds Sleep up to its timer resolution (1-2 ms here), which made frames meant to be
+    // 4 ms apart come ~6 ms apart, slower than the device plays, so the queue sank to its low mark; a high-resolution waitable timer ends
+    // within a fraction of a millisecond. Elsewhere sleep_for is that precise already.
+    static void SleepPrecise(int64_t ns) {
+#ifdef _WIN32
+        thread_local HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        if (timer) {
+            LARGE_INTEGER due;
+            due.QuadPart = -std::max<int64_t>(ns / 100, 1);   // relative, in 100 ns
+            if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
+                WaitForSingleObject(timer, INFINITE);
+                return;
+            }
+        }
+#endif
+        std::this_thread::sleep_for(std::chrono::nanoseconds(ns));
+    }
 
     // C# PerformanceCounter.ElapsedNanoseconds.
     static int64_t ElapsedNanoseconds() {
@@ -246,6 +273,11 @@ class AudioProcessor {
     // renderer keeps about TargetQueuedNanoseconds of audio queued: it waits while the queue holds more and renders at once when it
     // holds less. A host clock and a sound card never run at exactly the same rate; pacing by the host clock alone slowly fills the queue
     // (frames are dropped) or empties it (a click). The Ryujinx devices get this for free because their AppendBuffer blocks.
+    // The frames stay spread out: a device drains in its own quantum (XAudio2 takes 10 ms at a time), and pacing by the level alone let two
+    // frames start back to back at every drain. Each frame signals the game's system event and the game's RequestUpdate clears it, so the
+    // game saw one signal for the pair and fed one frame of audio for two: Ocarina of Time (Switch 2) made ~140 updates a second instead of
+    // 200, and its voices ran dry and came back ("it would play and stop"). A frame now starts at least
+    // MinFrameSpacingNanoseconds after the one before (4 ms against 10 ms drains: gaps of 4 and 6 ms), unless the queue is about to run dry.
     void Wait() {
         if (_mailbox.ReceiveResponse() != MailboxMessage::RenderEnd) {
             NXAUDREN_FATAL("Audio Processor Wait response was invalid!");
@@ -260,9 +292,13 @@ class AudioProcessor {
 
             // Longest wait is a few frames' worth, so a stuck device (the voice stopped, the queue never drains) cannot stall the guest.
             const int64_t giveUp = ElapsedNanoseconds() + 8 * increment;
+            const int64_t earliest = _lastFrameStart + MinFrameSpacingNanoseconds;
 
-            while (level > TargetQueuedNanoseconds && ElapsedNanoseconds() < giveUp) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            for (int64_t now = ElapsedNanoseconds(); now < giveUp; now = ElapsedNanoseconds()) {
+                if (level < LowQueuedNanoseconds) break;                                   // about to run dry: at once
+                if (level <= TargetQueuedNanoseconds && now >= earliest) break;
+                const int64_t ahead = level > TargetQueuedNanoseconds ? 1000000 : earliest - now;
+                SleepPrecise(std::max<int64_t>(std::min<int64_t>(ahead, 1000000), 100000));
 
                 level = DeviceQueuedNanoseconds();
             }
@@ -270,6 +306,7 @@ class AudioProcessor {
             // Keep the host-clock bookkeeping current for the moment the device goes away.
             _lastTime = ElapsedNanoseconds();
             _playbackEnds = _lastTime;
+            _lastFrameStart = _lastTime;
 
             return;
         }

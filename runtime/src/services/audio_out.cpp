@@ -1,255 +1,439 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// audout:u and audin:u (S3c): the output and capture devices an application opens for PCM streams.
-// Adapted from ScarletNX src/nx/hle/services/audio.c (GPL-3.0-or-later; that file's audout part is itself ported from Eden,
-// GPL-2.0-or-later, as its header says): the command table, the buffer protocol (appended tags, released tags, the buffer event,
-// the played-sample count), the refusal of a second Start, and the release of queued buffers on Stop and Flush.
-// Adapted from ryubing src/Ryujinx.Horizon/Sdk/Audio/Detail/AudioOut.cs and AudioOutManager.cs (MIT): the channel-count rule of
-// OpenAudioOut and the Flush result.
-// Layouts and result codes: https://switchbrew.org/wiki/Audio_services and https://switchbrew.org/wiki/Error_codes (module 153).
-// Playback runs on one thread per started stream (Pro Audio priority, 1 ms timer, 1 ms poll), as the DSP does on hardware: every
-// appended buffer goes to nxrt::audio::sink() as soon as it is appended, and its tag is released when the sink's own device clock has
-// played it, less [audio] out_latency_ms (default 30): the guest refills that much early, so the sink always holds the guest's queue
-// plus that margin and never starves between two guest buffers (XAudio2 pulls 10 ms at a time). A sink without a device clock (null),
-// a sink that was reopened under the stream, or a device that has not moved for 200 ms falls back to the host clock on an absolute
-// timeline (buffer k ends at the first buffer's start plus the frames before it). Capture (audin) is silent: each appended buffer is
-// zeroed when it starts and released at real time.
-// The previous design released each buffer frames / rate after the moment its pacing thread woke up for it and only then wrote the
-// next one to the sink: every late wake-up (15.6 ms without a 1 ms timer) stretched the stream, and the sink held one buffer at a
-// time, so the device ran dry between buffers.
-#include "services_internal.h"
-
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// PCM output and capture without the audio renderer (S3c): audout:u and audin:u (nn::audio::detail::IAudioOutManager / IAudioInManager)
+// and their IAudioOut / IAudioIn streams. Each started stream has a pacing thread that hands the appended buffers on (to the host sink,
+// or to the mix bus while something else plays: audio_mixbus.h) and releases them when they have played.
+// Command ids and the AudioOutBuffer / AudioOutParameterInternal layouts: https://switchbrew.org/wiki/Audio_services; result module 153:
+// https://switchbrew.org/wiki/Error_codes. Device names DeviceOut / BuiltInHeadset, the 6-channel rule and the Flush answer as Ryujinx
+// (MIT) src/Ryujinx.Audio and src/Ryujinx.Horizon/Sdk/Audio/Detail describe them.
+//
+// What differs from a console on purpose: any rate from 8 to 192 kHz plays as asked (other values: 48 kHz); up to 64 buffers wait at once
+// (queued plus released and not yet taken); the played-sample count survives Stop; capture is silence. A buffer is released when the host
+// device has played it ([audio] out_latency_ms ahead, so the device never runs dry), or, without a device clock, when real time at the
+// stream's rate has passed over it.
 #include <algorithm>
-#include <array>
+#include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstring>
 #include <deque>
-#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "audio_device.h"
+#include "audio_mixbus.h"
 #include "audren/Integration/ThreadBoost.h"
 #include "nxrt/audio_sink.h"
 #include "nxrt/config.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
 #include "nxrt/memory.h"
+#include "services_internal.h"
 
 namespace nxrt::services {
+
 namespace {
 
 using Clock = std::chrono::steady_clock;
 
-constexpr char kOutName[] = "DeviceOut";
-constexpr char kInName[] = "BuiltInHeadset";
-constexpr uint32_t kNameSize = 0x100;        // an AudioDeviceName (also AudioOutInfo / AudioInInfo)
-constexpr uint32_t kBufferSize = 0x28;       // AudioOutBuffer / AudioInBuffer: next, buffer, capacity, size, offset (Switchbrew)
-constexpr uint32_t kDefaultRate = 48000;
-constexpr uint32_t kMinRate = 8000, kMaxRate = 192000;
-constexpr uint32_t kMaxBuffers = 64;        // queued plus released-but-not-taken buffers per stream (ScarletNX AUDOUT_BUFFERS)
-constexpr uint32_t kFormatPcmInt16 = 2;     // nn::audio::SampleFormat PcmInt16
-constexpr uint32_t kStateStarted = 0, kStateStopped = 1;
-constexpr uint32_t kResNotFound = res(153, 1);
-constexpr uint32_t kResOperationFailed = res(153, 2);
-constexpr uint32_t kResBufferCountFull = res(153, 8);
+const uint32_t kNotFound = res(153, 1);
+const uint32_t kOperationFailed = res(153, 2);
+const uint32_t kTooManyBuffers = res(153, 8);
+constexpr size_t kMaxBuffers = 64;          // queued + released and not yet taken
+constexpr uint64_t kDescriptorBytes = 0x28;  // AudioOutBuffer
+constexpr uint64_t kNameBytes = 0x100;       // AudioOutInfo / AudioDeviceName
+constexpr uint64_t kReleasedMaxBytes = 0x200;
+constexpr const char* kOutName = "DeviceOut";
+constexpr const char* kInName = "BuiltInHeadset";
 
-// nn::audio::AudioOutBuffer (AudioInBuffer has the same layout). Written out from Switchbrew's table.
-struct Desc {
-    uint64_t next = 0;      // 0x00 unused
-    uint64_t buffer = 0;    // 0x08 guest pointer to the samples
-    uint64_t capacity = 0;  // 0x10
-    uint64_t size = 0;      // 0x18 bytes of data
-    uint64_t offset = 0;    // 0x20 offset of the data in the samples buffer
-};
+GaugeCounter g_queued("audout.buffers_queued");
+GaugeCounter g_released("audout.buffers_released");
+std::atomic<int> g_started_outs{0};
 
-// ---- guest memory --------------------------------------------------------------------------------------------------------
-// Guest pointers are host pointers: each range is checked with nxrt::mem::is_mapped before it is read or written.
-bool guest_readable(uint64_t addr, uint64_t n) { return addr != 0 && (n == 0 || nxrt::mem::is_mapped(addr, n)); }
-
-bool read_desc(const ipc::Buffer& b, Desc& d) {
-    d = Desc{};
-    const uint64_t n = b.size < kBufferSize ? b.size : kBufferSize;   // a shorter descriptor leaves the missing fields zero
-    if (!guest_readable(b.addr, n)) return false;
-    buf_read(b, &d, n);
-    return true;
+int latency_ms() {
+    static const int v = static_cast<int>(std::clamp<int64_t>(config_get_int("audio", "out_latency_ms", 30), 0, 200));
+    return v;
 }
 
-std::string read_name(const ipc::Buffer& b) {
-    const uint64_t n = b.size < kNameSize ? b.size : kNameSize;
-    if (n == 0 || !guest_readable(b.addr, n)) return {};
-    std::string s(static_cast<size_t>(n), '\0');
-    buf_read(b, s.data(), n);
-    return std::string(s.c_str());
+int16_t sat16(float v) {   // saturate, then truncate toward zero
+    if (!(v < 32767.0f)) return v != v ? 0 : 32767;
+    if (v <= -32768.0f) return -32768;
+    return static_cast<int16_t>(v);
 }
 
-// Writes a device name zero padded, as many bytes as the buffer holds (at most 0x100).
-bool write_name(const ipc::Buffer& b, const char* name) {
-    std::array<uint8_t, kNameSize> out{};
-    std::memcpy(out.data(), name, std::min<size_t>(std::strlen(name), kNameSize - 1));
-    const uint64_t n = b.size < kNameSize ? b.size : kNameSize;
-    if (n == 0 || !guest_readable(b.addr, n)) return false;
-    buf_write(b, out.data(), n);
-    return true;
-}
-
-// ---- formats the devices accept -------------------------------------------------------------------------------------------
-// The rate an out or in plays at: the default 48 kHz when none (or an unsupported one) is asked for.
-uint32_t pick_rate(uint32_t asked) { return asked < kMinRate || asked > kMaxRate ? kDefaultRate : asked; }
-// The sink plays 2 or 6 channels (audio_sink.h); any other count falls back to stereo, as Ryujinx does.
-uint32_t pick_out_channels(uint32_t asked) { return asked == 6 ? 6 : 2; }
-uint32_t pick_in_channels(uint32_t asked) { return asked == 1 || asked == 4 || asked == 6 ? asked : 2; }
-
-// ---- host sink ------------------------------------------------------------------------------------------------------------
-// One sink for every stream: it is opened on the first start with the work's rate and channel count, and opened again when
-// a stream asks for another format or the active sink was replaced (nxrt::audio::set_sink).
+// ---- the host sink, shared by every stream ---------------------------------------------------------------------------------------
 struct HostSink {
-    std::mutex mu;                                   // guards the fields below and every call into the sink
-    std::shared_ptr<nxrt::audio::AudioSink> sink;    // the sink opened last
+    std::mutex mu;
+    std::shared_ptr<audio::AudioSink> sink;
     uint32_t rate = 0, channels = 0;
-    bool open_ok = false;
-    uint64_t written = 0;   // frames the sink accepted since it was opened: the sink's write position
-    uint64_t gen = 0;       // bumped on every (re)open, so a stream knows its positions belong to another opening
+    bool ok = false;
+    uint64_t opens = 0, written = 0, generation = 0;
 };
 HostSink& host() {
     static HostSink h;
     return h;
 }
-
-// Caller holds host().mu. True when the sink is open for this format.
-bool open_host_locked(uint32_t rate, uint32_t channels) {
-    HostSink& h = host();
-    auto cur = nxrt::audio::sink();
-    if (cur == h.sink && rate == h.rate && channels == h.channels) return h.open_ok;
-    h.sink = cur;
+// Opens the sink for (rate, channels) unless it is already open so (caller holds host().mu).
+void open_if_needed(HostSink& h, uint32_t rate, uint32_t channels) {
+    std::shared_ptr<audio::AudioSink> s = audio::sink();
+    if (s && s == h.sink && rate == h.rate && channels == h.channels && s->opens() == h.opens) return;
+    h.sink = s;
     h.rate = rate;
     h.channels = channels;
-    h.open_ok = cur->open(rate, channels);
+    h.ok = s && s->open_counted(rate, channels);
+    h.opens = s ? s->opens() : 0;
     h.written = 0;
-    h.gen++;
-    if (h.open_ok) NXLOG_I("audout", "host sink %s open at %u Hz, %u channels", cur->name(), rate, channels);
-    else NXLOG_W("audout", "host sink %s would not open at %u Hz, %u channels: playing without sound", cur->name(), rate, channels);
-    return h.open_ok;
+    ++h.generation;
+    if (h.ok) NXLOG_I("audout", "host sink %s opened: %u Hz, %u channels", s->name(), rate, channels);
+    else NXLOG_W("audout", "host sink refused %u Hz, %u channels: playing without sound", rate, channels);
 }
-
-// Where a buffer ended up in the sink: its end in the sink's write position, and the opening that position belongs to.
-struct HostMark {
-    bool device = false;   // the sink has a device clock, so the mark can be compared with host_played()
-    uint64_t gen = 0;
-    uint64_t end = 0;
+struct DeviceMark {
+    bool device = false;
+    uint64_t generation = 0, end = 0;
 };
-
-HostMark play_host(uint32_t rate, uint32_t channels, const int16_t* pcm, uint32_t frames) {
-    std::lock_guard<std::mutex> lk(host().mu);
-    HostMark m;
-    if (!open_host_locked(rate, channels)) return m;
+DeviceMark host_write(const int16_t* pcm, uint32_t frames, uint32_t rate, uint32_t channels) {
     HostSink& h = host();
+    std::lock_guard<std::mutex> lk(h.mu);
+    open_if_needed(h, rate, channels);
+    if (!h.ok) return {};
     h.written += h.sink->write(pcm, frames);
-    m.device = h.sink->has_device_clock();
-    m.gen = h.gen;
-    m.end = h.written;
-    return m;
+    return DeviceMark{h.sink->has_device_clock(), h.generation, h.written};
 }
-
-// The sink's play position (frames it has played since it was opened) while it is still the opening `gen` and has a device clock.
-bool host_played(uint64_t gen, uint64_t* pos) {
-    std::lock_guard<std::mutex> lk(host().mu);
+// The frames the device has played of the current opening, when `generation` is still that opening and the sink has a device clock.
+bool device_position(uint64_t generation, uint64_t* pos) {
     HostSink& h = host();
-    if (!h.open_ok || !h.sink || h.gen != gen || h.sink != nxrt::audio::sink() || !h.sink->has_device_clock()) return false;
+    std::lock_guard<std::mutex> lk(h.mu);
+    if (!h.ok || !h.sink || h.sink != audio::sink() || h.generation != generation || h.sink->opens() != h.opens ||
+        !h.sink->has_device_clock())
+        return false;
     const uint64_t q = h.sink->queued_frames();
     *pos = h.written > q ? h.written - q : 0;
     return true;
 }
 
-// [audio] out_latency_ms (0..200, default 30): how far ahead of the device's play position audout releases buffers to the guest.
-uint32_t out_latency_ms() {
-    static const uint32_t ms = [] {
-        const int64_t v = nxrt::config_get_int("audio", "out_latency_ms", 30);
-        return static_cast<uint32_t>(v < 0 ? 0 : (v > 200 ? 200 : v));
-    }();
-    return ms;
-}
-
-// Gauges (include/nxrt/gauge.h), summed over every open stream: buffers appended and not yet played, and played buffers whose tag the
-// guest has not taken back yet. Each stream changes them where it moves a buffer between the two lists, and gives its share back when destroyed.
-GaugeCounter g_buffers_queued("audout.buffers_queued");
-GaugeCounter g_buffers_released("audout.buffers_released");
-
-// ---- streams --------------------------------------------------------------------------------------------------------------
-enum class Dir { Out, In };
-
-// One buffer appended by the guest. `samples` is 0 when the samples cannot be read (played as silence).
+// ---- a stream --------------------------------------------------------------------------------------------------------------------
 struct Entry {
-    uint64_t tag = 0;
-    uint64_t samples = 0;
-    uint64_t bytes = 0;
-    uint32_t frames = 0;
-    bool submitted = false;   // written to the sink (out) or zeroed (in)
-    HostMark mark;            // where it ended in the sink (out)
-    uint64_t stream_end = 0;  // the stream's frame count at the end of this buffer (the host-clock timeline)
+    uint64_t tag = 0, addr = 0, bytes = 0, frames = 0;
+    bool usable = false, submitted = false;
+    DeviceMark mark;
+    uint64_t timeline_end = 0;   // submitted frames up to and including this buffer
 };
 
-// An open audio out or in: its queue, its released tags, its pacing thread and its buffer event. Shared by the IAudio* object
-// (the service) and the registry; the thread only uses it while the object is alive, because every path that drops the object
-// stops the thread first (on_close, the destructor).
 class Stream {
 public:
-    Stream(Dir dir, uint32_t rate, uint32_t channels) : dir_(dir), rate_(rate), channels_(channels) {}
+    Stream(bool out, uint32_t rate, uint32_t channels) : out_(out), rate_(rate), channels_(channels) {}
     ~Stream() {
         shutdown();
-        g_buffers_queued.sub(static_cast<int64_t>(queue_.size()));
-        g_buffers_released.sub(static_cast<int64_t>(released_.size()));
+        std::lock_guard<std::mutex> lk(mu_);
+        g_queued.sub(static_cast<int64_t>(queue_.size()));
+        g_released.sub(static_cast<int64_t>(released_.size()));
     }
-    Stream(const Stream&) = delete;
-    Stream& operator=(const Stream&) = delete;
+    bool out() const { return out_; }
 
-    Dir dir() const { return dir_; }
-
-    // Guest commands. Each takes the work's locks itself.
-    uint32_t start();
-    uint32_t stop();
-    bool flush();
-    uint32_t append(uint64_t tag, const Desc& d);
-    uint32_t take_released(uint64_t* out, uint32_t max);
-    bool contains(uint64_t tag);
-    uint32_t queued();
-    uint64_t played();
-    uint32_t state();
-    float volume();
-    void set_volume(float v);
-    uint32_t new_event_handle() { return ev_.new_handle(); }
-
-    // Stops the pacing thread and releases what is queued. Used by on_close, reset and the destructor. Idempotent.
-    void shutdown();
+    uint32_t start() {
+        std::lock_guard<std::mutex> lk(ctl_);
+        {
+            std::lock_guard<std::mutex> l(mu_);
+            if (started_) return kOperationFailed;
+        }
+        if (out_) {
+            HostSink& h = host();
+            std::lock_guard<std::mutex> l(h.mu);
+            open_if_needed(h, rate_, channels_);
+        }
+        {
+            std::lock_guard<std::mutex> l(mu_);
+            started_ = true;
+            stop_ = false;
+            restart_host_ = true;
+            if (out_ && !voice_) voice_ = audio::mixbus::open_voice("audio out");
+        }
+        if (out_) ++g_started_outs;
+        thread_ = std::thread([this] { pace(); });
+        NXLOG_I(tag(), "Start (%u Hz, %u channels)", rate_, channels_);
+        return 0;
+    }
+    void stop() {
+        std::lock_guard<std::mutex> lk(ctl_);
+        if (halt()) release_all();
+    }
+    void shutdown() {
+        std::lock_guard<std::mutex> lk(ctl_);
+        halt();
+        release_all();
+    }
+    bool flush() {
+        {
+            std::lock_guard<std::mutex> l(mu_);
+            if (!started_) return false;
+        }
+        release_all();
+        return true;
+    }
+    uint32_t append(uint64_t tag, const Entry& e) {
+        std::lock_guard<std::mutex> l(mu_);
+        if (queue_.size() + released_.size() >= kMaxBuffers) return kTooManyBuffers;
+        Entry n = e;
+        n.tag = tag;
+        queue_.push_back(n);
+        g_queued.add(1);
+        cv_.notify_all();
+        return 0;
+    }
+    // GetReleased*: up to `bytes` / 8 tags into the buffer, zeros after them.
+    uint32_t take_released(const ipc::Buffer& b) {
+        const uint64_t bytes = b.size < kReleasedMaxBytes ? b.size / 8 * 8 : kReleasedMaxBytes;
+        if (bytes == 0 || !b.addr || !mem::is_mapped(b.addr, bytes)) return 0;
+        std::vector<uint8_t> out(bytes, 0);
+        uint32_t n = 0;
+        std::lock_guard<std::mutex> l(mu_);
+        while (n < bytes / 8 && !released_.empty()) {
+            std::memcpy(out.data() + 8 * n, &released_.front(), 8);
+            released_.pop_front();
+            ++n;
+        }
+        g_released.sub(n);
+        buf_write(b, out.data(), bytes);
+        event_rule();
+        return n;
+    }
+    bool contains(uint64_t tag) {
+        std::lock_guard<std::mutex> l(mu_);
+        for (const Entry& e : queue_)
+            if (e.tag == tag) return true;
+        return std::find(released_.begin(), released_.end(), tag) != released_.end();
+    }
+    uint32_t queued() {
+        std::lock_guard<std::mutex> l(mu_);
+        return static_cast<uint32_t>(queue_.size());
+    }
+    uint64_t played() {
+        std::lock_guard<std::mutex> l(mu_);
+        return played_;
+    }
+    bool started() {
+        std::lock_guard<std::mutex> l(mu_);
+        return started_;
+    }
+    void set_volume(float v) {
+        std::lock_guard<std::mutex> l(mu_);
+        volume_ = v;
+    }
+    float volume() {
+        std::lock_guard<std::mutex> l(mu_);
+        return volume_;
+    }
+    uint32_t event_handle() { return event_.new_handle(); }
+    uint32_t rate() const { return rate_; }
+    uint32_t channels() const { return channels_; }
+    const char* tag() const { return out_ ? "audout" : "audin"; }
 
 private:
-    void pace();
-    HostMark play(const Entry& e);
-    void halt();                       // stops and joins the pacing thread; caller holds life_
-    void release_all_locked();         // every queued buffer is released now (unplayed)
-    void sync_event_locked();          // the buffer event is signalled while a released tag is waiting
+    // Stops a started stream (thread joined, voice closed); false when it was not started. Caller holds ctl_.
+    bool halt() {
+        {
+            std::lock_guard<std::mutex> l(mu_);
+            if (!started_) return false;
+            stop_ = true;
+            cv_.notify_all();
+        }
+        if (thread_.joinable()) thread_.join();
+        uint32_t voice = 0;
+        {
+            std::lock_guard<std::mutex> l(mu_);
+            started_ = false;
+            voice = voice_;
+            voice_ = 0;
+            phase_ = 0.0;
+            has_last_ = false;
+            last_[0] = last_[1] = 0;
+        }
+        if (out_) --g_started_outs;
+        if (voice) audio::mixbus::close_voice(voice);
+        return true;
+    }
+    void release_all() {
+        std::lock_guard<std::mutex> l(mu_);
+        const size_t n = queue_.size();
+        for (const Entry& e : queue_) released_.push_back(e.tag);
+        queue_.clear();
+        g_queued.sub(static_cast<int64_t>(n));
+        g_released.add(static_cast<int64_t>(n));
+        event_rule();
+        cv_.notify_all();
+    }
+    void event_rule() {   // caller holds mu_
+        if (released_.empty()) event_.clear();
+        else event_.signal();
+    }
+    void release_front() {   // caller holds mu_
+        const Entry e = queue_.front();
+        queue_.pop_front();
+        released_.push_back(e.tag);
+        played_ += e.frames;
+        g_queued.sub(1);
+        g_released.add(1);
+        event_rule();
+    }
 
-    const Dir dir_;
-    const uint32_t rate_;
-    const uint32_t channels_;
+    // The buffer's samples, with the stream's volume (and the output device's) applied. A buffer that cannot be read plays as silence,
+    // at most one second of it (its descriptor may give any length; the stream's timeline still counts every frame).
+    std::vector<int16_t> samples(const Entry& e) {
+        const uint64_t frames = e.usable ? e.frames : std::min<uint64_t>(e.frames, rate_);
+        std::vector<int16_t> pcm(static_cast<size_t>(frames) * channels_, 0);
+        if (e.usable) {
+            std::memcpy(pcm.data(), reinterpret_cast<const void*>(static_cast<uintptr_t>(e.addr)), pcm.size() * 2);
+            const float v = volume_ * audio_device::output_volume();
+            if (v != 1.0f) {
+                const float g = std::max(v, 0.0f);
+                for (int16_t& s : pcm) s = sat16(static_cast<float>(s) * g);
+            }
+        }
+        return pcm;
+    }
+    // 48 kHz stereo for the bus: 5.1 folded to stereo, other rates interpolated linearly across buffers.
+    std::vector<int16_t> to_bus(const std::vector<int16_t>& pcm, uint64_t frames) {
+        std::vector<float> st(static_cast<size_t>(frames) * 2);
+        for (uint64_t i = 0; i < frames; ++i) {
+            const int16_t* f = pcm.data() + i * channels_;
+            if (channels_ == 6) {
+                const float c = 0.7071f * f[2];
+                st[2 * i] = (f[0] + c) + 0.7071f * f[4];
+                st[2 * i + 1] = (f[1] + c) + 0.7071f * f[5];
+            } else {
+                st[2 * i] = f[0];
+                st[2 * i + 1] = channels_ > 1 ? f[1] : f[0];
+            }
+        }
+        std::vector<int16_t> out;
+        if (rate_ == audio::mixbus::kRate) {
+            out.resize(st.size());
+            for (size_t i = 0; i < st.size(); ++i) out[i] = sat16(st[i]);
+            return out;
+        }
+        if (frames == 0) return out;
+        if (!has_last_) {
+            last_[0] = st[0];
+            last_[1] = st[1];
+        }
+        const double step = static_cast<double>(rate_) / audio::mixbus::kRate;
+        auto c = [&](uint64_t k, int ch) -> float { return k == 0 ? last_[ch] : st[2 * (k - 1) + ch]; };
+        double p = phase_;
+        for (; p < static_cast<double>(frames); p += step) {
+            const uint64_t i = static_cast<uint64_t>(std::floor(p));
+            const float t = static_cast<float>(p - static_cast<double>(i));
+            for (int ch = 0; ch < 2; ++ch) out.push_back(sat16(c(i, ch) * (1.0f - t) + c(i + 1, ch) * t));
+        }
+        phase_ = p - static_cast<double>(frames);
+        last_[0] = st[2 * (frames - 1)];
+        last_[1] = st[2 * (frames - 1) + 1];
+        has_last_ = true;
+        return out;
+    }
+    bool shared_output() const {   // caller holds mu_
+        return g_started_outs.load() > 1 || audio::mixbus::renderer_active() || audio::mixbus::others_playing(voice_) > 0;
+    }
 
-    std::mutex life_;                  // serialises start / stop / shutdown (the thread never takes it)
-    std::mutex mu_;                    // guards everything below
+    // One pass of submits; false when the bus had no room (retry after 1 ms). Caller holds mu_.
+    bool submit_pending() {
+        for (Entry& e : queue_) {
+            if (e.submitted) continue;
+            if (e.frames > 0) {
+                if (out_) {
+                    const std::vector<int16_t> pcm = samples(e);
+                    if (!logged_first_) {
+                        logged_first_ = true;
+                        NXLOG_I(tag(), "first buffer: %llu frames (%.1f ms), release margin %d ms", static_cast<unsigned long long>(e.frames),
+                                1000.0 * static_cast<double>(e.frames) / rate_, latency_ms());
+                    }
+                    const uint64_t frames = pcm.size() / channels_;
+                    if (shared_output()) {
+                        if (audio::mixbus::room(voice_) == 0) return false;
+                        const std::vector<int16_t> bus = to_bus(pcm, frames);
+                        audio::mixbus::push(voice_, bus.data(), static_cast<uint32_t>(bus.size() / 2));
+                        e.mark = {};
+                    } else {
+                        e.mark = host_write(pcm.data(), static_cast<uint32_t>(frames), rate_, channels_);
+                    }
+                } else {
+                    const uint64_t n = e.frames * channels_ * 2;
+                    if (e.addr && mem::is_mapped(e.addr, n)) std::memset(reinterpret_cast<void*>(static_cast<uintptr_t>(e.addr)), 0, n);
+                }
+            }
+            if (restart_host_) {
+                host_pos_ = static_cast<double>(submitted_);
+                host_time_ = Clock::now();
+                restart_host_ = false;
+            }
+            e.submitted = true;
+            submitted_ += e.frames;
+            e.timeline_end = submitted_;
+        }
+        return true;
+    }
+    bool due(const Entry& e) {   // caller holds mu_
+        if (e.frames == 0) return true;
+        if (out_ && e.mark.device) {
+            uint64_t pos = 0;
+            if (device_position(e.mark.generation, &pos)) {
+                const uint64_t margin = static_cast<uint64_t>(rate_) * static_cast<uint64_t>(latency_ms()) / 1000;
+                if (pos + margin >= e.mark.end) return true;
+                const auto now = Clock::now();
+                if (pos != dev_last_pos_) {
+                    dev_last_pos_ = pos;
+                    dev_last_move_ = now;
+                }
+                if (now - dev_last_move_ < std::chrono::milliseconds(200)) return false;
+            }
+        }
+        return host_pos_ + 0.5 >= static_cast<double>(e.timeline_end);
+    }
+    void pace() {
+        audren::BoostAudioThread();
+        audren::TimerResolutionScope::Acquire();
+        std::unique_lock<std::mutex> l(mu_);
+        dev_last_move_ = Clock::now();
+        while (!stop_) {
+            const bool room = submit_pending();
+            const auto now = Clock::now();
+            host_pos_ = std::min(host_pos_ + std::chrono::duration<double>(now - host_time_).count() * rate_, static_cast<double>(submitted_));
+            host_time_ = now;
+            while (!queue_.empty() && queue_.front().submitted && due(queue_.front())) release_front();
+            if (queue_.empty()) restart_host_ = true;
+            const bool more = room && std::any_of(queue_.begin(), queue_.end(), [](const Entry& e) { return !e.submitted; });
+            if (!more) cv_.wait_for(l, std::chrono::milliseconds(1));
+        }
+        l.unlock();
+        audren::TimerResolutionScope::Release();
+    }
+
+    const bool out_;
+    const uint32_t rate_, channels_;
+    std::mutex ctl_;   // Start / Stop / shutdown, one at a time
+    std::mutex mu_;
     std::condition_variable cv_;
-    std::deque<Entry> queue_;          // appended and not yet released; the front is playing when started
-    std::deque<uint64_t> released_;    // released tags the guest has not taken yet
-    bool started_ = false;
-    uint64_t epoch_ = 0;               // bumped when the queue is emptied, so the pacing thread re-reads its head
-    uint64_t played_ = 0;             // frames released as played
-    uint64_t submitted_frames_ = 0;    // frames of every buffer submitted since the stream was made (the host-clock timeline)
-    bool logged_first_ = false;
+    std::thread thread_;
+    std::deque<Entry> queue_;
+    std::deque<uint64_t> released_;
+    bool started_ = false, stop_ = false, restart_host_ = true, logged_first_ = false;
+    uint64_t played_ = 0, submitted_ = 0;
+    double host_pos_ = 0.0;
+    Clock::time_point host_time_ = Clock::now();
+    uint64_t dev_last_pos_ = 0;
+    Clock::time_point dev_last_move_ = Clock::now();
     float volume_ = 1.0f;
-    std::thread th_;
-    ServiceEvent ev_;                  // readable while released_ is not empty
+    uint32_t voice_ = 0;
+    double phase_ = 0.0;
+    float last_[2] = {0, 0};
+    bool has_last_ = false;
+    ServiceEvent event_;
 };
 
+// Every stream made, for audio_out_reset.
 struct Registry {
     std::mutex mu;
     std::vector<std::weak_ptr<Stream>> streams;
@@ -259,470 +443,186 @@ Registry& registry() {
     return r;
 }
 
-std::shared_ptr<Stream> new_stream(Dir dir, uint32_t rate, uint32_t channels) {
-    auto s = std::make_shared<Stream>(dir, rate, channels);
-    Registry& r = registry();
-    std::lock_guard<std::mutex> lk(r.mu);
-    std::erase_if(r.streams, [](const std::weak_ptr<Stream>& w) { return w.expired(); });
-    r.streams.push_back(s);
-    return s;
-}
-
-uint32_t Stream::start() {
-    std::lock_guard<std::mutex> life(life_);
-    std::lock_guard<std::mutex> lk(mu_);
-    if (started_) return kResOperationFailed;
-    if (dir_ == Dir::Out) {
-        std::lock_guard<std::mutex> hl(host().mu);
-        open_host_locked(rate_, channels_);
-    }
-    started_ = true;
-    th_ = std::thread([this] { pace(); });
-    return 0;
-}
-
-uint32_t Stream::stop() {
-    std::lock_guard<std::mutex> life(life_);
-    {
-        std::lock_guard<std::mutex> lk(mu_);
-        if (!started_) return 0;   // a stopped stream keeps what was appended until it starts
-    }
-    halt();
-    std::lock_guard<std::mutex> lk(mu_);
-    release_all_locked();
-    return 0;
-}
-
-void Stream::shutdown() {
-    std::lock_guard<std::mutex> life(life_);
-    halt();
-    std::lock_guard<std::mutex> lk(mu_);
-    release_all_locked();
-}
-
-void Stream::halt() {
-    {
-        std::lock_guard<std::mutex> lk(mu_);
-        started_ = false;
-        ++epoch_;
-    }
-    cv_.notify_all();
-    if (th_.joinable()) th_.join();
-}
-
-bool Stream::flush() {
-    std::lock_guard<std::mutex> lk(mu_);
-    if (!started_) return false;
-    release_all_locked();
+// The AudioOutBuffer descriptor of an Append: false when it cannot be read.
+bool read_descriptor(const ipc::Buffer& b, uint32_t channels, Entry* e) {
+    uint64_t d[5] = {};
+    const uint64_t n = std::min<uint64_t>(b.size, kDescriptorBytes);
+    if (!b.addr || (n > 0 && !mem::is_mapped(b.addr, n))) return false;
+    if (n) std::memcpy(d, reinterpret_cast<const void*>(static_cast<uintptr_t>(b.addr)), static_cast<size_t>(n));
+    const uint64_t addr = d[1], capacity = d[2], bytes = d[3], offset = d[4];
+    e->frames = std::min<uint64_t>(bytes / (channels * 2ull), 0xFFFFFFFFull);
+    e->bytes = bytes;
+    e->addr = addr + offset;
+    e->usable = offset <= capacity && bytes <= capacity - offset && bytes > 0 && mem::is_mapped(addr + offset, bytes);
+    if (!e->usable && bytes > 0)
+        NXLOG_W("audout", "buffer of %llu bytes at 0x%llx + 0x%llx (capacity 0x%llx) cannot be read: it plays as silence",
+                static_cast<unsigned long long>(bytes), static_cast<unsigned long long>(addr), static_cast<unsigned long long>(offset),
+                static_cast<unsigned long long>(capacity));
     return true;
 }
 
-uint32_t Stream::append(uint64_t tag, const Desc& d) {
-    Entry e;
-    e.tag = tag;
-    e.bytes = d.size;
-    e.frames = static_cast<uint32_t>(std::min<uint64_t>(d.size / (channels_ * 2u), 0xFFFFFFFFu));
-    const bool in_range = d.offset <= d.capacity && d.size <= d.capacity - d.offset;
-    if (in_range && d.size && guest_readable(d.buffer + d.offset, d.size)) {
-        e.samples = d.buffer + d.offset;
-    } else if (d.size) {
-        NXLOG_W("audout", "sample buffer %#llx (%llu bytes at %llu of %llu) is not readable: played as silence",
-                static_cast<unsigned long long>(d.buffer), static_cast<unsigned long long>(d.size),
-                static_cast<unsigned long long>(d.offset), static_cast<unsigned long long>(d.capacity));
-    }
-    std::lock_guard<std::mutex> lk(mu_);
-    if (queue_.size() + released_.size() >= kMaxBuffers) return kResBufferCountFull;
-    queue_.push_back(e);
-    g_buffers_queued.add(1);
-    cv_.notify_all();
-    return 0;
-}
-
-uint32_t Stream::take_released(uint64_t* out, uint32_t max) {
-    std::lock_guard<std::mutex> lk(mu_);
-    uint32_t n = 0;
-    while (n < max && !released_.empty()) {
-        out[n++] = released_.front();
-        released_.pop_front();
-        g_buffers_released.sub(1);
-    }
-    sync_event_locked();
-    return n;
-}
-
-bool Stream::contains(uint64_t tag) {
-    std::lock_guard<std::mutex> lk(mu_);
-    for (const Entry& e : queue_)
-        if (e.tag == tag) return true;
-    for (uint64_t t : released_)
-        if (t == tag) return true;
-    return false;
-}
-
-uint32_t Stream::queued() {
-    std::lock_guard<std::mutex> lk(mu_);
-    return static_cast<uint32_t>(queue_.size());
-}
-
-uint64_t Stream::played() {
-    std::lock_guard<std::mutex> lk(mu_);
-    return played_;
-}
-
-uint32_t Stream::state() {
-    std::lock_guard<std::mutex> lk(mu_);
-    return started_ ? kStateStarted : kStateStopped;
-}
-
-float Stream::volume() {
-    std::lock_guard<std::mutex> lk(mu_);
-    return volume_;
-}
-
-void Stream::set_volume(float v) {
-    std::lock_guard<std::mutex> lk(mu_);
-    volume_ = v;
-}
-
-void Stream::release_all_locked() {
-    for (const Entry& e : queue_) released_.push_back(e.tag);
-    g_buffers_queued.sub(static_cast<int64_t>(queue_.size()));
-    g_buffers_released.add(static_cast<int64_t>(queue_.size()));
-    queue_.clear();
-    ++epoch_;
-    cv_.notify_all();
-    sync_event_locked();
-}
-
-void Stream::sync_event_locked() {
-    if (released_.empty()) ev_.clear();
-    else ev_.signal();
-}
-
-// The samples of one buffer: written to the sink (out) or zeroed (in). Runs without mu_ held.
-HostMark Stream::play(const Entry& e) {
-    if (e.frames == 0) return {};
-    const uint64_t n = static_cast<uint64_t>(e.frames) * channels_ * 2u;
-    const bool readable = e.samples != 0 && nxrt::mem::is_mapped(e.samples, n);
-    if (dir_ == Dir::In) {
-        if (readable) std::memset(reinterpret_cast<void*>(static_cast<uintptr_t>(e.samples)), 0, static_cast<size_t>(n));
-        return {};
-    }
-    std::vector<int16_t> pcm(static_cast<size_t>(e.frames) * channels_, 0);   // silence when the samples cannot be read
-    if (readable) std::memcpy(pcm.data(), reinterpret_cast<const void*>(static_cast<uintptr_t>(e.samples)), static_cast<size_t>(n));
-    return play_host(rate_, channels_, pcm.data(), e.frames);
-}
-
-// The stream thread. Each pass submits every buffer appended since the last pass, then releases the buffers at the front that have
-// been played. Out streams on a sink with a device clock follow that clock (less the out_latency_ms margin); everything else follows
-// the host clock on an absolute timeline that starts with the first buffer after the queue ran empty, so a late wake-up never
-// stretches the stream. Halt, flush and stop bump epoch_, which sends the loop back to re-read the queue.
-void Stream::pace() {
-    nxrt::audren::BoostAudioThread();
-    nxrt::audren::TimerResolutionScope::Acquire();
-    const uint64_t margin = dir_ == Dir::Out ? static_cast<uint64_t>(rate_) * out_latency_ms() / 1000u : 0;
-    constexpr auto kStall = std::chrono::milliseconds(200);   // a device position that has not moved this long is not trusted
-
-    std::unique_lock<std::mutex> lk(mu_);
-    double clock_pos = 0.0;          // host-clock play position on the stream timeline (frames)
-    Clock::time_point clock_at{};    // when clock_pos was last advanced
-    uint64_t dev_pos = 0;            // last device position seen, its opening, and when it last moved
-    uint64_t dev_gen = 0;
-    Clock::time_point dev_moved{};
-    bool idle = true;                // nothing submitted and unreleased: the clocks restart with the next buffer
-
-    while (started_) {
-        if (queue_.empty()) {
-            idle = true;
-            cv_.wait(lk, [this] { return !started_ || !queue_.empty(); });
-            continue;
-        }
-        const uint64_t epoch = epoch_;
-
-        // Submit what was appended, in order. References into the deque stay valid while epoch_ is unchanged (only this thread pops,
-        // every other removal bumps epoch_, and push_back keeps references).
-        bool restart = false;
-        for (size_t i = 0; i < queue_.size(); i++) {
-            if (queue_[i].submitted) continue;
-            if (idle) {
-                clock_pos = static_cast<double>(submitted_frames_);
-                clock_at = Clock::now();
-                dev_moved = clock_at;
-                idle = false;
-            }
-            const Entry copy = queue_[i];
-            lk.unlock();
-            const HostMark m = play(copy);
-            lk.lock();
-            if (!started_ || epoch_ != epoch) {
-                restart = true;
-                break;
-            }
-            Entry& e = queue_[i];
-            e.submitted = true;
-            e.mark = m;
-            submitted_frames_ += e.frames;
-            e.stream_end = submitted_frames_;
-            if (!logged_first_ && dir_ == Dir::Out && e.frames) {
-                logged_first_ = true;
-                NXLOG_I("audout", "first buffer: %u frames (%.1f ms); release margin %u ms", e.frames, e.frames * 1000.0 / rate_,
-                        out_latency_ms());
-            }
-        }
-        if (restart) continue;
-
-        // The host clock advances while something is submitted, never past what was submitted.
-        const Clock::time_point now = Clock::now();
-        clock_pos += std::chrono::duration<double>(now - clock_at).count() * rate_;
-        clock_at = now;
-        if (clock_pos > static_cast<double>(submitted_frames_)) clock_pos = static_cast<double>(submitted_frames_);
-
-        // Release the played buffers at the front.
-        while (!queue_.empty() && queue_.front().submitted) {
-            const Entry& head = queue_.front();
-            bool done = false;
-            if (head.mark.device) {
-                const uint64_t gen = head.mark.gen, end = head.mark.end;
-                uint64_t pos = 0;
-                lk.unlock();
-                const bool ok = host_played(gen, &pos);
-                lk.lock();
-                if (!started_ || epoch_ != epoch) break;
-                if (ok) {
-                    if (gen != dev_gen || pos != dev_pos) {
-                        dev_gen = gen;
-                        dev_pos = pos;
-                        dev_moved = now;
-                    }
-                    if (pos + margin >= end) {
-                        done = true;
-                    } else if (now - dev_moved < kStall) {
-                        break;   // the device is playing toward it
-                    }
-                }
-                // Not ok (the sink was replaced or reopened) or a stalled device: the host clock decides.
-            }
-            const Entry& h2 = queue_.front();
-            if (!done && clock_pos + 0.5 < static_cast<double>(h2.stream_end)) break;
-            played_ += h2.frames;
-            released_.push_back(h2.tag);
-            queue_.pop_front();
-            g_buffers_queued.sub(1);
-            g_buffers_released.add(1);
-            sync_event_locked();
-        }
-        if (!started_ || epoch_ != epoch) continue;
-
-        // Poll at 1 ms (the timer runs at 1 ms while a stream plays); an append or a stop wakes the thread at once.
-        cv_.wait_for(lk, std::chrono::milliseconds(1), [this, epoch] {
-            if (!started_ || epoch_ != epoch) return true;
-            for (const Entry& e : queue_)
-                if (!e.submitted) return true;
-            return false;
-        });
-    }
-    lk.unlock();
-    nxrt::audren::TimerResolutionScope::Release();
-}
-
-// ---- services -------------------------------------------------------------------------------------------------------------
-// The IAudioOut / IAudioIn object. Its stream is shut down (pacing thread joined) when the session that holds it goes away.
 class StreamService : public ipc::Service {
 public:
-    StreamService(const char* name, std::shared_ptr<Stream> s) : ipc::Service(name), st_(std::move(s)) {}
+    StreamService(std::shared_ptr<Stream> s) : ipc::Service(s->out() ? "IAudioOut" : "IAudioIn"), st_(std::move(s)) {
+        const bool out = st_->out();
+        auto st = st_;
+        const auto state = [st](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.push<uint32_t>(st->started() ? 0u : 1u);
+            return 0;
+        };
+        const auto start = [st](ipc::Request&, ipc::Response&) -> uint32_t { return st->start(); };
+        const auto stop = [st](ipc::Request&, ipc::Response&) -> uint32_t {
+            st->stop();
+            return 0;
+        };
+        const auto append = [st](ipc::Request& req, ipc::Response&) -> uint32_t {
+            Entry e;
+            if (!read_descriptor(req.in_buf(0), st->channels(), &e)) return kOperationFailed;
+            return st->append(req.arg<uint64_t>(0), e);
+        };
+        const auto event = [st](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.out_copy.push_back(st->event_handle());
+            return 0;
+        };
+        const auto released = [st](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            rsp.push<uint32_t>(st->take_released(req.out_buf(0)));
+            return 0;
+        };
+        const auto contains = [st](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            rsp.push<uint8_t>(st->contains(req.arg<uint64_t>(0)) ? 1 : 0);
+            return 0;
+        };
+        const auto count = [st](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.push<uint32_t>(st->queued());
+            return 0;
+        };
+        const auto flush = [st](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.push<uint8_t>(st->flush() ? 1 : 0);
+            return 0;
+        };
+        if (out) {
+            add_cmd(0, "GetAudioOutState", state);
+            add_cmd(1, "Start", start);
+            add_cmd(2, "Stop", stop);
+            add_cmd(3, "AppendAudioOutBuffer", append);
+            add_cmd(4, "RegisterBufferEvent", event);
+            add_cmd(5, "GetReleasedAudioOutBuffers", released);
+            add_cmd(6, "ContainsAudioOutBuffer", contains);
+            add_cmd(7, "AppendAudioOutBufferAuto", append);
+            add_cmd(8, "GetReleasedAudioOutBuffersAuto", released);
+            add_cmd(9, "GetAudioOutBufferCount", count);
+            add_cmd(10, "GetAudioOutPlayedSampleCount", [st](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+                rsp.push<uint64_t>(st->played());
+                return 0;
+            });
+            add_cmd(11, "FlushAudioOutBuffers", flush);
+            add_cmd(12, "SetAudioOutVolume", [st](ipc::Request& req, ipc::Response&) -> uint32_t {
+                st->set_volume(req.arg<float>(0));
+                return 0;
+            });
+            add_cmd(13, "GetAudioOutVolume", [st](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+                rsp.push<float>(st->volume());
+                return 0;
+            });
+        } else {
+            add_cmd(0, "GetAudioInState", state);
+            add_cmd(1, "Start", start);
+            add_cmd(2, "Stop", stop);
+            add_cmd(3, "AppendAudioInBuffer", append);
+            add_cmd(4, "RegisterBufferEvent", event);
+            add_cmd(5, "GetReleasedAudioInBuffers", released);
+            add_cmd(6, "ContainsAudioInBuffer", contains);
+            add_cmd(8, "AppendAudioInBufferAuto", append);
+            add_cmd(9, "GetReleasedAudioInBuffersAuto", released);
+            add_cmd(11, "GetAudioInBufferCount", count);
+            add_cmd(14, "FlushAudioInBuffers", flush);
+        }
+    }
+    ~StreamService() override { st_->shutdown(); }
     void on_close() override { st_->shutdown(); }
 
 private:
     std::shared_ptr<Stream> st_;
 };
 
-// AppendAudioOutBuffer / AppendAudioInBuffer (and the Auto forms): tag, then the AudioOutBuffer descriptor in buffer A.
-uint32_t cmd_append(Stream& s, ipc::Request& req) {
-    Desc d;
-    if (!read_desc(req.in_buf(0), d)) return kResOperationFailed;
-    return s.append(req.arg<uint64_t>(0), d);
+// The device name into a List / Open reply buffer; false when nothing could be written.
+bool write_name(const ipc::Buffer& b, const char* name) {
+    const uint64_t n = std::min<uint64_t>(b.size, kNameBytes);
+    if (n == 0 || !b.addr || !mem::is_mapped(b.addr, n)) return false;
+    char padded[kNameBytes] = {};
+    std::strncpy(padded, name, sizeof padded - 1);
+    buf_write(b, padded, n);
+    return true;
+}
+std::string read_name(const ipc::Buffer& b) {
+    const uint64_t n = std::min<uint64_t>(b.size, kNameBytes);
+    if (n == 0 || !b.addr || !mem::is_mapped(b.addr, n)) return {};
+    const char* p = reinterpret_cast<const char*>(static_cast<uintptr_t>(b.addr));
+    return std::string(p, strnlen(p, static_cast<size_t>(n)));
 }
 
-// GetReleasedAudioOutBuffers / GetReleasedAudioInBuffers (and the Auto forms): fills the tag array in buffer B and returns the count.
-// The array is zeroed past the tags, as the SDK reads every slot.
-uint32_t cmd_released(Stream& s, ipc::Request& req, ipc::Response& rsp) {
-    const ipc::Buffer b = req.out_buf(0);
-    const uint64_t bytes = b.size < kMaxBuffers * 8u ? b.size / 8 * 8 : kMaxBuffers * 8u;
-    if (bytes == 0 || !guest_readable(b.addr, bytes)) {
-        rsp.push<uint32_t>(0);
-        return 0;
+uint32_t open_stream(ipc::Request& req, ipc::Response& rsp, bool out) {
+    const char* device = out ? kOutName : kInName;
+    const std::string wanted = read_name(req.in_buf(0));
+    if (!wanted.empty() && wanted != device) {
+        NXLOG_W(out ? "audout" : "audin", "Open: no device named \"%s\"", wanted.c_str());
+        return kNotFound;
     }
-    std::array<uint64_t, kMaxBuffers> tags{};
-    const uint32_t n = s.take_released(tags.data(), static_cast<uint32_t>(bytes / 8));
-    buf_write(b, tags.data(), bytes);
-    rsp.push<uint32_t>(n);
-    return 0;
-}
-
-std::shared_ptr<ipc::Service> make_out_stream(std::shared_ptr<Stream> st) {
-    Stream* s = st.get();
-    auto svc = std::make_shared<StreamService>("IAudioOut", std::move(st));
-    svc->add_cmd(0, "GetAudioOutState", [s](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push<uint32_t>(s->state());
-        return 0;
-    });
-    svc->add_cmd(1, "Start", [s](ipc::Request&, ipc::Response&) -> uint32_t {
-        const uint32_t rc = s->start();
-        if (rc == 0) NXLOG_I("audout", "Start");
-        return rc;
-    });
-    svc->add_cmd(2, "Stop", [s](ipc::Request&, ipc::Response&) -> uint32_t { return s->stop(); });
-    svc->add_cmd(3, "AppendAudioOutBuffer", [s](ipc::Request& req, ipc::Response&) -> uint32_t { return cmd_append(*s, req); });
-    svc->add_cmd(4, "RegisterBufferEvent", [s](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.out_copy.push_back(s->new_event_handle());
-        return 0;
-    });
-    svc->add_cmd(5, "GetReleasedAudioOutBuffers", [s](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
-        return cmd_released(*s, req, rsp);
-    });
-    svc->add_cmd(6, "ContainsAudioOutBuffer", [s](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
-        rsp.push<uint8_t>(s->contains(req.arg<uint64_t>(0)) ? 1 : 0);
-        return 0;
-    });
-    svc->add_cmd(7, "AppendAudioOutBufferAuto", [s](ipc::Request& req, ipc::Response&) -> uint32_t { return cmd_append(*s, req); });
-    svc->add_cmd(8, "GetReleasedAudioOutBuffersAuto", [s](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
-        return cmd_released(*s, req, rsp);
-    });
-    svc->add_cmd(9, "GetAudioOutBufferCount", [s](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push<uint32_t>(s->queued());
-        return 0;
-    });
-    svc->add_cmd(10, "GetAudioOutPlayedSampleCount", [s](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push<uint64_t>(s->played());
-        return 0;
-    });
-    svc->add_cmd(11, "FlushAudioOutBuffers", [s](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push<uint8_t>(s->flush() ? 1 : 0);
-        return 0;
-    });
-    svc->add_cmd(12, "SetAudioOutVolume", [s](ipc::Request& req, ipc::Response&) -> uint32_t {
-        s->set_volume(req.arg<float>(0));
-        return 0;
-    });
-    svc->add_cmd(13, "GetAudioOutVolume", [s](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push<float>(s->volume());
-        return 0;
-    });
-    return svc;
-}
-
-// IAudioIn: the buffer protocol of IAudioOut (no UAC buffers and no device gain: not implemented).
-std::shared_ptr<ipc::Service> make_in_stream(std::shared_ptr<Stream> st) {
-    Stream* s = st.get();
-    auto svc = std::make_shared<StreamService>("IAudioIn", std::move(st));
-    svc->add_cmd(0, "GetAudioInState", [s](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push<uint32_t>(s->state());
-        return 0;
-    });
-    svc->add_cmd(1, "Start", [s](ipc::Request&, ipc::Response&) -> uint32_t {
-        const uint32_t rc = s->start();
-        if (rc == 0) NXLOG_I("audin", "Start");
-        return rc;
-    });
-    svc->add_cmd(2, "Stop", [s](ipc::Request&, ipc::Response&) -> uint32_t { return s->stop(); });
-    svc->add_cmd(3, "AppendAudioInBuffer", [s](ipc::Request& req, ipc::Response&) -> uint32_t { return cmd_append(*s, req); });
-    svc->add_cmd(4, "RegisterBufferEvent", [s](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.out_copy.push_back(s->new_event_handle());
-        return 0;
-    });
-    svc->add_cmd(5, "GetReleasedAudioInBuffers", [s](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
-        return cmd_released(*s, req, rsp);
-    });
-    svc->add_cmd(6, "ContainsAudioInBuffer", [s](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
-        rsp.push<uint8_t>(s->contains(req.arg<uint64_t>(0)) ? 1 : 0);
-        return 0;
-    });
-    svc->add_cmd(8, "AppendAudioInBufferAuto", [s](ipc::Request& req, ipc::Response&) -> uint32_t { return cmd_append(*s, req); });
-    svc->add_cmd(9, "GetReleasedAudioInBuffersAuto", [s](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
-        return cmd_released(*s, req, rsp);
-    });
-    svc->add_cmd(11, "GetAudioInBufferCount", [s](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push<uint32_t>(s->queued());
-        return 0;
-    });
-    svc->add_cmd(14, "FlushAudioInBuffers", [s](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push<uint8_t>(s->flush() ? 1 : 0);
-        return 0;
-    });
-    return svc;
-}
-
-// ListAudioOuts / ListAudioIns (and the Auto forms): one name when the output buffer holds one, the count returned.
-uint32_t list_names(ipc::Request& req, ipc::Response& rsp, const char* name) {
-    uint32_t count = 0;
-    if (write_name(req.out_buf(0), name)) count = 1;
-    rsp.push<uint32_t>(count);
-    return 0;
-}
-
-// OpenAudioOut: AudioOutParameter {u32 SampleRate, u16 ChannelCount, u16 reserved} at 0, the applet resource id at 8 (not used).
-// Returns AudioOutParameterInternal {rate, channels, sample format, state} and the IAudioOut object.
-uint32_t open_out(ipc::Request& req, ipc::Response& rsp) {
-    const std::string want = read_name(req.in_buf(0));
-    if (!want.empty() && want != kOutName) return kResNotFound;
-    const uint32_t rate = pick_rate(req.arg<uint32_t>(0));
-    const uint32_t ch = pick_out_channels(req.arg<uint16_t>(4));
-    NXLOG_I("audout", "OpenAudioOut: %s, %u Hz, %u channels", kOutName, rate, ch);
-    write_name(req.out_buf(0), kOutName);
+    const uint32_t asked_rate = req.arg<uint32_t>(0);
+    const uint32_t asked_channels = req.arg<uint16_t>(4);
+    const uint32_t rate = asked_rate < 8000 || asked_rate > 192000 ? 48000 : asked_rate;
+    const uint32_t channels = out ? (asked_channels == 6 ? 6u : 2u)
+                                  : (asked_channels == 1 || asked_channels == 4 || asked_channels == 6 ? asked_channels : 2u);
+    auto st = std::make_shared<Stream>(out, rate, channels);
+    {
+        Registry& r = registry();
+        std::lock_guard<std::mutex> lk(r.mu);
+        r.streams.erase(std::remove_if(r.streams.begin(), r.streams.end(), [](const std::weak_ptr<Stream>& w) { return w.expired(); }),
+                        r.streams.end());
+        r.streams.push_back(st);
+    }
+    write_name(req.out_buf(0), device);
+    NXLOG_I(out ? "audout" : "audin", "Open %s: %u Hz, %u channels", device, rate, channels);
     rsp.push<uint32_t>(rate);
-    rsp.push<uint32_t>(ch);
-    rsp.push<uint32_t>(kFormatPcmInt16);
-    rsp.push<uint32_t>(kStateStopped);
-    rsp.push_object(make_out_stream(new_stream(Dir::Out, rate, ch)));
+    rsp.push<uint32_t>(channels);
+    rsp.push<uint32_t>(2);   // PcmInt16
+    rsp.push<uint32_t>(1);   // Stopped
+    rsp.push_object(std::make_shared<StreamService>(st));
     return 0;
 }
 
-// OpenAudioIn: AudioInParameter, same layout as AudioOutParameter. Returns AudioInParameterInternal and the IAudioIn object.
-uint32_t open_in(ipc::Request& req, ipc::Response& rsp) {
-    const std::string want = read_name(req.in_buf(0));
-    if (!want.empty() && want != kInName) return kResNotFound;
-    const uint32_t rate = pick_rate(req.arg<uint32_t>(0));
-    const uint32_t ch = pick_in_channels(req.arg<uint16_t>(4));
-    NXLOG_I("audin", "OpenAudioIn: %s, %u Hz, %u channels", kInName, rate, ch);
-    write_name(req.out_buf(0), kInName);
-    rsp.push<uint32_t>(rate);
-    rsp.push<uint32_t>(ch);
-    rsp.push<uint32_t>(kFormatPcmInt16);
-    rsp.push<uint32_t>(kStateStopped);
-    rsp.push_object(make_in_stream(new_stream(Dir::In, rate, ch)));
-    return 0;
-}
-
-std::shared_ptr<ipc::Service> make_audout() {
-    return make_iface("audout:u", [](ipc::Service& s) {
-        s.add_cmd(0, "ListAudioOuts", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t { return list_names(req, rsp, kOutName); });
-        s.add_cmd(1, "OpenAudioOut", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t { return open_out(req, rsp); });
-        s.add_cmd(2, "ListAudioOutsAuto", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t { return list_names(req, rsp, kOutName); });
-        s.add_cmd(3, "OpenAudioOutAuto", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t { return open_out(req, rsp); });
-    });
-}
-
-std::shared_ptr<ipc::Service> make_audin() {
-    return make_iface("audin:u", [](ipc::Service& s) {
-        s.add_cmd(0, "ListAudioIns", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t { return list_names(req, rsp, kInName); });
-        s.add_cmd(1, "OpenAudioIn", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t { return open_in(req, rsp); });
-        s.add_cmd(2, "ListAudioInsAuto", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t { return list_names(req, rsp, kInName); });
-        s.add_cmd(3, "OpenAudioInAuto", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t { return open_in(req, rsp); });
-        s.add_cmd(4, "ListAudioInsAutoFiltered", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t { return list_names(req, rsp, kInName); });
+std::shared_ptr<ipc::Service> make_manager(bool out) {
+    return make_iface(out ? "audout:u" : "audin:u", [out](ipc::Service& s) {
+        const auto list = [out](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            rsp.push<uint32_t>(write_name(req.out_buf(0), out ? kOutName : kInName) ? 1u : 0u);
+            return 0;
+        };
+        const auto open = [out](ipc::Request& req, ipc::Response& rsp) -> uint32_t { return open_stream(req, rsp, out); };
+        if (out) {
+            s.add_cmd(0, "ListAudioOuts", list);
+            s.add_cmd(1, "OpenAudioOut", open);
+            s.add_cmd(2, "ListAudioOutsAuto", list);
+            s.add_cmd(3, "OpenAudioOutAuto", open);
+        } else {
+            s.add_cmd(0, "ListAudioIns", list);
+            s.add_cmd(1, "OpenAudioIn", open);
+            s.add_cmd(2, "ListAudioInsAuto", list);
+            s.add_cmd(3, "OpenAudioInAuto", open);
+            s.add_cmd(4, "ListAudioInsAutoFiltered", list);
+        }
     });
 }
 
 }  // namespace
 
-std::shared_ptr<ipc::Service> audio_out_manager() { return make_audout(); }
-std::shared_ptr<ipc::Service> audio_in_manager() { return make_audin(); }
+std::shared_ptr<ipc::Service> audio_out_manager() { return make_manager(true); }
+std::shared_ptr<ipc::Service> audio_in_manager() { return make_manager(false); }
 
 void register_audio_out() {
-    add("audout:u", [] { return make_audout(); });
-    add("audin:u", [] { return make_audin(); });
+    add("audout:u", [] { return make_manager(true); });
+    add("audin:u", [] { return make_manager(false); });
 }
 
-// Stops every pacing thread and forgets the streams. Sessions still holding an object keep a working but unregistered stream.
 void audio_out_reset() {
     std::vector<std::shared_ptr<Stream>> live;
     {
@@ -732,14 +632,12 @@ void audio_out_reset() {
             if (auto s = w.lock()) live.push_back(std::move(s));
         r.streams.clear();
     }
-    for (auto& s : live) s->shutdown();
-    {
-        std::lock_guard<std::mutex> lk(host().mu);
-        host().sink.reset();
-        host().rate = 0;
-        host().channels = 0;
-        host().open_ok = false;
-    }
+    for (const auto& s : live) s->shutdown();
+    HostSink& h = host();
+    std::lock_guard<std::mutex> lk(h.mu);
+    h.sink.reset();
+    h.rate = h.channels = 0;
+    h.ok = false;
 }
 
 }  // namespace nxrt::services

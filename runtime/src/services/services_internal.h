@@ -47,6 +47,7 @@ void register_audio();       void audio_reset();       // audio.cpp       audren
 void register_audio_out();   void audio_out_reset();   // audio_out.cpp   audout:u, audin:u
 std::shared_ptr<ipc::Service> audio_out_manager();   std::shared_ptr<ipc::Service> audio_in_manager();   // for aud:u (Switch 2)
 void register_vi_nv();       void vi_nv_reset();       // vi_nv.cpp       vi:u (vi:m, vi:s), nvdrv (nvdrv:a, nvdrv:s)
+void register_extensions();  void extensions_reset();  // ext_*.cpp       commands added by name (ext_common.cpp; from AnySwitch by Chaos192)
 
 // album.cpp: caps:su (photos saved as PNG into the album folder), registered by register_misc().
 std::shared_ptr<ipc::Service> make_screenshot_app();

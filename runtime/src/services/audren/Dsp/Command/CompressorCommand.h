@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // Port of Ryujinx.Audio/Renderer/Dsp/Command/CompressorCommand.cs (Ryubing fork, MIT). Scalar path only (no SIMD in the C# file).
 // The C# `unsafe` pointer loops become float* arithmetic on the command buffers; channel arrays are fixed (at most 6 channels).
 #pragma once
@@ -72,7 +74,7 @@ class CompressorCommand : public ICommand {
 
         if (IsEffectEnabled) {
             if (_parameter.status == UsageState::Invalid) {
-                state = CompressorState(_parameter);
+                ReplaceState(state, _parameter);
             } else if (_parameter.status == UsageState::New) {
                 state.UpdateParameter(_parameter);
             }

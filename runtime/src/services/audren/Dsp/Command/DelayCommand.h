@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // Port of Ryujinx.Audio/Renderer/Dsp/Command/DelayCommand.cs (Ryubing fork, MIT). Scalar bodies of the mono, stereo, quadraphonic and
 // surround paths (the C# System.Numerics vector code is written out as scalar float arithmetic in the same operation order).
 // Ryujinx's `Vector2/Vector4/Matrix4x4` come from Utils/Math/MatrixHelper.h (Numerics::).
@@ -77,8 +79,9 @@ class DelayCommand : public ICommand {
         DelayState& state = State[0];
 
         if (IsEffectEnabled) {
-            if (_parameter.status == UsageState::Invalid) {
-                state = DelayState(_parameter, WorkBuffer);
+            // Built at the first enabled run even when the status is past Invalid (see ReverbCommand::Process).
+            if (_parameter.status == UsageState::Invalid || state.DelayLines.empty()) {
+                ReplaceState(state, _parameter, WorkBuffer);
             } else if (_parameter.status == UsageState::New) {
                 state.UpdateParameter(_parameter);
             }

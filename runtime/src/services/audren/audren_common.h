@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // Shared vocabulary of the audio renderer port (S3c). The renderer is a port of Ryujinx.Audio (Ryubing fork, MIT) to C++; this
 // header holds the few C# idioms every ported file uses, so that classes written by different people fit together.
 //
@@ -31,13 +33,25 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace nxrt::audren {
 
 using CpuAddress = uint64_t;
 using DspAddress = uint64_t;
+
+// C# `state = new TState(...)` for a DSP effect state. The state slot (EffectStateSlot) starts as zeroed bytes, not as a constructed
+// object, and an assignment copies members but never sets a vtable pointer: ReverbState's delay lines (DelayLine members, virtual
+// through IDelayLine) kept a null one and the first virtual call crashed (Ocarina of Time, when its first level turns the reverb on).
+// The old state is destroyed (zeroed members destroy as empty) and the new one constructed in place.
+template <class T, class... A>
+void ReplaceState(T& state, A&&... args) {
+    std::destroy_at(&state);
+    std::construct_at(&state, std::forward<A>(args)...);
+}
 
 [[noreturn]] inline void FatalImpl(const char* file, int line, const char* msg) {
     std::fprintf(stderr, "audren fatal: %s (%s:%d)\n", msg, file, line);

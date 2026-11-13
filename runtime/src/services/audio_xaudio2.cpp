@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // XAudio2 host sink (S3c): an AudioSink that plays the guest's interleaved int16 PCM on the output device chosen by
 // [audio] device (the default device unless it names another one).
 // The engine, a mastering voice and one source voice are created in open(); write() copies the caller's frames into a small pool
@@ -12,8 +14,14 @@
 // StandInClock (audio_standin.h), a silent queue that drains at the sample rate, so the renderer keeps its pacing and the game never
 // notices. A worker thread then retries the whole open (1, 2, 4, then every 5 s, on the then-current default device) and the next
 // write() adopts the new device. With no loss, write() pays one atomic load.
+// The default device moving: XAudio2 stays on the endpoint it opened, so when the system's default output became another one (the user
+// picks headphones in the sound settings; nothing was unplugged) the game kept playing on the old one. An IMMNotificationClient
+// (EndpointWatch) flags that as a loss when the sink plays on the default device ([audio] device = default, or the chosen one failed), and
+// the same recovery opens the new default, its first attempt after 0.25 s. (FEFW 564a3d4 polls the default's id once a second; this one
+// is told.)
 #include <windows.h>
 #include <objbase.h>
+#include <mmdeviceapi.h>
 #include <mmreg.h>
 #include <xaudio2.h>
 
@@ -24,6 +32,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -38,6 +47,49 @@
 
 namespace nxrt::audio {
 namespace {
+
+// The system's endpoint notifications: the default render endpoint for the console role (the one a mastering voice without an id plays on)
+// changed. Called on the notification thread, which must neither block nor call back into the enumerator: it only calls on_change, under
+// mu, which stop() clears before the watch is released.
+class EndpointWatch final : public IMMNotificationClient {
+public:
+    explicit EndpointWatch(std::function<void()> fn) : on_change_(std::move(fn)) {}
+    void stop() {
+        std::lock_guard<std::mutex> lk(mu_);
+        on_change_ = nullptr;
+    }
+    HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged(EDataFlow flow, ERole role, LPCWSTR) noexcept override {
+        if (flow == eRender && role == eConsole) {
+            std::lock_guard<std::mutex> lk(mu_);
+            if (on_change_) on_change_();
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE OnDeviceAdded(LPCWSTR) noexcept override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR) noexcept override { return S_OK; }   // XAudio2 reports its own device's loss
+    HRESULT STDMETHODCALLTYPE OnDeviceStateChanged(LPCWSTR, DWORD) noexcept override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(LPCWSTR, const PROPERTYKEY) noexcept override { return S_OK; }
+    ULONG STDMETHODCALLTYPE AddRef() noexcept override { return refs_.fetch_add(1) + 1; }
+    ULONG STDMETHODCALLTYPE Release() noexcept override {
+        const ULONG n = refs_.fetch_sub(1) - 1;
+        if (!n) delete this;
+        return n;
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) noexcept override {
+        if (iid == __uuidof(IUnknown) || iid == __uuidof(IMMNotificationClient)) {
+            *out = static_cast<IMMNotificationClient*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+
+private:
+    std::atomic<ULONG> refs_{1};
+    std::mutex mu_;
+    std::function<void()> on_change_;
+};
 
 // audout submits each guest buffer as its own voice buffer (often 5-10 ms each) and keeps the guest's queue plus [audio] out_latency_ms in
 // the voice, so the pool holds far more buffers than the queue normally needs.
@@ -102,6 +154,7 @@ public:
     bool has_device_clock() const override { return true; }   // SamplesPlayed is the device's own clock
     const char* name() const override { return "xaudio2"; }
     SinkStats stats() override;
+    void default_device_changed() noexcept;   // EndpointWatch, and tests (xaudio2_default_device_changed)
 
 private:
     struct Slot {
@@ -145,6 +198,8 @@ private:
     };
 
     void note_lost(HRESULT why) noexcept;
+    void start_watch();                 // the endpoint notifications (open)
+    void stop_watch();                  // (close)
     void enter_standin();               // write thread: Lost -> StandIn
     void adopt_device();                // write thread: Ready -> Running
     void recover_main();                // worker thread
@@ -166,6 +221,10 @@ private:
     Callback callback_;
     EngineCallback engine_callback_;
     bool engine_registered_ = false;
+    IMMDeviceEnumerator* enumerator_ = nullptr;   // holds the endpoint watch's registration
+    EndpointWatch* watch_ = nullptr;
+    std::atomic<bool> on_default_{false};   // the mastering voice plays on the system's default device (it follows a change)
+    std::atomic<bool> moved_{false};        // the loss is the default moving: the first reopen attempt comes sooner
     bool com_owned_ = false;          // this sink called CoInitializeEx successfully and must balance it
     DWORD com_thread_ = 0;            // the thread that did, so CoUninitialize runs there
     uint32_t channels_ = 0;
@@ -188,6 +247,7 @@ private:
     std::condition_variable worker_cv_;
     bool worker_stop_ = false;
     std::atomic<uint64_t> device_losses_{0};
+    std::atomic<uint64_t> device_reopens_{0};
 
     // Counters for stats(). They are not reset by open().
     std::atomic<uint64_t> frames_written_{0};
@@ -230,8 +290,44 @@ bool XAudio2Sink::open(uint32_t sample_rate, uint32_t channels) {
         teardown();
         return false;
     }
+    start_watch();
     NXLOG_I("audio", "xaudio2: opened %u Hz, %u channels, volume %.2f", sample_rate, channels, applied_volume_);
     return true;
+}
+
+void XAudio2Sink::start_watch() {
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
+                                reinterpret_cast<void**>(&enumerator_))) || !enumerator_) {
+        enumerator_ = nullptr;
+        NXLOG_W("audio", "xaudio2: no endpoint notifications (MMDeviceEnumerator): a change of the default output device is not followed");
+        return;
+    }
+    watch_ = new EndpointWatch([this] { default_device_changed(); });
+    if (FAILED(enumerator_->RegisterEndpointNotificationCallback(watch_))) {
+        NXLOG_W("audio", "xaudio2: RegisterEndpointNotificationCallback failed: a change of the default output device is not followed");
+        stop_watch();
+    }
+}
+
+void XAudio2Sink::stop_watch() {
+    if (!watch_ && !enumerator_) return;
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);   // close() may run on a thread without COM
+    if (watch_) watch_->stop();                  // no flag after this, even from a notification under way
+    if (enumerator_ && watch_) enumerator_->UnregisterEndpointNotificationCallback(watch_);
+    if (watch_) watch_->Release();
+    watch_ = nullptr;
+    if (enumerator_) enumerator_->Release();
+    enumerator_ = nullptr;
+    if (com == S_OK || com == S_FALSE) CoUninitialize();
+}
+
+void XAudio2Sink::default_device_changed() noexcept {
+    if (!on_default_.load(std::memory_order_relaxed)) return;   // [audio] device names another one: it stays there
+    int expected = kRunning;
+    if (state_.compare_exchange_strong(expected, kLost, std::memory_order_acq_rel)) {
+        moved_.store(true, std::memory_order_relaxed);
+        NXLOG_I("audio", "xaudio2: the default output device changed: playing on the new one");
+    }
 }
 
 // Builds the engine, the mastering voice on the chosen (or default) device and the started source voice for rate_/channels_. On failure
@@ -256,11 +352,14 @@ bool XAudio2Sink::create_device(bool initial) {
                                              AudioCategory_GameEffects);
     };
     hr = create_master(device_id.empty() ? nullptr : device_id.c_str());
+    bool on_default = device_id.empty();
     if (FAILED(hr) && !device_id.empty()) {
         NXLOG_W("audio", "xaudio2: the chosen output device failed (CreateMasteringVoice 0x%08lx); using the default device",
                 static_cast<unsigned long>(hr));
         hr = create_master(nullptr);
+        on_default = true;
     }
+    on_default_.store(on_default, std::memory_order_relaxed);
     if (FAILED(hr)) {
         NXLOG_W("audio", "xaudio2: no audio output device (CreateMasteringVoice 0x%08lx)", static_cast<unsigned long>(hr));
         teardown_device();
@@ -321,6 +420,7 @@ bool XAudio2Sink::create_device(bool initial) {
 }
 
 void XAudio2Sink::close() {
+    stop_watch();
     stop_worker();
     const bool recovering = state_.load() != kRunning;
     if (!engine_ && !com_owned_ && !recovering) return;
@@ -513,6 +613,7 @@ SinkStats XAudio2Sink::stats() {
     const uint32_t low = queue_low_frames_.load(std::memory_order_relaxed);
     s.queued_low_frames = low == 0xffffffffu ? 0 : low;
     s.sample_rate = rate_;
+    s.device_reopens = device_reopens_.load(std::memory_order_relaxed);
     return s;
 }
 
@@ -560,7 +661,8 @@ void XAudio2Sink::recover_main() {
     for (;;) {
         {
             std::unique_lock<std::mutex> lk(worker_mu_);
-            if (worker_cv_.wait_for(lk, std::chrono::duration<double>(reopen_delay_s(failures)), [this] { return worker_stop_; })) return;
+            const double delay = failures == 0 && moved_.exchange(false, std::memory_order_relaxed) ? 0.25 : reopen_delay_s(failures);
+            if (worker_cv_.wait_for(lk, std::chrono::duration<double>(delay), [this] { return worker_stop_; })) return;
         }
         if (create_device(false)) {
             std::lock_guard<std::mutex> lk(worker_mu_);
@@ -578,6 +680,7 @@ void XAudio2Sink::recover_main() {
 void XAudio2Sink::adopt_device() {
     if (worker_.joinable()) worker_.join();   // it has returned: Ready is its last act
     state_.store(kRunning, std::memory_order_release);
+    device_reopens_.fetch_add(1, std::memory_order_relaxed);
     NXLOG_I("audio", "xaudio2: output device reopened (%u Hz, %u channels, volume %.2f)", rate_, channels_, applied_volume_);
 }
 
@@ -598,6 +701,10 @@ void XAudio2Sink::release_slot(uint32_t idx) {
 }
 
 }  // namespace
+
+void xaudio2_default_device_changed(AudioSink& sink) {
+    if (auto* x = dynamic_cast<XAudio2Sink*>(&sink)) x->default_device_changed();
+}
 
 std::shared_ptr<AudioSink> make_xaudio2_sink() {
     // The sink is only useful when the system XAudio2 DLL is there; the device is opened later in open().

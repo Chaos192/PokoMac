@@ -1,17 +1,23 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // audren:u (S3c): the audio renderer service. The renderer itself (session state, the update protocol, command generation and the
 // DSP) is the port of Ryujinx.Audio in src/services/audren; this file is the IPC face of it:
 //   IAudioRendererManager (audren:u)  0 OpenAudioRenderer, 1 GetWorkBufferSize, 2 GetAudioDeviceService, 3 OpenAudioRendererForManualExecution,
 //                                     4 GetAudioDeviceServiceWithRevisionInfo
 //   IAudioRenderer                    0 GetSampleRate .. 13 GetVoiceDropParameter (RequestUpdate / RequestUpdateAuto run the update protocol)
-//   IAudioDevice                      0 ListAudioDeviceName .. 17 AcquireAudioInputDeviceNotification (virtual output devices)
+//   IAudioDevice                      0 ListAudioDeviceName .. 21 IsActiveOutputDeviceEstimatedLowLatency (virtual output devices)
 // Adapted from Ryujinx src/Ryujinx.Horizon/Sdk/Audio/Detail/{AudioRendererManager,AudioRenderer,AudioDevice}.cs (MIT).
 // The renderer DSP runs on its own thread paced by the host clock (5 ms frames) and writes PCM to nxrt::audio::sink().
 #include <array>
+#include <atomic>
+#include <cmath>
 #include <functional>
 #include <memory>
 #include <mutex>
 
+#include "audio_device.h"
+#include "ext_common.h"
 #include "audren/Integration/HostAudioDevice.h"
 #include "audren/Integration/IWritableEvent.h"
 #include "audren/Integration/ThreadBoost.h"
@@ -61,14 +67,17 @@ constexpr DeviceInfo kDevices[] = {
 
 uint32_t configured_channels() { return static_cast<uint32_t>(config_get_int("audio", "channels", 2)) == 6 ? 6u : 2u; }
 
-const DeviceInfo& active_device() { return profile().docked ? kDevices[2] : kDevices[1]; }
+int active_index() { return profile().docked ? 2 : 1; }
+const DeviceInfo& active_device() { return kDevices[active_index()]; }
+// Each device's volume as the host outputs read it (audio_device.h): atomics, as the renderer's thread reads it every block.
+std::atomic<float> g_output_volume[std::size(kDevices)] = {1.0f, 1.0f, 1.0f};
 
 struct AudrenState {
     std::mutex mu;
     std::unique_ptr<audren::HostAudioDeviceDriver> driver;
     std::array<std::unique_ptr<SessionEvent>, 4> events;
     std::shared_ptr<audren::AudioRendererManager> manager;
-    std::array<std::shared_ptr<ServiceEvent>, 3> device_events;   // QueryAudioDeviceSystemEvent / Input / Output (never fire)
+    std::array<std::shared_ptr<ServiceEvent>, 6> device_events;   // QueryAudioDeviceSystemEvent / Input / Output, auddmg:u state, the input / output device notifications (never fire)
     float device_volume[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 
     std::shared_ptr<audren::AudioRendererManager> get_manager() {
@@ -182,6 +191,12 @@ public:
             rsp.push<float>(s->GetVoiceDropParameter());
             return 0;
         });
+        // 14 SetAsyncMemoryPoolControlEnabled(bool) [23.0.0+] (Lichii audio_renderer.cpp: accepted and logged). Memory pools are attached
+        // and detached as RequestUpdate says, at once, whichever way the game asks for it.
+        add_cmd(14, "SetAsyncMemoryPoolControlEnabled", [](Request& req, Response&) -> uint32_t {
+            NXLOG_I("audren", "SetAsyncMemoryPoolControlEnabled(%d)", req.arg<uint8_t>(0) ? 1 : 0);
+            return 0;
+        });
     }
     ~AudioRendererObj() override { g_audren_renderers.sub(1); }
 
@@ -233,6 +248,8 @@ std::shared_ptr<Service> make_audio_device(uint32_t revision) {
             if (d >= 0) {
                 std::lock_guard<std::mutex> lk(st().mu);
                 st().device_volume[d] = req.arg<float>(0);
+                const float v = st().device_volume[d];   // the SDK asks for 0..1; anything else is clamped for the output
+                g_output_volume[d].store(std::isnan(v) ? 1.0f : v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v, std::memory_order_relaxed);
             }
             return 0;
         };
@@ -280,10 +297,34 @@ std::shared_ptr<Service> make_audio_device(uint32_t revision) {
         s.add_cmd(12, "QueryAudioDeviceOutputEvent", event_cmd(2));
         s.add_cmd(13, "GetActiveAudioOutputDeviceName", active_name);
         s.add_cmd(14, "ListAudioOutputDeviceName", list_names);
-        auto not_implemented = [](Request&, Response&) -> uint32_t { return kResultNotImplemented; };
-        s.add_cmd(15, "AcquireAudioOutputDeviceNotification", not_implemented);
-        s.add_cmd(16, "ReleaseAudioOutputDeviceNotification", not_implemented);
-        s.add_cmd(17, "AcquireAudioInputDeviceNotification", not_implemented);
+        // 17.0.0+ (Lichii's audio_device.cpp; nxnative audio.md "The output device notification under its SDK 21 and 22 name"): 15 / 17
+        // AcquireAudio{Input,Output}DeviceNotification(u64) -> an event that fires when the set of input / output devices changes, which
+        // it never does here; 16 / 18 Release(u64). SDK 21 and 22 titles acquire the output one at start-up and abort on a refusal.
+        auto acquire = [](size_t which, const char* name) {
+            return [which, name](Request& req, Response& rsp) -> uint32_t {
+                std::lock_guard<std::mutex> lk(st().mu);
+                if (!st().device_events[which]) st().device_events[which] = std::make_shared<ServiceEvent>(false);
+                rsp.out_copy.push_back(st().device_events[which]->new_handle());
+                NXLOG_D("audio", "%s(0x%llx): an event that never fires", name, static_cast<unsigned long long>(req.arg<uint64_t>(0)));
+                return 0;
+            };
+        };
+        auto release = [](Request&, Response&) -> uint32_t { return 0; };
+        s.add_cmd(15, "AcquireAudioInputDeviceNotification", acquire(4, "AcquireAudioInputDeviceNotification"));
+        s.add_cmd(16, "ReleaseAudioInputDeviceNotification", release);
+        s.add_cmd(17, "AcquireAudioOutputDeviceNotification", acquire(5, "AcquireAudioOutputDeviceNotification"));
+        s.add_cmd(18, "ReleaseAudioOutputDeviceNotification", release);
+        // 18.0.0+ and 21.0.0+ (Lichii's audio_device.cpp): the volume auto-tune switch and the low-latency query. SDK 22 titles ask both
+        // at start-up (Ocarina of Time) and abort on a refusal; auto-tune is off and the output is not a low-latency device, as Lichii answers.
+        s.add_cmd(19, "SetAudioDeviceOutputVolumeAutoTuneEnabled", [](Request&, Response&) -> uint32_t { return 0; });
+        s.add_cmd(20, "IsAudioDeviceOutputVolumeAutoTuneEnabled", [](Request&, Response& rsp) -> uint32_t {
+            rsp.push<uint8_t>(0);
+            return 0;
+        });
+        s.add_cmd(21, "IsActiveOutputDeviceEstimatedLowLatency", [](Request&, Response& rsp) -> uint32_t {
+            rsp.push<uint8_t>(0);
+            return 0;
+        });
         (void)revision;
     });
 }
@@ -376,9 +417,97 @@ std::shared_ptr<Service> make_aud_user() {
     return s;
 }
 
+// auddmg:u (Switch 2): the virtual audio device manager behind nn::audio::ListVirtualInputDevices / ListVirtualOutputDevices and their
+// friends. Command ids and layouts from Lichii (nx2_audio_device_manager.h, GPL): cmd 0 of the service gives the manager object; its
+// commands take a u32 functionality first (1 output, 2 input). There is no microphone, so no input device is listed (nxnative's answer
+// to ListVirtualInputDevices, MIT): SDK 22 titles list the inputs when their audio starts and open the first if there is one (Ocarina of
+// Time; without the service the SDK aborts). The output is one stereo 48 kHz device, as Lichii lists it. nn::audio's OutputStream plays on
+// it through the sound mixer (audsmx:u, ext_audsmx.cpp): the SDK checks the stream format here (300), creates and opens a mixer stream,
+// and starts it by attaching it to the device (700; 800 stops it). Star Fox's Wwise sink opens its output this way: while 300 refused
+// every format its three audio threads asked again every 10 ms and no sound ever played.
+static std::shared_ptr<Service> make_virtual_device_manager() {
+    return make_iface("nn::audio::detail::IVirtualDeviceManager", [](Service& s) {
+        constexpr size_t kName = 0x100;
+        auto put_name = [](const ipc::Buffer& out, const char* name) {
+            if (!out.addr || out.size < kName) return false;
+            std::memset(buf_mut(out), 0, kName);
+            std::strncpy(reinterpret_cast<char*>(buf_mut(out)), name, kName - 1);
+            return true;
+        };
+        s.add_cmd(0, "ListVirtualDevices", [put_name](Request& req, Response& rsp) -> uint32_t {
+            const uint32_t functionality = req.arg<uint32_t>(0);
+            const bool listed = functionality == 1 && put_name(req.out_buf(0), "AudioVirtualOutput0");
+            rsp.push<uint32_t>(listed ? 1u : 0u);
+            return 0;
+        });
+        s.add_cmd(100, "GetDefaultVirtualDevice", [put_name](Request& req, Response&) -> uint32_t {
+            if (req.arg<uint32_t>(0) != 1) return kResultNotImplemented;   // no input device
+            put_name(req.out_buf(0), "AudioVirtualOutput0");
+            return 0;
+        });
+        // u32 sample type, channels, rate, functionality (Lichii IsStreamFormatSupported): what the mixer's streams take, PcmInt16 (2) or
+        // PcmFloat (5), stereo, 48 kHz, on the output device. No input device is listed, so an input format is refused (audio 513).
+        s.add_cmd(300, "IsVirtualDeviceStreamFormatSupported", [](Request& req, Response&) -> uint32_t {
+            const uint32_t type = req.arg<uint32_t>(0), channels = req.arg<uint32_t>(4), rate = req.arg<uint32_t>(8),
+                           functionality = req.arg<uint32_t>(12);
+            const bool ok = functionality == 1 && (type == 2 || type == 5) && channels == 2 && rate == 48000;
+            static std::atomic<bool> told{false};
+            if (!told.exchange(true))
+                NXLOG_I("audio", "IVirtualDeviceManager cmd 300 IsVirtualDeviceStreamFormatSupported(type %u, %u channels, %u Hz, functionality %u)"
+                        " -> %s (first use)", type, channels, rate, functionality, ok ? "supported" : "not supported");
+            return ok ? 0 : kResultNotImplemented;
+        });
+        // The 0x228-byte property block (Lichii): name, type 3 at 0x100, 2 at 0x104, channels 0x108, rate 0x10c, the physical device's
+        // name 0x110, latency in ns at 0x218, the device id (non-zero) at 0x220.
+        s.add_cmd(401, "GetVirtualDeviceProperties", [](Request& req, Response&) -> uint32_t {
+            if (req.arg<uint32_t>(0) != 1) return kResultNotImplemented;
+            const ipc::Buffer out = req.out_buf(0);
+            if (!out.addr || out.size < 0x228) return kResultNotImplemented;
+            uint8_t* b = buf_mut(out);
+            std::memset(b, 0, 0x228);
+            std::strncpy(reinterpret_cast<char*>(b), "AudioVirtualOutput0", kName - 1);
+            const uint32_t words[4] = {3, 2, 2, 48000};
+            std::memcpy(b + 0x100, words, sizeof words);
+            std::strncpy(reinterpret_cast<char*>(b + 0x110), "AudioTvOutput", kName - 1);
+            const uint64_t latency_ns = 10000000;
+            std::memcpy(b + 0x218, &latency_ns, 8);
+            const uint32_t id = 1;
+            std::memcpy(b + 0x220, &id, 4);
+            return 0;
+        });
+        s.add_cmd(500, "AcquireVirtualDeviceStateEvent", [](Request&, Response& rsp) -> uint32_t {
+            std::lock_guard<std::mutex> lk(st().mu);
+            if (!st().device_events[3]) st().device_events[3] = std::make_shared<ServiceEvent>(false);
+            rsp.out_copy.push_back(st().device_events[3]->new_handle());
+            return 0;
+        });
+        // u32 stream id (CreateStream's), u32 functionality, and the device's name in a buffer
+        s.add_cmd(700, "AttachStream", [](Request& req, Response&) -> uint32_t {
+            const uint32_t id = req.arg<uint32_t>(0), functionality = req.arg<uint32_t>(4);
+            const uint32_t r = ext::sound_mixer_attach(id, functionality, true);
+            NXLOG_I("audio", "IVirtualDeviceManager cmd 700 AttachStream(stream %u, functionality %u) -> 0x%x", id, functionality, r);
+            return r;
+        });
+        s.add_cmd(800, "DetachStream", [](Request& req, Response&) -> uint32_t {
+            const uint32_t id = req.arg<uint32_t>(0);
+            const uint32_t r = ext::sound_mixer_attach(id, 0, false);
+            NXLOG_I("audio", "IVirtualDeviceManager cmd 800 DetachStream(stream %u) -> 0x%x", id, r);
+            return r;
+        });
+    });
+}
+
 void register_audio() {
     add("audren:u", [] { return make_audren(); });
     add("aud:u", [] { return make_aud_user(); });
+    add("auddmg:u", [] {
+        auto s = std::make_shared<Service>("auddmg:u");
+        s->add_cmd(0, "OpenVirtualDeviceManager", [](Request&, Response& rsp) -> uint32_t {
+            rsp.push_object(make_virtual_device_manager());
+            return 0;
+        });
+        return s;
+    });
     register_audio_out();
 }
 
@@ -390,8 +519,13 @@ void audio_reset() {
         for (auto& e : st().events) e.reset();
         for (auto& e : st().device_events) e.reset();
         for (float& v : st().device_volume) v = 1.0f;
+        for (auto& v : g_output_volume) v.store(1.0f);
     }
     audio_out_reset();
 }
+
+namespace audio_device {
+float output_volume() { return g_output_volume[active_index()].load(std::memory_order_relaxed); }
+}  // namespace audio_device
 
 }  // namespace nxrt::services

@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // Port of Ryujinx.Audio/Renderer/Dsp/Command/LimiterCommandVersion1.cs (Ryubing fork, MIT). Scalar path (no SIMD in the C# file).
 #pragma once
 #include <cmath>
@@ -67,7 +69,7 @@ class LimiterCommandVersion1 : public ICommand {
 
         if (IsEffectEnabled) {
             if (_parameter.status == UsageState::Invalid) {
-                state = LimiterState(_parameter, WorkBuffer);
+                ReplaceState(state, _parameter, WorkBuffer);
             } else if (_parameter.status == UsageState::New) {
                 LimiterState::UpdateParameter(_parameter);
             }

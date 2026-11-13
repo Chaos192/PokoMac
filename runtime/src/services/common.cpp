@@ -61,6 +61,7 @@ void register_all() {
     register_misc();
     register_audio();
     register_vi_nv();
+    register_extensions();   // last: it only adds what the files above do not answer (ext_*.cpp, from AnySwitch)
 }
 
 void reset_all() {
@@ -77,6 +78,7 @@ void reset_all() {
     misc_reset();
     audio_reset();
     vi_nv_reset();
+    extensions_reset();
     profile_reload();
 }
 

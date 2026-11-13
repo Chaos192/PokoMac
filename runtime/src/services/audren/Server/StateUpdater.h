@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // Port of Ryujinx.Audio/Renderer/Server/StateUpdater.cs (Ryubing fork, MIT): parses the RequestUpdate input buffer into the server
 // objects and writes the output buffer. Method names and order follow the C# exactly; AudioRenderSystem.Update calls them in the
 // order of the C# AudioRenderSystem.Update.
@@ -99,7 +101,10 @@ class StateUpdater {
     ResultCode UpdateBehaviourInfo() {
         BehaviourParameter parameter = _inputReader.GetRefOrRefToCopy<BehaviourParameter>();
 
-        if (!BehaviourInfo::CheckValidRevision(parameter.user_revision) || parameter.user_revision != _behaviourInfo->UserRevision) {
+        // The revision numbers must match, not the magic: Switch 2 SDKs open the renderer with 'REV'+n and tag their updates 'REv'+n
+        // (Lichii NX2_NOTES row 39).
+        if (!BehaviourInfo::CheckValidRevision(parameter.user_revision) ||
+            BehaviourInfo::GetRevisionNumber(parameter.user_revision) != BehaviourInfo::GetRevisionNumber(_behaviourInfo->UserRevision)) {
             return ResultCode::InvalidUpdateInfo;
         }
 
