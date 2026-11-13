@@ -204,6 +204,12 @@ bad=$(cd "$pkg" && find . \( -iname '*.nso' -o -iname '*.nro' -o -iname '*.nca' 
     find . -type d -name build -not -path "./$R/tools/build" -print)
 [ -z "$bad" ] || fail "game-derived or private files in the package:
 $bad"
+# the licence switch (b42a7cb): the texts of code PokoMac no longer has stay out, its own notices are in (inside the app and beside it)
+for d in "$R/licenses" "licenses"; do
+    for f in LICENSE.ScarletNX.GPL-3.0.txt LICENSE.yuzu-Eden.GPL-2.0.txt; do [ ! -e "$pkg/$d/$f" ] || fail "the package still has $d/$f (its code is gone: licence switch)"; done
+    [ -f "$pkg/$d/LICENSE.GPL-3.0.txt" ] || fail "the package has no $d/LICENSE.GPL-3.0.txt"
+done
+for f in "$R/NOTICE.txt" "$R/LICENSE.txt" LICENSE.txt; do [ -f "$pkg/$f" ] || fail "the package has no $f"; done
 
 # sign the finished bundle again (ad hoc): its resources changed, and a broken seal would stop Gatekeeper's right-click Open
 xattr -cr "$pkg/$APP"

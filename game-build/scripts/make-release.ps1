@@ -84,6 +84,9 @@ $bad = Get-ChildItem $pkg -Recurse -Force | Where-Object {
     $_.FullName -match '\\updates\\'
 }
 if ($bad) { $bad | ForEach-Object { Write-Error "game-derived or private file in the package: $($_.FullName)" -ErrorAction Continue }; throw 'package check failed' }
+# the licence switch (b42a7cb): the texts of code PokoMac no longer has stay out, its own notices are in
+foreach ($f in 'licenses\LICENSE.ScarletNX.GPL-3.0.txt', 'licenses\LICENSE.yuzu-Eden.GPL-2.0.txt') { if (Test-Path (Join-Path $pkg $f)) { throw "the package still has $f (its code is gone: licence switch)" } }
+foreach ($f in 'NOTICE.txt', 'LICENSE.txt', 'licenses\LICENSE.GPL-3.0.txt') { if (-not (Test-Path (Join-Path $pkg $f))) { throw "the package has no $f" } }
 
 $zip = Join-Path $Out "$name-win64.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }
