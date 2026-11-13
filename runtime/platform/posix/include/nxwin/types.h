@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Chaos192
 // nxwin: the subset of the Win32 API the runtime uses, implemented over POSIX and Mach (macOS port).
 // This directory is on the include path only for non-Windows builds, so `#include <windows.h>` and friends resolve here and

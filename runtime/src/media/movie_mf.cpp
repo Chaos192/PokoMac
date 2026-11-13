@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // movie:: (Nintendo's multimedia library, a port of Android's stagefright) on Windows Media Foundation. See include/nxrt/movie.h.
 //
 // The protocol the game speaks was worked out for smo-recomp (runtime/services/nnmovie_mf.c, GPL-3.0, same library in another game):

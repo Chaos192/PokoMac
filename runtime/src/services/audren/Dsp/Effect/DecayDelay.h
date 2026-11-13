@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/Effect/DecayDelay.cs (Ryubing fork, MIT). The wrapped delay line is held by reference,
 // as the C# holds it by reference. Properties with a body (CurrentSampleCount, SampleCountMax) are methods.
 #pragma once

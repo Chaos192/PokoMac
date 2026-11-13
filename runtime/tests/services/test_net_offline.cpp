@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // The offline network answers that games read numbers from: sfdnsres's getaddrinfo errors in the console's (FreeBSD's) numbering and
 // their text, nsd's server environment, and bsd's answer for an address family the console has no stack for. References: Ryujinx

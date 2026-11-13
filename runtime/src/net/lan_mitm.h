@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Portions Copyright (c) 2026 Chaos192
 // Local wireless over a real LAN in ldn_mitm's wire format ([net] protocol = lan, services/ldn.cpp MitmLdn): the protocol of

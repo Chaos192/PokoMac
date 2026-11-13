@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of the System.Buffers.SequenceReader<byte> use in Ryujinx.Audio (splitter and mix input parsing) over one contiguous span.
 // Guest memory is host memory here, so there are no segments. The helpers follow Ryujinx.Common/Extensions/SequenceReaderExtensions.cs:
 //   * GetRefOrRefToCopy<T>(): consumes sizeof(T) bytes and returns the value. C# returns a ref into the buffer; this returns a copy,

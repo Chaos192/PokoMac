@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //! Room codes (mod.rs "Room codes"): 16 symbols of Crockford base32, 80 bits, shown as XXXX-XXXX-XXXX-XXXX. The relay never sees
 //! a code (clients send a key derived from it); the launcher only makes, checks and shows codes.
 //! From pokopia-native (MIT), windows/src/coop/coop_auth.c @7c3655d: the alphabet, the input rules and the display format.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Guest/host object binding and the memory pool registry (GPU address -> pool).
 #include <algorithm>
 #include <atomic>

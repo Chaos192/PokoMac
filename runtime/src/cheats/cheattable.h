@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // The overlay's saved cheat table and window layout (phase 6, CHEATS.md). Saved per title and build id as JSON next to the title

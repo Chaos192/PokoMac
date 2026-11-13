@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Chaos192
 // nxwin <tlhelp32.h>: thread snapshots of the calling process (task_threads); other snapshot kinds are empty.
 #pragma once

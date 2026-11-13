@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Portions Copyright (c) 2026 Chaos192
 // UDP socket table over a vnet::Link, and TCP over the loopback (see vsock.h). One mutex guards the table and every socket's state; one condition variable wakes

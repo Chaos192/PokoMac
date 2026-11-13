@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Generated: hand-written A64 instructions (synthetic, no game code) assembled by clang 19 and printed back by llvm-objdump 19
 // (tests/cheats/disasm_test.cpp: every row must assemble to its word, and decode to the same mnemonic). {pc, word, LLVM text}

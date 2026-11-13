@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Binary parameter structures of the Switch audio renderer (audren:u). Layouts only: no server logic.
 //
 // Adapted from Ryujinx (Ryubing fork) (MIT):

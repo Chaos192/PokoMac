@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Registry of the lifter's module descriptors (NxModule, recomp/include/nxrecomp/ctx.h, ABI version 3).
 //
 // Every lifted module is registered once, at start-up, before any guest code runs:

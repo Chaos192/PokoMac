@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Chaos192
 // macOS: finding Vulkan. There is no system Vulkan loader, so the game folder carries one, next to pkp:
 //   libvulkan.1.dylib                       the Khronos loader

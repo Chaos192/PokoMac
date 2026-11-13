@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/Effect/AuxiliaryBufferEffect.cs (Ryubing fork, MIT). See ReverbEffect.h for the note on
 // the non-generic Update overrides. The send and return buffers are resolved through the PoolMapper into WorkBuffers[0] and
 // WorkBuffers[1]; the DSP-side addresses of the four buffer-info fields come from those.

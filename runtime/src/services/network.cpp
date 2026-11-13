@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch). PokoMac: no host redirection (AnySwitch's net_redirect) and no
 // built-in certificates (ssl_builtin); the network profile is named PokoMac.
 // Copyright (c) 2026 Chaos192

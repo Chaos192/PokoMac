@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/State/Reverb3dState.cs (Ryubing fork, MIT).
 // C# IDelayLine[] / DecayDelay / IDelayLine fields become owning unique_ptr / DecayDelay values (see report).
 #pragma once

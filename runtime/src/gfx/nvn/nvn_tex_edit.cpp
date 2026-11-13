@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Texture pixel edit hook (nxrt/tex_edit.h): storage of the hooks, the edited data kept in memory, the background rebuild after a change.
 // prepare_texture (nvn_texdata.cpp) does the decode, the host edit and the encode; this file decides when.
 #include <windows.h>

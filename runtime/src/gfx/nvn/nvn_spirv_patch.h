@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // SPIR-V rewrites the back end applies to the translated shaders when it builds a pipeline (render thread). The offline translator
 // knows one shader at a time; the console's rules are looser than Vulkan's about what the stages of a pipeline have to agree on.
 //

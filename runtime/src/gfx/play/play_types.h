@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Play mode (S8): the data model shared by the settings file, the binding engine and the settings page.
 //
 // Vocabulary:

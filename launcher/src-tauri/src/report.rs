@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Chaos192
 //! Report a problem: what a bug report needs, in one click. The game's logs and reports, the setup log and the settings go into a zip on
 //! the Desktop (`PokoMac-report-<date>-<time>.zip`; Downloads, then the game folder, when the Desktop cannot be written), Finder shows it,

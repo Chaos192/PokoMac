@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // NVIDIA Image Scaling (NIS v1.0.3, MIT) spatial upscaler: one compute pass (scale + sharpen) into a float16 image the size of the output.
 // An alternative to FSR 1 for the output pass and the scene upscaler; it runs on any GPU. NIS scales 1x to 2x per side; the callers fall back to
 // FSR 1 beyond that. The shader is in nis_shaders.inc (scripts/gen_nis_shaders.py), the constants come from the SDK's NVScalerUpdateConfig.

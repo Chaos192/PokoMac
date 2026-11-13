@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Lists the active render endpoints (IMMDeviceEnumerator) for [audio] device and for the start-up log of the XAudio2 sink.
 #include <windows.h>
 #include <objbase.h>

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Applet manager (S3c): appletOE / appletAE as one application sees them. The application proxy and every interface it hands out
 // (common state, self, window, audio, display, process winding, library applet creator and accessors, application functions, debug,

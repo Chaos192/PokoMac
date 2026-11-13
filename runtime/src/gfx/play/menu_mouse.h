@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Mouse pointer in the game's menus (S28).
 //
 // The pointer state and the arithmetic (window pixel to the UI plane and to the picture) are here; they know no

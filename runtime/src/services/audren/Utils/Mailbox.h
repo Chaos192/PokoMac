@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Utils/Mailbox.cs: a message queue for unmanaged types with a message and a response channel.
 // C# BlockingCollection<T>(1) is replaced by a bounded queue (capacity 1) built on std::mutex and std::condition_variable:
 // Add blocks while the queue is full, Take blocks while it is empty.

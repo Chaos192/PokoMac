@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Input trace file (S5): the per-frame pad state of a run, recorded from a live session or written by a scripted run, replayed
 // frame for frame. Text, delta encoded, human-editable:
 //

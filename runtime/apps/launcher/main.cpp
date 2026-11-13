@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // The launcher: a small window that opens before the game. It edits controls.ini in the game folder (display, picture, mouse,
 // keyboard, controller, button prompts, frame rate counter), shows whether the game files are in place, starts the setup tool
 // for the first-time setup, and starts mpr.exe.

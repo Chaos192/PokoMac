@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/Command/AdpcmDataSourceCommandVersion1.cs (Ryubing fork, MIT).
 // Initialize takes the server VoiceInfo as a template argument (members as in PcmInt16DataSourceCommandVersion1.h, plus
 // DataSourceStateAddressInfo with GetReference(bool) and Size). The C# AddressInfo of the coefficients is read through that interface.

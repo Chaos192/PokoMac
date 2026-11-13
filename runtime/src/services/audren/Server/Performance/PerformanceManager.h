@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/Performance/PerformanceManager.cs (Ryubing fork, MIT).
 // Abstract base; the static factory and size query dispatch on the performance-metrics data format (1 or 2).
 // Circular dependency: the base's statics construct PerformanceManagerGeneric, which derives from this class. The definitions of

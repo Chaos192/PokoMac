@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Texture rectangle patch (nxrt/tex_patch.h): each level the rectangle covers is untiled, the rectangle's blocks are replaced, the level is
 // tiled back into the game's storage and the texture is marked CPU-written (the registry's normal path to a re-upload).
 #include <algorithm>

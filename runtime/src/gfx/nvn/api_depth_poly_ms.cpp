@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // NVNdepthStencilState (8 bytes), NVNpolygonState (4 bytes) and NVNmultisampleState (0x18 bytes): plain data in the guest
 // object. Bit layouts and defaults follow smo-recomp runtime/gfx/nvn_gl.c (GPL-3.0), layout/defaults checked, no code copied.
 //

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/Upsampler/UpsamplerInfo.cs (Ryubing fork, MIT). One allocated upsampler slot.
 // UpsamplerBufferState is reused from Dsp/UpsamplerHelper.h.
 //

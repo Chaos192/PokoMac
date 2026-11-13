@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Chaos192
 // nxwin <windows.h>: see nxwin/types.h. Only on the include path of non-Windows builds.
 #pragma once

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Copyright (c) 2026 Chaos192
 // TCP over the loopback through bsd (services/network.cpp over net/vsock.cpp), which a console has with no network. The case walks the

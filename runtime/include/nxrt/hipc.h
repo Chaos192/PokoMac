@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // HIPC message encoding/decoding (the wire format of the Horizon IPC command buffer, thread-local region +0).
 // Layouts: https://switchbrew.org/wiki/IPC_Marshalling (HeaderData, SpecialHeader, MapData = A/B/W buffers, PointerData = X,
 // ReceiveListData, raw data alignment) cross-checked against libnx sf/hipc.h.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Pokémon Pokopia, Link Play "Interact everywhere" (pkp_linkplay.h). Based on pokopia-native (MIT) windows/src/coop/coop_interact.c and
 // windows/docs/coop-interact.md @555813a.
 //

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Host implementation of Nintendo's multimedia library (the `movie::` API of the SDK, a port of Android's stagefright) on Windows
 // Media Foundation. The game imports 41 functions of the library (Extractor, Decoder, MediaData, Buffer, a few free functions); this
 // module registers a host handler for each of them and forces the imports to the host (module_override_symbol), so the library that

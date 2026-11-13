@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // The C++ unwinder for lifted code: _Unwind_RaiseException / _Unwind_Resume semantics over the NxModule.eh tables.
 //
 // Walk: from the registers at the call into the runtime (pc = x30 = return address into guest code, sp = x31), find the FDE of the

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Page write tracking of guest memory (S38). The owner of a region "arms" pages: they become read-only for the CPU, and the first
 // write to one of them faults; a vectored exception handler makes the page writable again, marks it written and lets the write go on.
 // The owner (the NVN back end keeps device-local copies of pool pages, nvn_gpu_pool.cpp) then knows which pages changed without reading

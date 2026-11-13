@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Present pass of the NVN-on-Vulkan back end: draws a game's window texture (a VkImageView in SHADER_READ_ONLY_OPTIMAL) onto a
 // destination image (the swapchain image or the headless frame image) with dynamic rendering. A full-screen triangle samples
 // the source region src_crop, stretched over the whole destination, or letterboxed when keep_aspect is set (black bars).

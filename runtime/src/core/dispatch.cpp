@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Function table + HLE thunks. Pattern from smo-recomp runtime/core/hostrt.c (open-addressing hash, hostfn thunks) and
 // SuperMarioWonderRecomp runtime/src/loader.cpp (thunks, logging stub for unknown imports).
 #include "nxrt/dispatch.h"

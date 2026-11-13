@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Chaos192
 // macOS host-code symbolisation (src/diag/symbols.cpp reads MSVC linker maps on Windows): dladdr names the image and the nearest symbol,
 // demangled. There is no map to load; symbols_load_map reports 0 and lookups still work.

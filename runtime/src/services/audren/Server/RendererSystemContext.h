@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/RendererSystemContext.cs (Ryubing fork, MIT).
 // A lite version of AudioRenderSystem used by the audio processor, so that the DSP side does not depend on the whole system.
 // Deviation: BehaviourInfo and UpsamplerManager are C# class instances owned by the AudioRenderSystem, so they are pointers here (not

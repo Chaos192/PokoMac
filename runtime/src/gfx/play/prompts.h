@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Button prompts (S17): replaces the pixels of the game's button icon textures with Xbox, PlayStation or keyboard and mouse icons.
 //
 // How it works: the game draws its prompts from 19 small BC7 textures (prompt_resolve.h). The graphics back end asks a hook

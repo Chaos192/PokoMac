@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 // caps:su (IScreenShotApplicationService): the photos the game saves are written as PNG files into the album folder ([album] dir,
 // default "album" next to the exe).

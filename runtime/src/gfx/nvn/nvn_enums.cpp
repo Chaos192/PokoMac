@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // NVN enum values -> Vulkan enum values (S4d). The switch tables behind nvn_enums.h.
 // Every default branch counts the value in one atomic counter, so a wrong value shows up in the log and in the tests.
 #include "nvn_enums.h"

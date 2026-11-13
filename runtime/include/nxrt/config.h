@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Configuration: an ini file plus environment-variable switches.
 //   [section]
 //   key = value        ; comment    # comment

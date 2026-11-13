@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Host-code symbolisation from the MSVC-format linker map that lld-link writes next to the exe (/MAP). Reads the
 // "Publics by Value" and "Static symbols" entries, undecorates the MSVC names with dbghelp and resolves a host address
 // to the nearest preceding symbol. Only the main exe has a table; other modules are reported by name and offset.

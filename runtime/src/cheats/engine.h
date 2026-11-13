@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Copyright (c) 2026 Chaos192
 // The cheat engine host: loads the running title's Atmosphère cheat file, runs the cheat VM every 1/12 s on its own thread (as dmnt does),

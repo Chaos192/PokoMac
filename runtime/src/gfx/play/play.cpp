@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Play mode: the glue. See include/nxrt/play.h for the start-up order and docs/S8.md for the design.
 //
 // Threads:

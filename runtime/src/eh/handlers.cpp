@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // The runtime's _Unwind_* entry points as HLE thunks, entry hooks and lifter function overrides (eh.h).
 #include "nxrt/dispatch.h"
 #include "nxrt/eh.h"

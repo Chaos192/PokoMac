@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // The ldn HLE's process lobby (services/ldn.cpp). By default it is built on first use from the config: [net] server (auto = the default:
 // host on a relay in this process, find hosts on the LAN; empty or off = local wireless off; host:port = that relay), [net] password,
 // [account] nickname. Tests put their own lobby in place.

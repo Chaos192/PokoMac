@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // [nvn] shader_key_check, see nvn_key_check.h.
 #include "nvn_key_check.h"
 

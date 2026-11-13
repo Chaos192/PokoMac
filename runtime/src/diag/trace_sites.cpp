@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Bring-up probe ([diag] trace_sites / NXRT_DIAG_TRACE_SITES = "0x7100ba3bd8,0x7100ba3db0,..."): a mid hook at each listed address
 // logs x0-x3, x19-x20, lr and sp the first [diag] trace_limit (default 50) times per site,
 // then on every power-of-two hit (with the hit number), so a site that keeps running stays visible. [diag] trace_peek (NXRT_DIAG_TRACE_PEEK)

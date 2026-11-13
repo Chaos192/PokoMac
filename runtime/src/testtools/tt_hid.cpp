@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // The adapter between the test tooling and the hid service's input source (S3c: include/nxrt/input_source.h, on the `services` branch).
 // Compiled to no-ops when that header is not in the tree. The wrapping source:
 //   - passes the live source through untouched (record-only or no pad override), and remembers it for sampling the live pad at frame boundaries;

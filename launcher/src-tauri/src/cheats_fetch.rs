@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch) (its cheats_fetch.rs, for PokoMac's one game).
 //! The game's public cheat file, fetched on the player's machine: cheat files carry no licence to redistribute, so the release bundles
 //! none; the launcher fetches the one for Pokopia's version and names its author. The work is the bundled `tools/build/cheats_fetch.py`

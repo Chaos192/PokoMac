@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 //! Repair and reset: puts settings back to the defaults the runtime already has, clears caches the game rebuilds, and removes what old
 //! versions left behind. Every action is planned first (what exactly would change), the small text files it changes are copied to

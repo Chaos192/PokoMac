@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Pokémon Pokopia, title screen: a "Quit Game" key guide next to "(-) Settings" (issue #319). [pkp] title_quit, on by default.
 //
 // The title's prompts are the game's key guide widget (one per player, manager [0x3483fb8], ctor 0x7100ec4958): 0x7100e60be4 (manager,

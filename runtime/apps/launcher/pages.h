@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // The tabs of the launcher. Each factory returns a page the window owns.
 #pragma once
 #include <memory>

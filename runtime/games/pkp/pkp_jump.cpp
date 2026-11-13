@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Jump momentum: a running jump carries the running speed instead of the fixed air speed. [pkp] jump_momentum (on by default),
 // [pkp] jump_momentum_strength (0..1, default 1).
 //

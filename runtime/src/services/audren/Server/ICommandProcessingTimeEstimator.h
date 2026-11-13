@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/ICommandProcessingTimeEstimator.cs (Ryubing fork, MIT). Estimates the DSP time a command takes;
 // the renderer uses it for voice dropping. The estimator versions (CommandProcessingTimeEstimatorVersion1..5.h) implement this interface.
 #pragma once

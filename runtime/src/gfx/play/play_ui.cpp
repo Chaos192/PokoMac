@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Play mode settings: the F1 menu of the overlay. The contract is play_ui.h. The menu edits a working copy of the settings: changes are
 // handed to the host as they are made (Apply and save does it at once), Revert and Factory defaults replace the copy, and nothing else
 // reaches the game. Its look is the overlay's theme (cheats_theme.h); its rows and cards are play_ui_widgets.h.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Play mode binding engine, see play_engine.h for the rules.
 #include "play_engine.h"
 

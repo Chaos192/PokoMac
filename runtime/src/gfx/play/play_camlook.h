@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Play mode: mouse look that moves a camera and not the player's body. Two uses:
 //   * free look (the FreeLook binding, Alt by default): with the key held the mouse turns the first-person view around the eye while the body
 //     keeps its heading; letting go puts the view back;

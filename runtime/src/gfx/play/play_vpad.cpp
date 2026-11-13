@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Play mode, TEST ONLY: the virtual SDL gamepad behind "vpad ..." test steps (see play_vpad.h for the command list).
 // The state lock is never held across an SDL call: SDL may call the rumble callback from inside its own functions.
 #include "play_vpad.h"

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Win32 key and mouse messages to the SDL values the launcher stores in controls.ini.
 #pragma once
 

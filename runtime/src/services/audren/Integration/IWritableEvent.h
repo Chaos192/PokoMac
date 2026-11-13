@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Integration/IWritableEvent.cs (Ryubing fork, MIT): the system event an audio renderer session signals after
 // each update. The C# interface is kept as an abstract class; the event itself is owned by the caller of the renderer.
 #pragma once

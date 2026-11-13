@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // The one translation unit that holds the VulkanMemoryAllocator implementation (MIT, pinned in cmake/gfx_deps.cmake).
 // The Vulkan entry points are loaded by volk and handed to VMA through VmaVulkanFunctions (see vk_device.cpp).
 #include <volk.h>

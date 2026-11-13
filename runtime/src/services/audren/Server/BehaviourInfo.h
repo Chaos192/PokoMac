@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Portions Copyright (c) 2026 Chaos192
 // Port of Ryujinx.Audio/Renderer/Server/BehaviourInfo.cs (Ryubing fork, MIT). Feature gating by the user revision, the

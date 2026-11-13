@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Copyright (c) 2026 Chaos192
 //! Mods (docs/MODS.md): the mod manager in the launcher. The work is mods.py's, shipped beside pkp_build.py (tools/build/mods.py): it

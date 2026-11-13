@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //! First-run game build (release model b): the release ships no game code, so pkp.exe is built here, on the player's PC,
 //! from their own dump. The work is done by `tools/build/pkp_build.py` (bundled Python, lifter and Zig; see that file):
 //! verify the ExeFS by hash, lift the four modules, compile them, link pkp.exe against pkp_rt.dll (the runtime).

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Play mode: factory settings and the settings file (reader and writer). The file format is described in play_types.h.
 #include "play_types.h"
 

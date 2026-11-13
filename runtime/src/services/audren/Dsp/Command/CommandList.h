@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/Command/CommandList.cs (Ryubing fork, MIT). The command list owns its commands (the C# recycles
 // them through object pools in CommandBuffer.ReleaseCommand); the mix buffer is a slab of floats owned by the renderer.
 #pragma once

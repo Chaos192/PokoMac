@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 //! Keep my saves in iCloud Drive (macOS, opt-in, Settings > Saves): the active profile's save travels between the player's Macs by copy,
 //! around each Play. The game never plays from iCloud Drive itself: iCloud can turn a file into a placeholder that is only downloaded when

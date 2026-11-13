@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // The game boundary (docs/GAME_BOUNDARY.md): everything one title supplies to the game-independent base.
 //
 // The runtime, the launcher and the test tooling know no game. A game module (runtime/games/<id>/, a static library the game exe links)

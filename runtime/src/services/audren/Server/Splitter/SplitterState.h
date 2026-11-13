@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/Splitter/SplitterState.cs (Ryubing fork, MIT).
 // Server state of one splitter: its sample rate and the head of a linked list of splitter destinations.
 // Deviations: the C# Destination property is a method, and the head pointers are C++ pointers (C# unsafe pointers).

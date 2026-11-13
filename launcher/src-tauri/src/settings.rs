@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //! Reads and edits the runtime's ini files next to pkp.exe. The key schema lives in the frontend;
 //! this side only moves `section.key` values in and out, with the careful editor in ini.rs.
 

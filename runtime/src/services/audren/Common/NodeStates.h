@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Common/NodeStates.cs. Depth-first topological sort over an EdgeMatrix with loop detection.
 #pragma once
 #include <cstddef>

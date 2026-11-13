@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Integration/IHardwareDevice.cs (Ryubing fork, MIT): the output device a DeviceSinkCommand writes PCM16 to.
 #pragma once
 #include "../Constants.h"

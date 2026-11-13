@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Pokémon Pokopia, the engine's own temporal anti-aliasing (pkp_taa.cpp): a probe of the game's TAA switch and [pkp] game_taa, which turns it on.
 #pragma once
 #include <cstddef>

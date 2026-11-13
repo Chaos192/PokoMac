@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // [nvn] submit_thread: one worker thread that runs the render thread's queue work (vkQueueSubmit2 of the recorded batch, the present's
 // submit + vkQueuePresentKHR) in FIFO order, so the render thread can record the next frame while the driver does the submission (each
 // kernel submission is expensive under Proton: amdgpu looks up the userptr pool imports again, nvn_gpu.cpp flush_batch).

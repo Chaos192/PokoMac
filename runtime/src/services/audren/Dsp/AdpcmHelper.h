@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/AdpcmHelper.cs (Ryubing fork, MIT). Static class -> struct with static members.
 //
 // The C# int arithmetic wraps on overflow (unchecked context). The helpers WrapAdd/WrapMul/Shl reproduce that with uint32_t,

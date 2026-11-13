@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Launcher helpers: what is in the game folder, the launcher's own settings file, command-line quoting, and starting the game exe
 // or the setup tool. The pure parts (check_game_dir, summary, parse/format, quote_arg) do not touch the registry or the
 // launcher's own folder. The names of the game's programs and files are the registered game's (nxrt/game.h; the launcher registers

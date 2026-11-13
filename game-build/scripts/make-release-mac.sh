@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Builds and packs the PokoMac player zip for macOS on Apple silicon, the twin of make-release.ps1 (release model b: no game code or data
 # in it; the player's Mac lifts the game from their own dump and links the native `pkp` against libpkp_rt.dylib). Run on a Mac:
 #   cmake --build build/mac --target pkp_rt                                         -> build/mac/libpkp_rt.dylib
@@ -186,6 +186,8 @@ unzip -p "$lz4" 'lz4-4.4.5.dist-info/licenses/LICENSE' > "$res/licenses/LICENSE.
 unzip -p "$cap" 'capstone-5.0.9.dist-info/LICENSE.TXT' > "$res/licenses/LICENSE.capstone.txt"
 for f in "$res"/licenses/*; do [ -s "$f" ] || fail "empty licence file $f"; done
 put "$root/LICENSE" "$R/LICENSE.txt"
+put "$root/NOTICE" "$R/NOTICE.txt"
+put "$root/LICENSE.GPL-3.0.txt" "$L/LICENSE.GPL-3.0.txt"   # the lifter (RELICENSING.md)
 
 # beside the app
 sed "s/@VERSION@/$version/g" "$root/game-build/release_b/macos/README.txt" > "$pkg/README.txt"

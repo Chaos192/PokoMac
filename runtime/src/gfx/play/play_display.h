@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Display options of play mode (S10): internal resolution, aspect ratio, field of view, dynamic resolution, filtering and post effects.
 //
 // Two halves. This one (no game, no host state) is the arithmetic every option reduces to, plus the renderer

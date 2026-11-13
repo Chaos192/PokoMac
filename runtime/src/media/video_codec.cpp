@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // nn::codec hardware video decoders (VP9, VP8) + their fences on the host, decoding with libvpx. See include/nxrt/video_codec.h.
 //
 // Calling conventions, read off Pokopia's subsdk0 (movie::detail::*, which forwards its registers unchanged to nn::codec) and off the

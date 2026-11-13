@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Frame time for the game's step (S11, docs/S11.md): a retail game that runs one tick of a hard-coded 1/60 s for every call of its
 // frame update speeds up when it renders faster. This module measures the real time of each frame and feeds it to the game instead of the
 // constant: the entry hook on the frame update computes the step, mid hooks load it into the registers that held the 1/60 immediates, and a

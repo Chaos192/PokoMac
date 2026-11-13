@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Structure adapted from SuperMarioWonderRecomp runtime/src/ipc.cpp (MIT, Copyright (c) 2026 BelmanteGu); see THIRD_PARTY_NOTICES.md.
 // Service registry, sessions and domains, request routing (CMIF, TIPC, control messages, Release) and the reply writer.
 // The wire format itself (parse/build of the message words) is nxrt::hipc in hipc.cpp; this file only interprets the result.

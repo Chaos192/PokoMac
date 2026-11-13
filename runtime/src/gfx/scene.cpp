@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // The test scene (declarations in include/nxrt/scene.h): a clear colour and two textured quads, the texture going through the
 // block-linear tiling library of tools/tiling (tegra_tiling.h) before it is uploaded.
 #include <algorithm>

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // NVN front-end shell (S4b). The recompiled game finds NVN through `nvnBootstrapLoader(name)` and
 // `nvnDeviceGetProcAddress(device, name)`; both return the guest address of an HLE thunk (dispatch.h) for every NVN entry point.
 // Until an entry point is implemented its thunk is a logging stub: it logs the name, the arguments (decoded from the AArch64

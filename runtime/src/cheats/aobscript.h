@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Cheat Engine-style auto-assembler scripts for AArch64 guest code (phase 6, CHEATS.md "AOB scripts"): a table entry whose [ENABLE]

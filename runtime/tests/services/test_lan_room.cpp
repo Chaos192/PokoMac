@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // LAN room (services/lan_room.h): a game's own LAN mode carried on a Link Play relay room. The datagrams follow Pia's LAN mode as the
 // NintendoClients wiki ("LAN Protocol", Pia 6.16-7.2) describes it: a browse request broadcast to UDP port 35000, the reply sent back to

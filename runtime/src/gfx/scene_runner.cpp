@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // The frame loop of the graphics shell (scene.h: run_scene). The order inside one frame is the low-latency design: wait for the
 // frame's scheduled start (FrameLimiter), THEN pump the platform and read input, then record and present.
 #include <windows.h>

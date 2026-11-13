@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Play mode: the pad's orientation from its gyro and accelerometer. The console's sensor fusion hands the game, next to the raw readings, the pad's turn since it was
 // reset (angle) and the pad's axes in the world frame (direction); the game's pointer control scheme reads the direction. SDL gives only the raw readings, so this
 // integrates them: the gyro turns the axes, and the accelerometer pulls the tilt back toward gravity slowly (the gyro drifts). Pure code, no SDL.

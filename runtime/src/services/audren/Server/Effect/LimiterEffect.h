@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/Effect/LimiterEffect.cs (Ryubing fork, MIT). See ReverbEffect.h for the note on the
 // non-generic Update overrides. Unlike the reverb and delay effects, the limiter does not check the channel counts.
 #pragma once

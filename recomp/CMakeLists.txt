@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # nxrecomp: the AArch64 -> C++ recompiler. This file exposes the build function for the game.
 #
 #   cmake --preset default                 (from a shell with the MSVC environment: scripts\nx_env.cmd cmake --preset default)

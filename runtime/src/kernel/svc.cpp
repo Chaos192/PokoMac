@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 // SVC table and dispatcher (see include/nxrt/svc.h). Dispatch pattern from SuperMarioWonderRecomp runtime/src/kernel.cpp (MIT).
 #include "nxrt/svc.h"

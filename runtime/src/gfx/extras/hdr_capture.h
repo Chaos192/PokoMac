@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // HDR capture decoder (hdr_capture.h): turns a read-back frame (HDR10 PQ, scRGB half floats or 8-bit sRGB) into scene-linear
 // floats, 8-bit previews (SDR and false colour) and brightness statistics, and writes linear data out as a PFM file.
 // No Vulkan types here: the caller describes the pixel layout with CaptureFormat.

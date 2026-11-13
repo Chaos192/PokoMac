@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/Command/MixRampCommand.cs (Ryubing fork, MIT). State is the voice state block in the work buffer
 // (C# Memory<VoiceState>, here Span<VoiceState>); the last mixed sample is written to its last_samples[LastSampleIndex].
 #pragma once

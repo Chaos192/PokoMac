@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // The graphics shell's test scene and the frame loop that drives it (S4b). The scene is a clear colour and two textured
 // quads. The texture is authored as a block-linear (Tegra) image, tiled and untiled with the tools/tiling library, and uploaded
 // from the untiled copy: it exercises the same path guest textures take. Everything a frame shows is a function of the frame

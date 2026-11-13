@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Camera aim (pkp_aim.cpp): ability and tool targets are aimed where the camera looks, not where the character faces. [pkp] camera_aim,
 // on by default.
 #pragma once

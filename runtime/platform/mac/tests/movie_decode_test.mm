@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Chaos192
 // Standalone check of the movie:: AVFoundation backend (runtime/platform/mac/core/movie_avf.mm) without the game: the file is compiled into
 // this program as is, the runtime functions it calls are stubbed below (logging to stdout, config defaults, a handler table, dispatch_call

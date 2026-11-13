@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //! The shader archive: every translated shader in a few compressed files instead of ~99,000 loose `<hash>.spv` files.
 //!
 //! `shader_cache/spirv.archive/NNNNNN.pack` (beside `shader_cache/spirv`, like the runtime's preload pack) are segments in the

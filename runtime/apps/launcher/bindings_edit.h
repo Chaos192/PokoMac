@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Keyboard tab, logic part: the rows of the list and the edits that keep every action at two keys. No Windows code here, so the
 // tests can run it alone. Only the factory layer ([bindings.all]) is edited. The menu, map, gameplay, morph and scan sections are
 // left alone.

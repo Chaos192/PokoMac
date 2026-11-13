@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //! A careful line editor for the runtime's ini files (pkp.ini, controls.ini).
 //!
 //! It never rebuilds the file from a parsed model. Lines are kept as they are; `set` changes only the

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // NVIDIA Image Scaling spatial upscaler (nis_spatial.h).
 #include "extras/nis_spatial.h"
 

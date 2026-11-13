@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // NVN front-end shell (declarations in include/nxrt/nvn.h): nvnBootstrapLoader / nvnDeviceGetProcAddress and a logging stub for
 // every entry point of the generated table. The stub/logging layout follows the idea in smo-recomp runtime/gfx/nvn_stub.c
 // (log the first calls with x0..x3 and the caller, count the rest); the argument decoding by signature class is new.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Guest-address-keyed synchronisation objects (the smo "side table" model, used where nn::os is answered by the host
 // instead of by recompiled SDK code): the guest's MutexType / ConditionVariableType / EventType / SemaphoreType are opaque
 // here. Each object is identified by its guest address and backed by a host object that lives in a hash table; the

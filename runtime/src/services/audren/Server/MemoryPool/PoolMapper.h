@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/MemoryPool/PoolMapper.cs (Ryubing fork, MIT).
 //
 // Mapping model: there is no DSP-side page table here. Guest memory is host memory and a memory pool's DSP address equals its

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // NVNcommandBuffer lifecycle: initialize/finalize, command and control memory bookkeeping, Begin/EndRecording, handles,
 // Call/CopyCommands. The recorders of the commands themselves are api_cmd_state.cpp and api_cmd_work.cpp.
 //

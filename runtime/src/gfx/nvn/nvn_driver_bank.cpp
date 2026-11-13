@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // NVN driver constant bank c[0] (declarations in nvn_driver_bank.h).
 #include "nvn_driver_bank.h"
 

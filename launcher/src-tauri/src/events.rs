@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //! Timed-event selection lives in pkp.ini; its clock offset is calculated fresh for every game launch.
 //! The ordinary Game clock is never overwritten: the selected event is applied only to pkp.exe's environment.
 

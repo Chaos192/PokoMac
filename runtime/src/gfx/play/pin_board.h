@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Pins: small readouts that stay over the game while the menus are closed. One engine for both menus: the F1 settings menu pins

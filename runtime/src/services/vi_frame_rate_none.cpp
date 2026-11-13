@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // What AnySwitch's vi_nv.cpp (by Chaos192, taken as it is) asks of AnySwitch's frame-rate engine and host refresh source
 // (nxrt/frame_rate.h, nxrt/vblank.h), answered as PokoMac paces its frames: PokoMac keeps its own frame limiter and does not take
 // AnySwitch's engine (frame_rate.cpp, vblank.cpp, engine_fields), so the vsync event ticks at 60 Hz on its own clock (scaled by the

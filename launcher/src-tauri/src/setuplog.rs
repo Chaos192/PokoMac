@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //! The setup log: `setup.log` next to pkp.exe. Appended to by every Set up (timestamped, UTC), so a failure can be
 //! diagnosed from one file. Holds the steps, the commands run, the tools' error output and the end of their output on a
 //! failure. Rotated to `setup.log.prev` when it passes 2 MB. Idea from pokopia-native (MIT), nxs2.py `run` (per-stage

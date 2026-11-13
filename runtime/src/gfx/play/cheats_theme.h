@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // The cheats overlay's look, in one place: the design tokens (colour, type, space, radius, sizes), the ImGui style made from them, the

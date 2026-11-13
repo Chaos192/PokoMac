@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Format-feature guards (nvn_format_guard.h).
 #include "nvn_format_guard.h"
 

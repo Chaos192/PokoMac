@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/Sink/DeviceSink.cs (Ryubing fork, MIT). Server state of a device sink.
 #pragma once
 #include <cstring>

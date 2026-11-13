@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Jump momentum (pkp_jump.cpp): a running jump keeps the running speed in the air. [pkp] jump_momentum, on by default.
 #pragma once
 #include <cstdint>

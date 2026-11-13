@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // SPIR-V rewrites (declarations in nvn_spirv_patch.h).
 #include "nvn_spirv_patch.h"
 

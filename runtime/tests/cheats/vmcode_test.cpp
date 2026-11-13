@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Copyright (c) 2026 Chaos192
 // Standalone test of the cheat VM's write router (runtime/src/cheats/vmcode.*): the real VM (cheat_vm.cpp) runs Atmosphère cheats against a

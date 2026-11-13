@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 // Renderer (declarations in include/nxrt/gfx.h): swapchain or offscreen image ring, present modes, frames in flight, GPU
 // timestamps, resize and minimise handling, screenshots, overlay hook.

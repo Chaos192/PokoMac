@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Thread, event, synchronisation, time and diagnostic SVCs. Semantics from the Switchbrew SVC page; structure of the handlers
 // adapted from SuperMarioWonderRecomp runtime/src/kernel.cpp svc_impl (MIT, Copyright (c) 2026 BelmanteGu; see THIRD_PARTY_NOTICES.md).
 // Argument registers (AArch64): see include/nxrt/svc.h.

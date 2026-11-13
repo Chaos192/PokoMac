@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //! Based on pokopia-native (MIT) windows/tools/coop-relay/coop_relay.h @4a72d23: the Link Play relay ("pkp host"), a Rust port of
 //! pokopia-native's coop-relay, the meeting point for internet play when the host cannot forward a port. Game builds with `[net] relay` set
 //! (ours and pokopia-native's) all dial out to it.

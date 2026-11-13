@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Local wireless (ldn:u, [net] protocol = linkplay) semantics in one process: several ldn service objects, each on its own client of an
 // in-process relay (vnet::LoopbackRelay), as several consoles in one room. Every request goes through ldn:u as the SDK sends it.

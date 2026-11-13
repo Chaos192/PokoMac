@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 // Play mode: the settings page (the "Controls" window of the F1 overlay). The page only talks to the game through UiHost, so it can be
 // tested and developed without a game running. It runs inside ImGui on the presenting thread; UiHost implementations are thread safe.

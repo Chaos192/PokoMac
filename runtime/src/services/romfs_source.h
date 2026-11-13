@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Copyright (c) 2026 Chaos192
 // A RomFS read in place from the player's own .nsp / .xci (romfs_source.cpp). The intake (tools/intake/nca_intake.py --romfs-in-place)

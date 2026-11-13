@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/Voice/WaveBuffer.cs (Ryubing fork, MIT): the server-side wave buffer description.
 //
 // Name clash: audren_types.h already defines nxrt::audren::WaveBuffer (the Common layout, C# Renderer/Common/WaveBuffer.cs).

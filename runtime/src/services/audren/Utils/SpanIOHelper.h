@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Utils/SpanIOHelper.cs.
 // The C# class is a set of static helpers that each take a `ref` cursor (Memory<byte> / Span<byte>) and move it past the bytes used.
 // Here the cursor is an object: SpanIOHelper<uint8_t> wraps a writable Span<uint8_t>, SpanIOHelper<const uint8_t> a read-only one.

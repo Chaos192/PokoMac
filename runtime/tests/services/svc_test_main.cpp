@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // nxrt_services_test: the service tests (svc_test.h). PokoMac carries AnySwitch's harness without its command-table probe (--table,
 // --layouts) and its multi-program and profiler children.

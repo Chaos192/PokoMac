@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 // Vulkan device layer (declarations in include/nxrt/gfx.h): instance + validation, GPU choice, logical device, VMA, image-format
 // checks, buffers, one-shot submits.

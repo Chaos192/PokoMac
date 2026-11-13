@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // In-game Options (pkp_options.cpp): the PC settings as tabs and rows of the game's own Settings screen. [pkp] options_menu, on by default.
 #pragma once
 #include <cstdint>

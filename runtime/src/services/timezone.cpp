@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Time zone rules and calendar conversion (see timezone.h).
 // Adapted from Ryubing (Ryujinx fork) src/Ryujinx.HLE/HOS/Services/Time/TimeZone/TimeZone.cs and TimeZoneRule.cs (MIT): the rule
 // layout, the goback/goahead extension of ToCalendarTimeInternal and the time-type checks of ParseTimeZoneBinary. The behaviour

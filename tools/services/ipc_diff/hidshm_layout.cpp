@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // The hid shared memory layout header (runtime/src/services/hid_shm.h) as numbers: every constant, struct size and field offset, one per
 // line. ipc_diff.py compiles it against two copies of the header (-I <folder>) and compares the outputs.

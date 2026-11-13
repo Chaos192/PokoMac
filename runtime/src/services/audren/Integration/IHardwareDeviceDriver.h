@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of the output side of Ryujinx.Audio/Integration/IHardwareDeviceDriver.cs (Ryubing fork, MIT). Reduced to what the audio
 // processor needs: opening one output device per session. The C# input direction, guest memory manager, volume and the update and
 // pause events are not part of this port.

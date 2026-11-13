@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Recorded work commands (S4d, family cmd_work): draws, clears, copies, downsample, uniform buffer updates, counters,
 // barriers, fences and events, compute dispatch, DrawTexture and discards. Each entry point appends one record to the CmdList
 // that the command buffer is recording (nvn_cmd.h); nothing runs on the GPU here. Host objects that a payload points to

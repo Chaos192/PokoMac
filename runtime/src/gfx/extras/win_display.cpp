@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Windows display HDR query (win_display.cpp), see win_display.h. Each call reads everything fresh:
 //   1. HMONITOR and MONITORINFOEXW (MonitorFromWindow / MonitorFromPoint, GetMonitorInfoW) give the GDI device name, e.g. \\.\DISPLAY1.
 //   2. CCD (GetDisplayConfigBufferSizes + QueryDisplayConfig, active paths) finds the path whose source GDI name is that device, then

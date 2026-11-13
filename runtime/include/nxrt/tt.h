@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Test tooling of the runtime (S5): deterministic mode, frame boundary, per-frame state trace and hash, game-state probes,
 // input record / replay, the scripted-run runner. Docs: docs/S5.md. Everything is off unless a [test] key (or its NXRT_TEST_* variable)
 // asks for it, so a normal run pays nothing.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //! The launcher's shader setup without the window (development check):
 //!   cargo run --example shader_setup -- <game dir> <romfs> <exefs/main> <tools dir> [limit] [jobs]
 //! Builds <game dir>/shader_cache/spirv exactly as the launcher's Set up does; `limit` translates only that many blocks.

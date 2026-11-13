@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 // Internal interfaces of the Vulkan side of the NVN back end (render thread only). Modules:
 //   nvn_gpu.cpp          the Gpu singleton: device access, render thread, submission slots, timeline, deferred destruction, uploads

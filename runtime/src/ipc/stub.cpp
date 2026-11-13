@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Stub services: every command is logged and answered with kernel::kStubService (see include/nxrt/ipc.h).
 #include <cstdio>
 

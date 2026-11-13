@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Chaos192
 // nxwin: slim reader/writer locks, condition variables, critical sections, WaitOnAddress and the Interlocked family.
 // Like their Win32 counterparts they are plain data that is valid when zero-filled (SRWLOCK_INIT and CONDITION_VARIABLE_INIT are {}),

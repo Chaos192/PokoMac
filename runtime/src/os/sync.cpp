@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Guest-address keyed sync objects. Contract and design: include/nxrt/sync.h.
 //
 // Table: 4096 buckets, each a chain guarded by its own SRWLOCK. Lookups take the bucket shared; creating, replacing or

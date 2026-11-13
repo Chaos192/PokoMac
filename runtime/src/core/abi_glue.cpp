@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 // The runtime-provided half of the generated-code ABI (recomp/include/nxrecomp/ctx.h, ABI version 2, section "runtime-provided"):
 // call_indirect, host_import, guest_trap, guest_unimpl, guest_svc, guest_mrs, guest_msr, stx_diag. The rest of the section lives next

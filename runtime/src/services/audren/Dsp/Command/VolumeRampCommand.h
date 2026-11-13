@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/Command/VolumeRampCommand.cs (Ryubing fork, MIT). The ramp runs from Volume0 at the first sample and
 // reaches Volume1 only after the last sample of the buffer (C# semantics).
 #pragma once

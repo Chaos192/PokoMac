@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Pokémon Pokopia, the graphics memory pools for render sizes above the console's (pkp_gfx_heap.h). Addresses are offsets in `main` of the
 // 2.0.1 update; the sites are in recomp/games/pkp/main.sites.
 //

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Pokémon Pokopia's test-tooling probes (nxrt/tt.h GameProbes, registered in pkp_core.cpp): the player's position, heading and action state,
 // the stage id, the play time and the in-game time of day, read from guest memory at each frame boundary. No hooks: the frame source is
 // `tick` (.weaver/play.sh). The script steps that need game functions (@warp @give @call ...) are not provided.

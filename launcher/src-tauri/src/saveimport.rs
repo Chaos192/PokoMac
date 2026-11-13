@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 // Save import: brings a Pokopia save from Eden, Ryujinx or any folder holding the game's save layout into the save the runtime plays.
 // The finder and the layout test follow pokopia-native (MIT), nxs2.py eden_saves() / import_save() @7c3655d; the Ryujinx scan, the

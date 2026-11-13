@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # pkp.exe: the runtime (../runtime) + the four lifted game libraries (built by ../recomp/scripts/build_game.cmd pkp into ../work/build/pkp).
 #   pwsh scripts\build.ps1            configure + build into game-build\build\release
 # Nothing derived from the game lives here: the libraries are imported from the work folder, the NSOs are read at run time.

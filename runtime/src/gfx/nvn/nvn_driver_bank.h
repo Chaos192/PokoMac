@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // NVN's driver constant bank c[0] as the GLSLC code reads it, filled from the current bindings for one draw or dispatch (no Vulkan,
 // no replay state: the replay hands in the ranges and handles).
 //

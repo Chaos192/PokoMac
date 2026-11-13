@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Portions Copyright (c) 2026 Chaos192
 // Display and GPU driver services (S3c): vi:u / vi:s / vi:m (the display, its layers and its vsync event) and nvdrv / nvdrv:a / nvdrv:s /

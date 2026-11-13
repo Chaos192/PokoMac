@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // The one UDP socket the relay client's datagram path needs (relay protocol v3), behind a tiny wrapper like tcp.h (Winsock today).
 // A connected socket: it talks to the relay's address only and the OS drops packets from anyone else.
 #pragma once

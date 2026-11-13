@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // nx_catch_call: the catch frames of lifted functions that contain a catch clause (recomp ctx.h; ssbu-recomp's nro_catch_call is the
 // model, only its name and idea are used). The lifter enters such a function as nx_catch_call(c, u_<entry>). This runs body(c, 0)
 // under a setjmp frame keyed by the guest SP at entry (= the function's CFA). When the unwinder lands in that function it stores the

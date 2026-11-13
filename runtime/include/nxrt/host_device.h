@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // The machine the runtime runs on, where it changes a default (src/host_device.cpp).
 #pragma once
 

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 """Tests of the cheat fetcher (game-build/release_b/cheats_fetch.py): no network (the sources are served by a fake fetch). What a cheat
 file is (labels, master, hex words, 64 KiB, HTML refused), the source order (404, a server error and a refused answer go on to the next),

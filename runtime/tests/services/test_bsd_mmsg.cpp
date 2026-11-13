@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // bsd:u 29 RecvMMsg and 30 SendMMsg (services/bsd_mmsg.h) as the SDK sends them: the raw arguments and one B buffer that holds the
 // serialized messages and takes the answer back. On the offline socket table (two datagram sockets of this node on a vnet link: a

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Copyright (c) 2026 Chaos192
 // The output device volume a game sets (IAudioDevice 1 SetAudioDeviceOutputVolume / 7 ...Auto, audio.cpp): what the game hears goes out

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Output pass (S14): draws the game's final picture into the swapchain (or the headless frame image) like the present pass of the NVN back end,
 // but able to encode it for HDR and to upscale it first.
 //

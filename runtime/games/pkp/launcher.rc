@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Resources of the Pokémon Pokopia launcher (mpr_launcher.exe; cmake/launcher.cmake takes them from the game module): manifest (Common Controls 6, per-monitor DPI, UTF-8, asInvoker) and version info.
 #include <winres.h>
 

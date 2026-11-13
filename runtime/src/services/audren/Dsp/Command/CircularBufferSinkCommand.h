@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/Command/CircularBufferSinkCommand.cs (Ryubing fork, MIT).
 // Initialize takes the server AddressInfo as a template argument (the MemoryPool port is not in the tree yet); it must provide
 // GetReference(bool) returning the DSP/guest address.

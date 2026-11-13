@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // [nvn] readback_defer's eligibility (nvn_gpu_texture.cpp download_texture): a read may be served from the previous read when the texture
 // is the deferred shape, the read repeats the previous one, and nothing changed the storage in between (the stamp).
 #pragma once

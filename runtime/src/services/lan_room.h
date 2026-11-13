@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Copyright (c) 2026 Chaos192
 // LAN room: a game's own LAN mode (Pia's "LAN" sessions: UDP broadcast browse on port 35000, session traffic on 49152..49155; Kinnay,

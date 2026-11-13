@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 """set / set:sys and the nn::settings::operator== hooks: every command with argument and buffer variants, the firmware struct for many
 [system] firmware strings, languages, regions, nicknames, the settings items, and the hook over every language and code.

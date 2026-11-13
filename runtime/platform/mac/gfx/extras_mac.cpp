@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Chaos192
 // macOS side of src/gfx/extras: DLSS (Streamline) and FidelityFX are Windows / PC-Vulkan SDKs and are not available here, so those
 // backends report "not available"; the temporal upscaler on macOS is MetalFX (temporal_metalfx.mm), with FSR 1 as its fallback. The HDR

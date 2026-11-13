@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Recorded commands (S4d). A command buffer appends records to a CmdList; nvnCommandBufferEndRecording turns it into
 // an NVNcommandHandle that the game submits (any number of times) or calls from another list; nvnQueueSubmitCommands replays
 // the lists on the render thread (nvn_replay.cpp).

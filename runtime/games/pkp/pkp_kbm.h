@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Pokémon Pokopia, button prompts (pkp_kbm.cpp): the game's inline button glyphs (the text tag ^30~<action>~) show the key bound to that
 // button while a keyboard style shows, or the pad's own button icon (from the prompt icon pack) while an xbox/playstation style shows.
 // Installed by pkp_play.cpp.

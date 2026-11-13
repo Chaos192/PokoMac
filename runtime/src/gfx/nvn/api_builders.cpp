@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // NVN builders: NVNdeviceBuilder, NVNqueueBuilder, NVNwindowBuilder, NVNmemoryPoolBuilder, NVNbufferBuilder and NVNeventBuilder.
 // Plain data in the guest object; the layouts below are private to this file (all fields are read and written with memcpy, so
 // an object at any alignment works). Each object is at most the size of its NVN struct, checked by the static_asserts.

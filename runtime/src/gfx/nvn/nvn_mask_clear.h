@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Masked colour clear of the NVN-on-Vulkan back end (src/gfx/nvn/nvn_mask_clear.cpp). vkCmdClearAttachments ignores the colour
 // write mask, so a partial NVN ClearColor cannot use it. This pass draws a full-screen triangle with a constant colour, a pipeline
 // whose colour write mask is the NVN mask, a scissor = the clear rectangle and no blending, depth or stencil, so only the channels

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // NVNformat -> FormatInfo table and the vertex-attribute format map (S4d). Interface: nvn_format.h.
 // Sources read to fix the rows (no code copied):
 //   refs/smo-recomp/runtime/gfx/nvn_gl.c: fmt_get() and its k_* tables (byte size per texel or block, block footprint,

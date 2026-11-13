@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // The [tweaks] keys of S46 (play_fastboot.h).
 #include "play_fastboot.h"
 

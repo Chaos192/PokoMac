@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // 16-bit PCM WAV writer (WavWriter) and the tee sink behind [audio] wav_dump (include/nxrt/audio_sink.h).
 // The header is written with zero sizes, then patched: at the first write() that brings the data past another second of audio and
 // at close(). Every patch flushes the data before it, so the sizes in the header never claim bytes that are not in the file.

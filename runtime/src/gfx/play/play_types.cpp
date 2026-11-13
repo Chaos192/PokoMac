@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Play mode: names and parsers for contexts, triggers, actions, Switch outputs and inputs. The contract is play_types.h.
 #include "play_types.h"
 

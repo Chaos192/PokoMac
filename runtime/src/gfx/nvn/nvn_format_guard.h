@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Format-feature guards: what a Vulkan format can do on this device, asked once per format and cached, and the decisions that depend
 // on it. Blend, linear filtering and vertex fetch are optional per format (Intel, older AMD / NVIDIA lack some of them for float and
 // packed formats); using them anyway is undefined behaviour (blend: VUID-vkCmdDraw-None-06479 family, filter: magFilter-04553 family,

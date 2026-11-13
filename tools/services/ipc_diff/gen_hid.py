@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 # Copyright (c) 2026 Chaos192
 """The hid service of runtime/src/services/hid.cpp: nn::hid::IHidServer (every command of its own table, the spec's vectors in order),

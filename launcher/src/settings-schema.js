@@ -978,7 +978,11 @@ export const SECTIONS = [
               { act: 'check-updates', label: 'Check for updates', icon: 'refresh-cw', disabled: env.checking },
             ],
           },
-          { id: 'licence', label: 'Licence', type: 'info', value: 'GPL-3.0-or-later' },
+          { id: 'author', label: 'PokoMac', type: 'info', value: 'PokoMac by Chaos192 (github.com/Chaos192/PokoMac)', selectable: true },
+          {
+            id: 'licence', label: 'Licence', type: 'info', value: 'PolyForm Noncommercial 1.0.0',
+            desc: 'Free to use, change and share for any noncommercial purpose, keeping the credits here; no commercial use. The lifter is GPL-3.0-or-later. The texts come with every release: LICENSE.txt, NOTICE.txt and the licenses folder',
+          },
           { id: 'built_with', label: 'Built with', type: 'info', value: 'Tauri 2, Lucide (ISC), Inter (OFL)' },
           { id: 'repo', label: 'Source code', type: 'info', actions: [open(REPO_URL, 'GitHub')] },
           { id: 'built_on', label: 'Built on', type: 'info', value: 'Built on AnySwitch by Chaos192 — github.com/Chaos192/AnySwitch', actions: [open(ANYSWITCH_URL, 'GitHub')] },

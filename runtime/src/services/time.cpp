@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // time:u, time:a, time:s, time:r (S3c): the standard clocks, the steady clock, the time zone service and the time shared memory.
 // Adapted from ryubing (Ryujinx, MIT) src/Ryujinx.HLE/HOS/Services/Time: TimeSharedMemory.cs (shared memory offsets, paddings and the
 // lifo index rule), StaticService/IStaticServiceForGlue.cs (IStaticService command ids and the time:u/a/r split), StaticService/

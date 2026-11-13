@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Test hook: plays one of the game's movies through the game's own movie player, for checking video decoding without reaching the
 // story point that plays it (MV01/MV02 come late in the story).
 //

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // What the NVN back end asks of the HDR scene pipeline (S14). Two questions, both answered from the HdrState the renderer published:
 //   hdr_promote_target   should this render target be kept as float16 instead of 8-bit sRGB?
 //   hdr_tonemap_variant  the HDR variant of a fragment shader (the tone-map shader), or empty when the shader is not one

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // The one host TCP connection the relay client needs, behind a tiny wrapper (Winsock today; the rest of net/ stays socket-API free).
 // Blocking sockets with TCP_NODELAY and a send timeout; connect has its own timeout.
 #pragma once

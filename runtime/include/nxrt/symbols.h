@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Host-code symbolisation from the MSVC-format linker map (link.exe /MAP) that sits next to the exe.
 //   Address         Publics by Value              Rva+Base               Lib:Object
 //   0001:00000010       ?name@@YAXXZ              0000000140001010 f   file.obj

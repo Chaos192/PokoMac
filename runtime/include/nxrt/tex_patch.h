@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Texture rectangle patch: writes new pixels into a rectangle of one of the game's own BC7 textures (an icon in a UI atlas), in the game's
 // storage, and has the texture uploaded again. Unlike tex_override.h (whole small textures, answered at upload) and tex_edit.h (ASTC textures
 // re-encoded on the PC), the change is made once, by the caller, in the bytes the game reads; the caller keeps what was there to put it back.

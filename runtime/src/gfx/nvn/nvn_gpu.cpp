@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 // The Vulkan side of the NVN back end: the render thread, submission slots (command buffer, descriptor pools, upload memory),
 // the timeline semaphore, deferred destruction, barriers and the public backend API (include/nxrt/nvn_backend.h).

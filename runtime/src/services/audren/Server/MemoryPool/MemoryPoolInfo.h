@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/MemoryPool/MemoryPoolInfo.cs (Ryubing fork, MIT). Server state of one memory pool.
 // This is not a binary layout (the guest sees MemoryPoolInParameter / MemoryPoolOutStatus), so it is a plain struct with the C# names.
 // Field types are spelled uint64_t rather than the CpuAddress / DspAddress aliases: inside a struct whose data members have

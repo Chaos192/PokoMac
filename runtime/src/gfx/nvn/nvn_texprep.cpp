@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Background preparation of texture upload data. See nvn_texprep.h for the design and the correctness argument.
 #include "nvn_texprep.h"
 

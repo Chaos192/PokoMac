@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Chaos192
 // nxwin: files and paths. Paths are UTF-8 (A functions) or wchar_t (W functions, UTF-32 on macOS); backslashes are taken as separators.
 #pragma once

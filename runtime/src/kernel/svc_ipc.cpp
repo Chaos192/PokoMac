@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // IPC SVCs: ConnectToNamedPort (0x1F), SendSyncRequest (0x21), SendSyncRequestWithUserBuffer (0x22). Calling convention: svc.h.
 #include "nxrt/ipc.h"
 #include "nxrt/kernel.h"

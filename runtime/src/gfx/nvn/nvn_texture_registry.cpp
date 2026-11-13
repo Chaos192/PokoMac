@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Registry of initialized textures by storage range (see nvn_core.h).
 #include <algorithm>
 #include <cstring>

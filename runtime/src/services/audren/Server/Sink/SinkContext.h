@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/Sink/SinkContext.cs (Ryubing fork, MIT). The table of sink states.
 //
 // C# stores `BaseSink[]` and replaces entries with derived objects (StateUpdater.ResetSink does `sink = new DeviceSink()`).

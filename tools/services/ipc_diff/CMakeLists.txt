@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # The service differential build (ipc_diff.py). Two implementations of the same runtime source files answer the same requests:
 #   nxrt_ipc_replay          the runtime library as it is in the tree
 #   nxrt_ipc_replay_alt      the same program with the NXRT_IPC_DIFF_ALT files (the other implementation of some of the library's sources:

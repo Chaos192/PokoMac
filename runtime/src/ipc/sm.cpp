@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Structure adapted from SuperMarioWonderRecomp runtime/src/ipc.cpp (MIT, Copyright (c) 2026 BelmanteGu); see THIRD_PARTY_NOTICES.md.
 // The service manager "sm:": CMIF commands 0 RegisterClient, 1 GetServiceHandle, 2 RegisterService, 3 UnregisterService, 4 DetachClient.
 // The same command ids serve as TIPC commands (message type - 16).

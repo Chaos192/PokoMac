@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Adapted from SuperMarioWonderRecomp runtime/src/nvn/nvn_shaders.{h,cpp} (MIT, Copyright (c) 2026 BelmanteGu); changes: namespace, cache lookup.
 //
 // NVN shader stages -> the SPIR-V translated offline (SuperMarioWonderRecomp docs/nvn/TRANSLATOR.md, "Runtime side").

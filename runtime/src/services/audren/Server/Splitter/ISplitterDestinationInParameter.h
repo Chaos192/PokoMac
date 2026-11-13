@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Parameter/ISplitterDestinationInParameter.cs (Ryubing fork, MIT).
 // The C# interface lists the accessors that every splitter destination parameter provides. The C++ parameter structs in audren_types.h
 // keep their snake_case field names, so the interface is a traits template with one specialization per struct. The accessor names are the

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Host-folder volumes for fsp-srv; see fs_volume.h for the model. The journal idea (committed folder, copy-on-write work folder,
 // tombstones, commit decided by one rename) is from smo-recomp runtime/fs/nnfs.c (GPL-3.0); the code is new.
 #define _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING

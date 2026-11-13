@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 //! Checks before Set up starts: free disk space, write access to the game folder (writecheck.rs), Vulkan, RAM, and a warning
 //! for the Intel Core CPUs that crash under long heavy loads; on Linux also Proton, which runs the shader translator and the

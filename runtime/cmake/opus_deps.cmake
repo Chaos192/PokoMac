@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 # Portions Copyright (c) 2026 Chaos192
 # libopus 1.5.2 (BSD-3-Clause, Xiph.Org) for hwopus: the decoder objects and the Switch 2 hardware audio codec (src/services/audio_opus.cpp).

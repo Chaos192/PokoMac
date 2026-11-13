@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // HDR and colour math (hdr_math.h): pure functions with no state. Covers the sRGB and SMPTE ST 2084 (PQ) transfer functions,
 // the BT.709 <-> BT.2020 primaries conversion, the game's tone-map curve (cubic toe, linear middle, rational shoulder) with the
 // shoulder extension that moves its asymptote to a display's peak, and the HDR10 and scRGB encodes of a scene-linear colour

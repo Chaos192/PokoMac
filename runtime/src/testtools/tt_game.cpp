@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // The test tooling's side of the game boundary (docs/GAME_BOUNDARY.md): the guest memory helpers every probe uses, the generic script steps
 // @peek and @poke, and the entry points tt_core.cpp calls for the game's own probes, which go to the registered game's tt::GameProbes
 // (nxrt/game.h Info::probes; Metroid Prime Remastered: games/mpr/mpr_tt_probe.cpp). Without a table the frame source "hook" registers nothing,

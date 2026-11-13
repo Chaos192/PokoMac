@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Texture content override (S17): lets the host replace the pixels of a small BC7 texture the game uploads, by its content.
 // Used for the button prompt icons (src/gfx/play/prompts.cpp): the game's own 36x36 icons are replaced by Xbox, PlayStation or
 // keyboard and mouse icons. The hook runs on the render thread inside the texture upload; it must be quick and thread safe.

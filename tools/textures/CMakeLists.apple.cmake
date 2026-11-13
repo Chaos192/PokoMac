@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Portions Copyright (c) 2026 Chaos192
 # macOS (Apple silicon) build of astc2bc7: bc7e.ispc compiled for NEON, astcenc's NEON decompressor linked statically into
 # libastc2bc7.a (one archive, so the runtime links astc2bc7 and bc7e_ispc as on Windows). scripts/build_mac.sh runs it.

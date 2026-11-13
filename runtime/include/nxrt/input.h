@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Input event queue of the platform layer (S4b). The SDL3 platform code (platform.h) turns window, keyboard, mouse and
 // gamepad events into the small POD `Event` below and pushes them here; later streams (game input mapping, PC features) drain
 // the queue. No game mapping lives here. Thread safe: one producer (the thread that pumps the platform) and any consumers.

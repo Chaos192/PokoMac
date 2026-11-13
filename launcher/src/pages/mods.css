@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 */
 /* Mods (pages/mods.js): a mod's name with what it changes under it, the order and on/off on the right. */
 .mods .row-label.mods-label { display: flex; flex-direction: column; gap: 2px; max-width: none; flex: 1 1 auto; min-width: 0; }
 .mods .row-control.cluster { flex: none; gap: var(--space-1); }

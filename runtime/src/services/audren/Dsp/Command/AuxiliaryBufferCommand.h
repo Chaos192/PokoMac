@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/Command/AuxiliaryBufferCommand.cs (Ryubing fork, MIT).
 // Guest memory: the C# IVirtualMemoryManager reads/writes become direct accesses through GuestPtr; memoryManager parameters are dropped.
 // C# converts the float buffer to ints in place (MemoryMarshal.Cast aliasing). Here the int views are scratch vectors of the same size;

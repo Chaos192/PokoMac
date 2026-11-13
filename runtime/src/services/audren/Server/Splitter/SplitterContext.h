@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/Splitter/SplitterContext.cs (Ryubing fork, MIT).
 // Owns the splitter states and the splitter destinations (version 1 or version 2, chosen by the revision), and parses the splitter update
 // from the user input buffer.

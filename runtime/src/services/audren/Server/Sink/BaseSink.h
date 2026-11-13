@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/Sink/BaseSink.cs (Ryubing fork, MIT). Base server state of an audio sink.
 //
 // C# calls the virtual CleanUp() from this constructor, and C# dispatches it to the derived override even during base

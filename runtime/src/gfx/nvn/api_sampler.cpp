@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // NVNsamplerBuilder and NVNsampler through the typed thunks: plain data in the guest objects, no host resource.
 //
 // Layout. The parameter block (SamplerData, 48 bytes) is the SamplerParams layout of smo-recomp runtime/gfx/nvn_front.h, used

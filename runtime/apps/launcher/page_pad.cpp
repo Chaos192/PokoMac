@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Controller tab: stick dead zones, look inversion and sensitivity, trigger point, rumble, motion controls, the face button labels, and the button layout (what each
 // controller button presses on the Switch pad).
 #include <algorithm>

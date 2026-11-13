@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Module loader and linker: maps an AArch64 ELF64 image (what nx2elf produces from an NSO, or any ET_DYN/ET_EXEC AArch64 ELF)
 // at its base address, applies its dynamic relocations, resolves imports (other modules -> host data -> HLE handlers -> weak null
 // -> logging stub), registers lifted functions in the call_indirect table and runs the init array.

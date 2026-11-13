@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //! Profiles: several players, each with their own save, on one install (#282).
 //!
 //! The game keeps an account save at <save_dir>/account/<uid>/, and the uid comes from [account] uid in pkp.ini. A profile is a name

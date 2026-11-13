@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/Command/BiquadFilterCommand.cs (Ryubing fork, MIT).
 // The C# property `Memory<BiquadFilterState> BiquadFilterState` shares its name with the type; the type is written qualified
 // inside this class so the member name does not change the meaning of the type name.

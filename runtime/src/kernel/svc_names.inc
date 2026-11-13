@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Source: https://switchbrew.org/wiki/SVC (first table, retrieved 2026-10-21). Newest name where a number has several.
 NXRT_SVC(0x01, "SetHeapSize")
 NXRT_SVC(0x02, "SetMemoryPermission")

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //! Unpacks the add-on (DLC) RomFS of a decrypted `.nsp` into `<aoc>/<16-digit hex id>/romfs/`, the layout dump.rs
 //! finds and pkp's `[fs] aoc_dir` serves.
 //!

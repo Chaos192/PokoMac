@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // FSR 1 spatial upscaler (fsr1_spatial.h).
 #include "extras/fsr1_spatial.h"
 

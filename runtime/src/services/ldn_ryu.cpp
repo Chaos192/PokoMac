@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // ldn:u over RyuLDN (ldn_ryu.h, net/ryuldn.h). The command table and state machine are services/ldn.cpp's MitmLdn; what the master
 // needs follows Ryujinx (MIT, Copyright (c) Ryujinx Team and Contributors), src/Ryujinx.HLE/HOS/Services/Ldn/UserServiceCreator:

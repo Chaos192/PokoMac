@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // SDL3 platform layer (declarations in include/nxrt/platform.h): window, fullscreen, raw relative mouse, gamepad hot-plug,
 // Vulkan surface, and the translation of SDL events into nxrt::input events (include/nxrt/input.h).
 #include "nxrt/platform.h"

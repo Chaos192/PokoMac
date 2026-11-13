@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // A minimal JSON reader: a recursive parser over a value tree, enough for the files the cheats code reads (the saved cheat table and

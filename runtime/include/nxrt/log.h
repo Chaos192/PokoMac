@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Leveled logging to a file (and optionally stderr). Thread safe; never allocates unbounded memory.
 // Line format:  [  12.345678 I t1234 name] tag: message
 //   seconds since log_init, level letter (E W I D T), host thread id, guest/host thread name (log_set_thread_name).

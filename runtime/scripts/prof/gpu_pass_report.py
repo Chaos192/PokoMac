@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """GPU time per render-pass kind from a frame trace taken with [prof] gpu_passes = true (NXRT_PROF_TRACE + NXRT_PROF_GPU_PASSES=1).
 
     python gpu_pass_report.py <trace.txt> [--skip S] [--seconds N] [--top K]

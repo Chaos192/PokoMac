@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/Command/FillBufferCommand.cs (Ryubing fork, MIT).
 // Initialize takes the server splitter destination as a template argument (the splitter port is not in the tree yet). It must provide
 // GetV1RefOrNull() / GetV2RefOrNull() returning a pointer to a destination (nullptr when absent), and each destination's

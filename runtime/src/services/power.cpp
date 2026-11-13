@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Power services (S3c): apm (IManager), apm:am (IManager, 8.0+), apm:p (IManagerPrivileged, 1.0-7.0.1), apm:sys (ISystemManager),
 // psm (IPsmServer) with its IPsmSession, and the apm ISession that the game reads and writes its performance configuration through.
 // Adapted from ryubing (MIT, Ryujinx fork) src/Ryujinx.HLE/HOS/Services/Apm/*.cs and src/Ryujinx.HLE/HOS/Services/Ptm/Psm/*.cs

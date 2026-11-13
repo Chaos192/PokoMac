@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/DataSourceHelper.cs (Ryubing fork, MIT). Static class -> struct with static members.
 //
 // Not ported: ToFloatAvx/ToFloatSse2/ToFloatAdvSimd/ToIntAvx/ToIntSse2/ToIntAdvSimd (SIMD variants, see audren_common.h). ToFloat and

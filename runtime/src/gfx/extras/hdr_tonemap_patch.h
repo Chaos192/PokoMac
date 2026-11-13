@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // HDR patch of the game's tone-map fragment shader (S14).
 //
 // The shader maps the scene colour through a per-channel curve (cubic toe, linear middle, rational shoulder) into [0,1], samples two 3D

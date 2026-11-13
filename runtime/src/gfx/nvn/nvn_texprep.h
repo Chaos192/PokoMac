@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Background preparation of texture upload data (S21). prepare_texture (nvn_texdata.cpp) reads the texture's storage in the game's
 // memory, hashes it, reads the BC7 cache file and untiles; on the render thread, at an area load, that is a few dozen textures in one frame, and a
 // few huge sparse volumes (23 and 46 MB each) that take 15 to 60 ms apiece. This module runs the same function on worker threads before the

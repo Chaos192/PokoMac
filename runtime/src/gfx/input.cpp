@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Input event queue, raw mouse accumulator and gamepad info table (declarations in include/nxrt/input.h).
 // Every container is guarded by its own mutex: the platform thread pushes, any thread may drain or read.
 #include "nxrt/input.h"

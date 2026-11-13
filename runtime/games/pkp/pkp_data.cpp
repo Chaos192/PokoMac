@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Pokémon Pokopia: who the game is, what its files are called and its factory controls.ini (nxrt/game.h Info). Pure data, no runtime:
 // the launcher links this part alone, so the factory settings live here (its Keyboard page and Reset start from them).
 #include "pkp_game.h"

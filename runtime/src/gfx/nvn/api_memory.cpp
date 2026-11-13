@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // NVNmemoryPool, NVNbuffer, NVNtexturePool and NVNsamplerPool (family memory).
 //
 // Host objects: a memory pool, a texture pool and a sampler pool are host objects (nvn_core.h) behind the guest object's

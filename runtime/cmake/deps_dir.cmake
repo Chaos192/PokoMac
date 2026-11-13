@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Portions Copyright (c) 2026 Chaos192
 # Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 # NXRT_DEPS_DIR: where the pinned third-party archives are downloaded to (gfx_deps, opus_deps, lua_deps, tls_deps). One folder shared by

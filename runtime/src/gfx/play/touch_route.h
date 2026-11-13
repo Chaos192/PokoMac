@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Play mode: where a mouse event goes when it came from a finger. SDL turns a touch into mouse events (motion and the left button) and the
 // platform layer marks those with input::kFlagTouch. A finger should work the menus (the game's own touch screen, the pointer over its menus,
 // the F1 menu), but it is not a mouse in play: a tap must not fire the left-click action (use the tool), and touching must not switch the

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 // The NVN-on-Vulkan back end (S4d). install_backend() replaces the logging stubs of the NVN shell (nvn.h) with real
 // implementations and starts the render thread that replays the game's command lists on a gfx::Device.

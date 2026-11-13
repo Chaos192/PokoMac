@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Camera aim: the highlighted cell or area of an ability or tool is aimed where the camera looks, not where the character faces.
 // [pkp] camera_aim (on by default; 0 turns it off).
 //

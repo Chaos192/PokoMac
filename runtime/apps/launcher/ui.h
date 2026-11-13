@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Launcher UI toolkit: plain Win32 with Common Controls v6, the same toolkit and look as the setup tool (system message font,
 // white window colour, grey hint text, 16 px margins). A launcher page is a child window of the tab control. A page builds its
 // controls with a Form (rows of label + control) and the Form remembers how each control reads from and writes to a Settings

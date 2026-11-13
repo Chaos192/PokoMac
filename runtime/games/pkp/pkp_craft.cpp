@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Crafting search (#324): in the crafting screen a "(Y) Search" key guide sits in the screen's own key guide; Y (keyboard F through the default
 // btn_y binding) or a left click on it asks for a word on the game's own keyboard (the one of name entry, filled with the current word), and the
 // recipe list then keeps only the recipes whose item name holds that word (any case), on every tab and after the game's own Sort, until Cancel

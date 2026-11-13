@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // NVNdevice, NVNqueue, NVNsync, NVNevent and NVNwindow (S4d). These are heavy objects: Initialize creates the host
 // object (nvn_core.h) and binds it to the guest object (GuestHeader); Finalize unbinds it. Every function checks that the
 // guest object is ours (host_of) and answers 0 / null / NATIVE_ERROR when it is not. Anything that touches the GPU goes

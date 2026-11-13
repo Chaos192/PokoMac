@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // The request recorder ([ipc] record, src/ipc/record.cpp): the lines a replay (tests/ipc_replay, tools/services/ipc_diff) needs, the
 // objects a reply hands out numbered so later requests name them, and a service's close.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // SVC dispatch table. Calling convention of every handler (Switchbrew "SVC" page, AArch64 column): inputs in x0..x7, the result
 // code in w0 (x0 upper half zero) and further outputs in x1.. exactly as documented per call. Handlers are plain functions on the
 // guest context; a handler that blocks blocks the calling host thread (a guest thread is one host thread).

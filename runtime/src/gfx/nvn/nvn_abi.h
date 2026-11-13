@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Typed entry points for the NVN back end (S4d).
 //
 // An NVN function is written as an ordinary C++ function with the types of the NVN C header (third_party/nvn/nvn.h):

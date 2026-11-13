@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Shared support for the Server/Effect ports (S3c). It holds what the C# keeps on the parameter structs and interfaces
 // (IEffectInParameter, IEffectOutStatus, the IsChannelCount* members of the Parameter/Effect structs, the Statistics.Reset

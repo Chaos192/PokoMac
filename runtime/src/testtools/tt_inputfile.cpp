@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Input trace file: text serialisation and recording logic. The format is documented in include/nxrt/tt_inputfile.h.
 #include "nxrt/tt_inputfile.h"
 

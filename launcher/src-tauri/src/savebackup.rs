@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 //! Save backups: copies of the active profile's save, made on a timer while the game runs (when the player chose it), once when the game
 //! ends, and on request, so a progression-stopping bug can be rolled back. Nothing here touches the runtime: it works on the committed

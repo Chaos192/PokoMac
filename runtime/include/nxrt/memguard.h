@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Memory guard: a background thread polls the process's private commit (PrivateUsage); past the limit it calls the
 // on_exceed callback (default: write the report file, flush, TerminateProcess(3)). The footprint is logged every 30 s; one warning at 75% of the limit.
 // The report goes to crash_report_path() (the crash report's file name): reason "memory limit", the footprint, every gauge, the last 30 s of frame times.

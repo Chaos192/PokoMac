@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Texture content override hook (nxrt/tex_override.h): storage of the hook, the call from the upload path, the re-upload request.
 #include <atomic>
 #include <mutex>

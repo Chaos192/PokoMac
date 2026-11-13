@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Internal: ELF64 structures and constants (AArch64, little endian) used by the module loader.
 #pragma once
 #include <cstdint>

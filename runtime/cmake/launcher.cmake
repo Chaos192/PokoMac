@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # The pre-game launcher (apps/launcher): plain Win32, static runtime, no installer. It edits controls.ini with the same settings code the game uses
 # (src/gfx/play/play_types.cpp, play_config.cpp; SDL3 is linked only for its key name table), starts the setup tool for the first-time setup
 # and starts the game exe. Included from gfx.cmake (needs the SDL3 target). Its branding and factory settings are those of one game module

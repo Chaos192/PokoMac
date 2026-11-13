@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // "Find a button" on the Controller tab: which row of the tab a physical controller button belongs to, and a poller that waits for the
 // first press on a connected game controller. No window code here; the modal window is in ui.cpp (capture_pad_button).
 #pragma once

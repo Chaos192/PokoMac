@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // What a live patch reaches (runtime/src/cheats/reach.*): the code the patcher makes ready on its worker before the swap, so no guest
 // thread waits for the build's compiler at the patch's first run. Real ASM cheats of Pokopia 2.0.1 (tomvita's Leafage 5x5 and Water Gun

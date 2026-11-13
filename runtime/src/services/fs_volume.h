@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Host-folder file systems for fsp-srv (S3c): the volume behind an IFileSystem. Two kinds share one class:
 //   * direct: reads and writes go straight to a folder (a read-only variant serves the loose RomFS folder as a file system);
 //   * journalled (save data): the folder holds the COMMITTED state and is never written outside commit(). Writes land in a work folder

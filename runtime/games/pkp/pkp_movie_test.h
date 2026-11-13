@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Test hook: plays a movie through the game's own player and saves decoded frames ([test] movie = MV02). See pkp_movie_test.cpp.
 #pragma once
 #include "nxrt/abi.h"

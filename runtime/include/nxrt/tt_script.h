@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Scripted-run DSL (S5): text format, parser and step list. The runner (tt_runner.cpp) executes the steps frame by frame.
 // Grammar (one step per line, '#' starts a comment, blank lines ignored, keywords are case-insensitive, numbers decimal or 0x hex,
 // floats decimal). A "frame" is one game frame boundary (tt.h). Waits count frames from the moment the step starts.

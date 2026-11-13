@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // PCM output and capture without the audio renderer (S3c): audout:u and audin:u (nn::audio::detail::IAudioOutManager / IAudioInManager)
 // and their IAudioOut / IAudioIn streams. Each started stream has a pacing thread that hands the appended buffers on (to the host sink,

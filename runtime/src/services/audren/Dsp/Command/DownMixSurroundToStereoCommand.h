@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/Command/DownMixSurroundToStereoCommand.cs (Ryubing fork, MIT). The C# Coefficients array is copied
 // into the command (the C# keeps a reference to the server's array).
 #pragma once

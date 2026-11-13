@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // NVN enum values -> Vulkan enum values (S4d). The switch tables are nvn_enums.cpp.
 // Every function takes the raw NVN enum value (an int, so the caller needs no NVN type) and never fails: an unknown value
 // gives the documented default and bumps unknown_enum_count() (so a test or the log can show it).

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Pokémon Pokopia, the core part of the game module (pkp_game.h): the data part plus the title facts. Needs the runtime library,
 // not the graphics one.
 #include "pkp_game.h"

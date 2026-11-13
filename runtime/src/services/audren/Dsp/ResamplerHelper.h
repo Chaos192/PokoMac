@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/ResamplerHelper.cs (Ryubing fork, MIT). Scalar paths only: the C# SSE41/SSE3/AVX fast
 // paths are not ported; the scalar loops here are the reference they must match. The lookup tables are copied verbatim
 // from the C# (Q15 values; the *F tables divide them by 32768). Sample values stay in int16 units: the C# does not scale

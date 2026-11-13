@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Pass-through tessellation control shader for NVN programs that have an evaluation shader only. NVN then runs the fixed-function
 // patch pass-through with the levels of nvnCommandBufferSetInner/OuterTessellationLevels; Vulkan always needs a control shader.
 //

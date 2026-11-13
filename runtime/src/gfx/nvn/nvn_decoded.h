@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // The "plain data" NVN objects: builders, state objects, samplers and texture views. The game allocates them (at the sizes
 // of the real driver) and passes pointers; they never hold a host resource, so each family keeps its fields inside the guest
 // object (a private layout, always at most the size of the NVN struct) and the back end reads them through the Info structs

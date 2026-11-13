@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Chaos192
 // nxwin: MSVC CRT names, the registry (always empty), the console, language ids, and `const char*` overloads of the W path functions
 // (std::filesystem::path::c_str() is a UTF-8 `const char*` here where it is `const wchar_t*` on Windows).

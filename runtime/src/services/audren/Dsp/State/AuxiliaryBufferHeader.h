@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/State/AuxiliaryBufferHeader.cs (Ryubing fork, MIT).
 // C# IVirtualMemoryManager reads/writes become direct guest pointer accesses (GuestPtr); the memoryManager parameter is dropped.
 #pragma once

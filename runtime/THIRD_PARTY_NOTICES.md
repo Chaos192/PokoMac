@@ -30,7 +30,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## pokopia-native (MIT; ampere-lower/ GPL-3.0-or-later)
+## pokopia-native (MIT)
 
 Source: https://github.com/xFractals/pokopia-native at 7c3655d, `LICENSE`, reproduced verbatim:
 
@@ -64,19 +64,18 @@ The GPU-made indirect quad arguments (`src/gfx/nvn/nvn_replay.cpp` quad_args_gpu
 
 `third_party/pokopia-coop/` is pokopia-native's co-op module, `windows/src/coop/{coop.h,coop_int.h,*.c}` pinned at commit 035bd9c2905f29eba5b58231bfe97304508a3369 (035bd9c), under the same MIT licence (above). The files are unchanged except for a first line `// From pokopia-native (MIT) windows/src/coop/<file> @4a72d23` and two modifications: `coop_int.h` and `coop_mpnet.c` carry the relay UDP extension (game datagrams over UDP through a relay that supports it, only between our builds; every change is marked `// pokopia-recomp extension: relay UDP`, the protocol is in `launcher/src-tauri/src/relay/mod.rs`), and `coop.h`, `coop_int.h`, `coop_ldn.c`, `coop_plat.c` and `coop_disc.c` carry the LAN sweep and mDNS responder (only on Windows without DNS-SD, Wine and Proton: scanning sweeps the LAN for hosts, hosting answers mDNS with its DNS-SD records, and the network-profile hint is skipped under Wine; marked `// pokopia-recomp extension: LAN sweep` or `mDNS responder`, `[net] lan_sweep`); its tests and `nxnative/` glue are not included. The launcher's relay (`launcher/src-tauri/src/relay/engine.rs`, `--host`) is a Rust port of its `windows/tools/coop-relay` at the same commit, with the same extension. The ldn and bsd services call it for `[net] protocol = native` (Link Play with pokopia-native builds).
 
-Its `ampere-lower/` folder is separate: it is GPL-3.0-or-later, not MIT. Per its `NOTICE.md` it is a cut-down build of the `ampere-spirv` tool from the Eden-NS2 emulator fork (https://github.com/0x2593/Eden-NS2, GPL-3.0-or-later): the Switch 2 (Ampere) shader capture and the Ampere-to-Maxwell lowering headers from `src/shader_recompiler/frontend/ampere/`, with `main.cpp` reduced to the lowering stage. The headers are unchanged except for four Pokopia fixes (FSEL operand modifiers, HFMA2 `.H0_NH1` lane swap). Its `LICENSE` is the GPL-3.0 text, the same as the `LICENSE` file at the repository root.
 
-## smo-recomp, ScarletNX and ssbu-recomp (GPL-3.0)
+## smo-recomp, ScarletNX and ssbu-recomp (GPL-3.0; facts and design only)
 
 `src/media/movie_mf.cpp` (the `movie::` library on Media Foundation) follows the design of smo-recomp `runtime/services/nnmovie_mf.c` (GPL-3.0): the object layouts of the library, the decoder's two buffer pools, and the token that carries a decoded sample from the extractor to a decoder. The code is rewritten for nxrt (C++, a decode-ahead worker, edit lists, the plain exported wrappers instead of virtual calls).
 
-The nxrt parts that come from smo-recomp and ScarletNX are under GPL-3.0, like nxrt itself (GPL-3.0-or-later). The same holds for the ssbu-recomp references in `include/nxrt/diag.h`, `src/eh/*` (facts read from `runtime/eh_runtime.h` and `runtime/nncxxrt.c`: header layout of the SDK's libc++abi, the non-unique-name bit) and `src/core/hooks.cpp` (idea only). Upstream licence files: smo-recomp `LICENSE` (GPL-3.0), ScarletNX `LICENSE` (GPL-3.0; its source headers say GPL-3.0-or-later), ssbu-recomp `LICENSE` (GPL-3.0). The GPL-3.0 text for nxrt is the `LICENSE` file at the repository root.
+The services first adapted from ScarletNX were rewritten clean-room on 2026-11-12: what is left of these projects is facts and design ideas. The same holds for the ssbu-recomp references in `include/nxrt/diag.h`, `src/eh/*` (facts read from `runtime/eh_runtime.h` and `runtime/nncxxrt.c`: header layout of the SDK's libc++abi, the non-unique-name bit) and `src/core/hooks.cpp` (idea only). Upstream licence files: smo-recomp `LICENSE` (GPL-3.0), ScarletNX `LICENSE` (GPL-3.0; its source headers say GPL-3.0-or-later), ssbu-recomp `LICENSE` (GPL-3.0). The GPL-3.0 text for nxrt is the `LICENSE` file at the repository root.
 
 ## LLVM libc++abi (Apache-2.0 with LLVM exceptions)
 
 `src/eh/typeinfo.cpp`, `src/eh/unwind.cpp` and `include/nxrt/eh.h` follow the behaviour and data layouts of LLVM libc++abi (`libcxxabi/src/private_typeinfo.cpp`, `cxa_exception.h`, `cxa_exception.cpp`, `cxa_personality.cpp`), read from the llvm-project repository on 2026-10-21. The code was written from that behaviour and from the Itanium C++ ABI; no libc++abi source text was copied. Licence of the upstream files: Apache License v2.0 with LLVM Exceptions (https://llvm.org/LICENSE.txt), which is compatible with GPL-3.0-or-later for this use. The licence text in the release is `licenses/LICENSE.libcxxabi.Apache-2.0-LLVM-exception.txt` (source: `tools/release/licenses/`).
 
-## recomp `oracle/e2e/rt/eh_rt.cpp` (GPL-3.0-or-later, S1)
+## recomp `oracle/e2e/rt/eh_rt.cpp` (S1, the same project)
 
 `src/eh/unwind.cpp` and `src/eh/catch_call.cpp` rework the table walk and landing protocol of this test-only runtime (S1, same project, same licence; the file itself has since been removed).
 
@@ -184,7 +183,7 @@ Copyright 2015-2026 The Khronos Group Inc. Files fall under Apache-2.0 or MIT (S
 
 ### Tools linked at build time
 
-`nxrt_gfx` links `tools/textures` (astc2bc7, GPL-3.0-or-later; it bundles ARM astcenc 5.7.0, Apache-2.0, loaded as decoder DLLs next to the executable, and bc7e from bc7enc_rdo, Apache-2.0) and `tools/tiling` (GPL-3.0-or-later). Their notices are in those folders.
+`nxrt_gfx` links `tools/textures` (astc2bc7, PokoMac's own; it bundles ARM astcenc 5.7.0, Apache-2.0, loaded as decoder DLLs next to the executable, and bc7e from bc7enc_rdo, Apache-2.0) and `tools/tiling` (GPL-3.0-or-later). Their notices are in those folders.
 ## libvpx 1.16.0 (BSD-3-Clause; x86inc assembly macros ISC)
 
 Linked statically into Switch 2 builds for the host nn::codec VP9/VP8 decoders (src/media/video_codec.cpp, cmake/media_deps.cmake), built
@@ -300,9 +299,9 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-## yuzu and Eden (GPL-2.0-or-later)
+## yuzu and Eden (GPL-2.0-or-later; no code left)
 
-`src/services/fs_romfs.cpp` adapts yuzu's `src/core/file_sys/fsmitm_romfsbuild.cpp`. `src/services/audio_out.cpp` and `src/services/vi_nv.cpp` take layouts from Eden and yuzu, which ScarletNX also ports (ScarletNX is covered above). `src/services/hid_shm.h` follows the Eden HID layout as cross-checked through ScarletNX; its offsets are Ryujinx's (see the Ryujinx section). The upstream licence is GPL-2.0-or-later; Eden's copies of the same files are marked GPL-3.0-or-later. nxrt is GPL-3.0-or-later, and GPL-2.0-or-later code may be used under GPL-3.0. The GPL-2.0 text, with a header naming these files, is `licenses/LICENSE.yuzu-Eden.GPL-2.0.txt` in the release (source: `tools/release/licenses/LICENSE.yuzu-Eden.GPL-2.0.txt`).
+The services that first took code or layouts from yuzu and Eden (`src/services/fs_romfs.cpp`, `audio_out.cpp`, `vi_nv.cpp`, `hid_shm.h`) were rewritten clean-room on 2026-11-12; no yuzu or Eden code is left.
 
 ## DejaVu fonts (Bitstream Vera licence, reference only)
 

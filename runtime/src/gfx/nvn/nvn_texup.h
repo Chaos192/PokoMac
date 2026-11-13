@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Background upgrade of the ASTC -> BC7 disk cache ([gfx] astc_quality = high; implementation nvn_texup.cpp).
 //
 // The first time a texture is needed and the cache has no entry of the high preset for it, the render thread (or a texprep job) uses what is there

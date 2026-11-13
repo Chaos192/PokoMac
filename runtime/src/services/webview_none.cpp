@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // PokoMac has no web view (AnySwitch's webview.cpp, its macOS and Windows hosts and the in-place package reader it uses are not taken):
 // this is the part of include/nxrt/webview.h that AnySwitch's am.cpp and hid.cpp (by Chaos192, taken as they are) ask, answered for a
 // build without one. view_enabled() and online_enabled() are false and no host is ever registered, so the web and offline applets

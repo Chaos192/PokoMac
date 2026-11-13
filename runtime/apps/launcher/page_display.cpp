@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Display tab: window mode and size, frame rate limit, VSync, field of view, HDR and low latency. Extras tab: HDR, low latency and the frame rate counter.
 // This page is the pattern for the others: build() describes the rows, the Form moves values between the controls and Settings.
 #include <algorithm>

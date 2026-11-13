@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Resources for pkp.exe: the manifest (UTF-8 code page, long paths, asInvoker) and the version information.
 // PKP_VER_MAJOR / MINOR / PATCH and PKP_VER_TEXT come from the build (game-build/CMakeLists.txt, -DPKP_VERSION=0.1.0).
 #include <winres.h>

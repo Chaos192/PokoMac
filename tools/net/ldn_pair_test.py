@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 """Two-process Link Play test on one machine: two copies of the services test binary (runtime/tests/services/test_ldn_peer.cpp,
 `nxrt_services_test ldnpeer`) host and visit a local wireless network through the runtime's relay and exchange UDP datagrams, broadcasts

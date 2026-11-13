@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Pokémon Pokopia, the engine's own temporal anti-aliasing (pkp_taa.h). Offsets in `main` of the 2.0.1 update (base 0x7100000000).
 //
 // What the engine has (KTGL): render passes TemporalAA (plTemporalAAConstants), TemporalAA2, TemporalAA3 (plTemporalAA3Constants, pass vtable

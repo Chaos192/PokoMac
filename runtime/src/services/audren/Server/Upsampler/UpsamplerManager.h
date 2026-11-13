@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/Upsampler/UpsamplerManager.cs (Ryubing fork, MIT). A fixed pool of upsampler slots,
 // each backed by one TargetSampleCount-sized region of the upsampler work buffer.
 #pragma once

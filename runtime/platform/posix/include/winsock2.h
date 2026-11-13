@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Chaos192
 // nxwin <winsock2.h>: Winsock over BSD sockets. SOCKET is an fd; WSAGetLastError is errno (WSAE* are the errno values), with
 // EINPROGRESS reported as WSAEWOULDBLOCK the way Winsock reports a non-blocking connect. select() ignores its first argument as

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Chaos192
 // macOS: the HDR capability of the screen that shows the window (or the main screen), from NSScreen's extended dynamic range values.
 // EDR headroom is relative to SDR white: max_nits = headroom * sdr_white_nits, with SDR white taken as the 100-nit reference of the

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/Command/PcmFloatDataSourceCommandVersion1.cs (Ryubing fork, MIT).
 // Initialize takes the server VoiceInfo as a template argument (members as in PcmInt16DataSourceCommandVersion1.h).
 // Output: the float samples are converted by PcmHelper.ConvertSampleToPcmInt16 (x * 32767, saturated and truncated) and then written as

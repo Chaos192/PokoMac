@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Itanium C++ ABI typeinfo matching: the personality routine's decision "does this handler catch the thrown type" (can_catch) over the
 // guest's std::type_info objects, read in place. Covers exact types, derived-to-base class catches (single, multiple and virtual
 // inheritance, ambiguity and access: only an unambiguous PUBLIC base matches), pointer catches with qualification conversion, pointer

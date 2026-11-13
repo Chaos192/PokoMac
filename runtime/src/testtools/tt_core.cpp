@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 // Test tooling core (S5): configuration, the frame boundary, virtual clock, seeded RNG, per-frame hash and trace, result file,
 // input recording / replay, crash and freeze plumbing. See include/nxrt/tt.h.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/Command/PerformanceCommand.cs (Ryubing fork, MIT). The C# PerformanceEntryAddresses pool is dropped:
 // the command keeps a copy of the entry addresses (a view of the performance entry memory).
 #pragma once

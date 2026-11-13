@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // NVNtexture entry points (family texture, S4d): initialize and finalize, getters, the storage queries of the builder,
 // and texel access (WriteTexels, ReadTexels, Flush, Invalidate). A texture is a host object (be::Texture) bound to its guest
 // object; its storage is the game's memory inside a pool (be::MemoryPool::base + offset), in the block-linear layout of

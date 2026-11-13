@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Gauges for long-session monitoring (S34). A gauge is a named integer that a subsystem can report on request: the number of live
 // textures, the size of a cache, bytes held by a pool. The soak sampler (`[diag] soak_csv`) reads all gauges every few seconds and writes
 // one JSON line per sample; nothing runs when the key is empty, and registering a gauge costs one map insert.

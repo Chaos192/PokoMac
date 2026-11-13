@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Texture storage layout (family texture). Rules, from the builder:
 //   * dimensions per target: 1D has height 1; arrays and cube arrays take their layer count from the depth field (cube = 6
 //     faces, cube array = depth layer-faces); 3D has depth slices and one layer; 2D, rectangle and multisample have depth 1.

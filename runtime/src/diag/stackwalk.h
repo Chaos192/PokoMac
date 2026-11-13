@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Internal: host stack capture without allocation (safe to call while another thread is suspended).
 #pragma once
 #include <windows.h>

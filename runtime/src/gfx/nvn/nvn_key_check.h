@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // [nvn] shader_key_check: a debug diagnostic. SetShaders hashes each stage's code block once (Program::code_hash). If the game fills or moves
 // that code after SetShaders (a GPU copy, a pool rewrite), the program keeps a stale shader without any sign. With the key on, the replay
 // thread re-hashes the blocks a program points at when it is first drawn (and every Nth draw with a value above 1), compares with the key

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Controls tab: mouse sensitivity (horizontal, vertical, the alternate body's camera; mpr: morph ball), mouse inversion and the wheel, and the button icon style.
 // The sensitivity sliders count tenths of the Source scale (1 = 0.1, 100 = 10.0). A slider only writes its value when the player
 // moved it, so a value in the settings file with more digits than the slider can show stays as it is.

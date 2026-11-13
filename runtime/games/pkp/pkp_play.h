@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Pokémon Pokopia, the PC features of play mode (pkp_play.cpp): native render resolution, frame rates above 60 at the right game speed,
 // the raw mouse camera; keyboard and mouse button prompts (pkp_kbm.h). Wired into play mode's GamePlay table by pkp_game.cpp.
 #pragma once

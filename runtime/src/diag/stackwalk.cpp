@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 // Pattern from smo-recomp runtime/core/hostrt.c crash_filter (RtlVirtualUnwind loop).
 #include "stackwalk.h"

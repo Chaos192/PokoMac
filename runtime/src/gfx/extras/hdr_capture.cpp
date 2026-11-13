@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // HDR capture decoder (hdr_capture.cpp): pixel unpacking (PQ 10-bit words, IEEE half floats, 8-bit sRGB), the previews, the
 // statistics and the PFM writer behind hdr_capture.h. Uses the transfer functions and primaries from hdr_math.h.
 #include "extras/hdr_capture.h"

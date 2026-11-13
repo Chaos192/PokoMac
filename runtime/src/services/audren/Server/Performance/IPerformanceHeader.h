@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/Performance/IPerformanceHeader.cs (Ryubing fork, MIT).
 // The C# interface becomes a C++20 concept (see IPerformanceDetailEntry.h for the reasoning).
 #pragma once

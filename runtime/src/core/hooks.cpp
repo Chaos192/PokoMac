@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Site hooks (hooks.h): nx_site_inline / nx_site_midhook / nx_hook_entry, the runtime half of the lifter's site lists.
 // Design: an immutable snapshot (address -> hooks of each kind) published through an atomic pointer. Registration copies the snapshot,
 // edits the copy and publishes it; retired snapshots stay allocated until hooks_clear() because a guest thread may still be reading one.

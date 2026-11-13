@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // HDR and colour math (hdr_math.cpp): the arithmetic behind hdr_math.h. Pure functions, plain float math.
 #include "extras/hdr_math.h"
 

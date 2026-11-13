@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Low-latency modes (S14): NVIDIA Reflex through VK_NV_low_latency2 and AMD Anti-Lag 2 through VK_AMD_anti_lag.
 //
 // One frame of the game crosses three threads: the guest main thread (Update: pacing, input sampling, simulation), the host render thread

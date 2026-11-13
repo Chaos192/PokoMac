@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Frame-time policy and the guest hooks that feed it to the game. See include/nxrt/timestep.h and docs/S11.md.
 //
 // Threads: the Update hook, the mid hooks of Update, the friction hook, the render-timing hook and the movie hook all run on the guest main

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Pokémon Pokopia, the graphics memory pools for render sizes above the console's (pkp_gfx_heap.cpp): the game sizes its NVN pools for
 // 1920x1080 targets; play mode's render resolution (pkp_play.cpp) grows them, and the arena they come from, by what the larger targets need.
 #pragma once

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Standalone cheat-VM test: compiles runtime/src/cheats/cheat_vm.cpp with no other runtime dependency, so it runs everywhere.
 #   cmake -S runtime/tests/cheats -B build/cheat-test && cmake --build build/cheat-test && ./build/cheat-test/nxrt_cheat_vm_test
 cmake_minimum_required(VERSION 3.20)

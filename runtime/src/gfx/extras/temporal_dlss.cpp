@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 // NVIDIA DLSS Super Resolution / DLAA through Streamline (temporal.h). Streamline (MIT headers in third_party/nvidia_streamline) is loaded at
 // run time from sl.interposer.dll; its plugins (sl.common.dll, sl.dlss.dll) and nvngx_dlss.dll (NVIDIA RTX SDK licence, not bundled: the launcher downloads it) sit next to it

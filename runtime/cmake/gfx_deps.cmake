@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Portions Copyright (c) 2026 Chaos192
 # Pinned third-party sources for the graphics shell (S4b). Every archive is fetched by URL and checked against a
 # SHA256. The archives are cached in NXRT_DEPS_DIR (shared by checkouts and worktrees, survives a clean build); the

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Keyboard tab: every action of the game with its two keys. Double-click a key to change it. Delete (or the clear button) removes
 // the selected key. The menus keep their own keys. The list rows and the edits are in bindings_edit.cpp.
 #include <windows.h>

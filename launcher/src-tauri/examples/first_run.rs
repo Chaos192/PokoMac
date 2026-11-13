@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //! The launcher's whole first-run setup without the window (release check of model b):
 //!   cargo run --release --example first_run -- <game dir> <exefs> <romfs> <tools dir> [shader limit] [jobs]
 //! Builds pkp.exe from the dump (gamebuild.rs) and then the shader cache (shaders.rs), the same code Set up runs; on Linux

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Windows display HDR query (win_display.h): whether the monitor under a window has Windows HDR (advanced colour) on, and its
 // luminance numbers. Windows only. The implementation reads the GDI device name and the HMONITOR, the CCD database for the
 // advanced-colour state and SDR white level, and a fresh DXGI factory for the luminance values. It never throws.

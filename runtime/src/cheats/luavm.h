@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Lua scripts for the cheats overlay (phase 6): an embedded Lua 5.4 (MIT, PUC-Rio; cmake/lua_deps.cmake) with a small, sandboxed API.

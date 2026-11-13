@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // [tweaks] in controls.ini: optional looks the player can change, all off by default (the game's own look). Header-only, so the launcher and
 // the game read and write the section with the same code.
 //

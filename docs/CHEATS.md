@@ -1,4 +1,4 @@
-<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 -->
 # Cheats
 
 Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch): the cheats menu, its engine and this document are AnySwitch's, brought to

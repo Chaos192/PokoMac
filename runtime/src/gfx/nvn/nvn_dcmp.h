@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Depth comparison on a colour texture: the value the console compares against, and the small by-value cache of stand-in images.
 // The game binds its default 1x1 / 8x8 black and white textures to the shadow samplers of lights without shadows (VUID-vkCmdDrawIndexed-None-06479).
 // The console's hardware compares with the RED channel of the texel, so the stand-in is a 1x1 depth image cleared to the red value of texel 0.

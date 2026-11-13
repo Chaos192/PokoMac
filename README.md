@@ -132,4 +132,8 @@ release (`licenses/`) and are listed in [CREDITS.md](CREDITS.md).
 
 ## License
 
-GPL-3.0, like the project it is based on. Third-party code keeps its own licence.
+PokoMac by Chaos192 (github.com/Chaos192/PokoMac), built on AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch), under the PolyForm
+Noncommercial License 1.0.0 ([LICENSE](LICENSE)): anyone may use, change and share PokoMac for any noncommercial purpose, keeping
+its Required Notices; no commercial use. The lifter stays GPL-3.0-or-later ([RELICENSING.md](RELICENSING.md),
+[LICENSE.GPL-3.0.txt](LICENSE.GPL-3.0.txt)). Third-party code keeps its own licence ([CREDITS.md](CREDITS.md)); every copy keeps
+[NOTICE](NOTICE).

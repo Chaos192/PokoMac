@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Inventory sort (#323): in the bag screen (X) and the container screens a "(Y) Sort" button sits in the screen's own key guide; Y
 // (keyboard F through the default btn_y binding; R (Space) where the screen uses Y itself) or a left click on the button sorts the items of the
 // panel under the cursor: part-full stacks of the same item are merged up to the game's max stack, then the stacks are ordered by the

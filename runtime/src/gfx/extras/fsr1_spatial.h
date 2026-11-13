@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // AMD FSR 1 spatial upscaler (S14): EASU then RCAS as two compute passes into float16 images the size of the output. Used by the output pass
 // (the finished picture) and by the scene upscaler (the HDR scene before the game's tone-map). The shaders are in extras_shaders.inc, the constants come from
 // fsr1_consts. In linear HDR mode the filters run on c = x*k / (1 + x*k) so values above 1 survive them.

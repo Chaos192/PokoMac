@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // The SDK's string and memory functions (strlen, strcmp, memcpy, ...) as host code.
 //
 // A game module imports these from the SDK module, so every call goes through host_import into the lifted musl code, which works one byte

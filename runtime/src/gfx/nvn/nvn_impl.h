@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Registration of the NVN implementations (S4d). Each family of entry points lives in its own api_*.cpp and exposes
 // one register function, which calls NVN_REG (nvn_abi.h) for every function it implements.
 #pragma once

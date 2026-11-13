@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/Effect/CompressorEffect.cs (Ryubing fork, MIT). The version 1 Update does nothing
 // except initialise the error info (Nintendo's behaviour, kept); only the version 2 Update applies the parameter.
 #pragma once

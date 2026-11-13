@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // CPU-side texture data preparation (S4d). No Vulkan calls: the output is plain bytes plus the VkFormat that the GPU
 // layer copies them into. Implementation: nvn_texdata.cpp.
 //

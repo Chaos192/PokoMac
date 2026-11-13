@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Frame-time statistics for the corner frame-rate counter (overlay.cpp). Pure: the caller passes the times in, nothing here
 // reads a clock and nothing depends on ImGui or Vulkan.
 #pragma once

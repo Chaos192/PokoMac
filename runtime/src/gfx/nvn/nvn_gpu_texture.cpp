@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Texture images of the NVN back end (render thread only). Each be::Texture gets one VkImage on first use (tex_gpu). The image is
 // created without a view: every view (sampled, attachment, present alias) is made here and cached on the TexGpu. Formats: the NVN
 // format when the GPU has it, its vk_fallback when the GPU refuses it, ASTC as BC7 when the GPU has no ASTC.

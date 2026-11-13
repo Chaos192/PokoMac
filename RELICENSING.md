@@ -1,28 +1,32 @@
 # Relicensing
 
-PokoMac is distributed under GPL-3.0 today ([LICENSE](LICENSE)). It stays under that licence until every game runs as it should.
-After the game work, its owner, Chaos192, moves it to the licence below, as for AnySwitch. Until the switch, the current licence
-applies to every file.
+On 2026-11-13 PokoMac moved from GPL-3.0 to the PolyForm Noncommercial License 1.0.0 ([LICENSE](LICENSE)), with the Required
+Notices "PokoMac by Chaos192 (github.com/Chaos192/PokoMac)" and "Built on AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch)", as AnySwitch did (its
+RELICENSING.md). The SPDX line of its files is `PolyForm-Noncommercial-1.0.0`. Anyone may use, change and share PokoMac for any
+noncommercial purpose, keeping the Required Notices, which stay visible in the source and on the About or credits screen. The exact
+terms are the text in LICENSE.
 
-## The planned licence
+## What was done first
 
-- First, the Commons Clause License Condition v1.0, with Software: PokoMac, License: MIT, Licensor: Chaos192.
-- Then the MIT licence, Copyright (c) 2026 Chaos192.
-- A required credit: "PokoMac by Chaos192 (github.com/Chaos192/PokoMac)" and "Built on AnySwitch by Chaos192
-  (github.com/Chaos192/AnySwitch)" stay visible in the source and on the About or credits screen of any work that uses PokoMac.
-- The SPDX line of each file becomes `MIT AND LicenseRef-Commons-Clause-1.0`.
+1. Code adapted from copyleft projects (ScarletNX and yuzu / Eden in the services, smo-recomp's CPU headers), and the lines that
+   followed tinfoil-chewer's Linux fork, were rewritten by implementers who did not open that project's source (ported from
+   AnySwitch's clean-room rewrites). A line-by-line similarity check of every rewritten file against PokoMac's own code before it
+   finds no identical non-trivial line.
+2. The build runs the lifter only as a separate process (recomp/lifter_cli.py).
 
-The aim: anyone may use, change and share PokoMac for free, companies included, as long as they keep the credit. Nobody may sell
-it. The exact terms are the texts above.
+## What keeps GPL-3.0-or-later
 
-## Steps, in order (after the game work)
+- The lifter, `recomp/nxrecomp/` (its instruction translator and readers adapted from smo-recomp and ssbu-recomp), with what runs
+  inside its process: `recomp/lifter_cli.py`, `recomp/games/pkp/config.py`, its tests (`recomp/tests/`) and
+  `recomp/cmake/nx_cc_launcher.py`.
+- `tools/shaders/smo/` and `tools/shaders/scripts/corpus_to_mxs.py`: smo-recomp's shader translator, a second opinion for the shader
+  tests, never shipped.
 
-1. Code adapted from copyleft projects (smo-recomp, ssbu-recomp, ScarletNX, yuzu), and about 50 lines that follow tinfoil-chewer's
-   Linux fork (pokopia-recomp-linux, GPL-3.0), are rewritten by someone who does not open that project's source. The rewrite works
-   from public format documents, the games' own SDK behaviour and our tests. A file keeps its "adapted from" notice until it has
-   actually been rewritten.
-2. If a title needs the zbic package (GPL-2.0), the app fetches it on the player's machine; it is never bundled.
-3. Tools and tests taken from GPL projects leave the tree.
-4. The switch: LICENSE, the SPDX lines, README, CREDITS, LEGAL and the credit on the About screen. Code under permissive licences
-   (MIT, BSD, Apache-2.0, ISC, zlib, CC0 and the like) stays, with its notices ([CREDITS.md](CREDITS.md),
-   `runtime/THIRD_PARTY_NOTICES.md`).
+The text is in [LICENSE.GPL-3.0.txt](LICENSE.GPL-3.0.txt). The build only starts the lifter as a separate process; the C++ it writes
+is made on the player's machine and is never part of a release.
+
+## Still to come
+
+`recomp/include/nxrecomp/`, `recomp/games/pkp/` and the game SDK files (`game-build/src/`) are PokoMac's own code but keep their
+GPL-3.0-or-later headers until their next change: pkp_build.py's build stamp hashes them, and a header change now would need a new
+Build of Pokopia. The lifter's clean-room rewrite (AnySwitch's, then ported) removes the GPL parts above.

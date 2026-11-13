@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Precise waits ([sched] precise_sleep, [sched] precise_waits; both off by default): a wait that ends on its deadline instead of
 // the Windows timer's next tick. Design from pokopia-native (MIT), windows/src/nxrt/host/hle_thread.c wait_until @7c3655d: the
 // high-resolution waitable timer wakes 0.4-0.6 ms late (their measurement, PC), so it is asked for the remaining time less its own

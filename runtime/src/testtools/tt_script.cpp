@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Scripted-run DSL: parser, region table and GUID helpers. The grammar is documented in include/nxrt/tt_script.h.
 // Standard C++ only (no windows.h, no nxrt headers besides tt_script.h). Errors are returned, never thrown.
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/UpsamplerHelper.cs (Ryubing fork, MIT). Scalar filter-bank loop only: the C#
 // System.Numerics Vector<float> block path is not ported (same result up to float summation order).
 //

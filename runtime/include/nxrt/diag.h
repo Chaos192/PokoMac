@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Diagnostics: crash report ("HOST EXCEPTION"), thread registry, recent-file ring, freeze watchdog.
 // Ideas from smo-recomp (runtime/core/hostrt.c crash_filter, docs/debugging.md), SuperMarioWonderRecomp
 // (kernel_watch.cpp hang report, hle_fs.cpp recent files) and ssbu-recomp (tests/DEBUG_MODE.md).

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 """acc:u0 / acc:u1 and the objects they hand out (IProfile, IManagerForApplication, IAsyncContext): every command with argument and buffer
 variants, the users' list writes, the profile picture, the network service account id, the id token and the licence context.

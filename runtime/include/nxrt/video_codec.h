@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Host implementation of the Switch 2 SDK's hardware video decoders (nn::codec Vp9Decoder / Vp8Decoder, the decoder image pools) and of
 // the sync objects their output is fenced with (nn::syncpt::sdk SyncPointEvent, nn::gs::TryWaitNativeSync), decoding with libvpx.
 //

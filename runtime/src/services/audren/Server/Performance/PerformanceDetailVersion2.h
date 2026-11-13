@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/Performance/PerformanceDetailVersion2.cs (Ryubing fork, MIT).
 // C# [StructLayout(Sequential, Pack = 1, Size = 0x18)]: the fields take 14 bytes, the declared size adds 10 bytes of trailing padding.
 #pragma once

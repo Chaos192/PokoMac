@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Pipelines linked from separately compiled parts (S24, VK_EXT_graphics_pipeline_library).
 //
 // A pipeline made whole costs 5 to 50 ms on the render thread the first time the driver sees its shaders, because the draw is the first

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/Command/VolumeCommand.cs (Ryubing fork, MIT). Only the scalar path (C# ProcessVolumeSlowPath) is
 // ported; the Avx / Sse41 / AdvSimd variants are skipped (audren_common.h). Note: the C# SIMD variants round with Ceiling while the scalar
 // path rounds with MathF.Round (half to even), so the two can differ by one step on fractional products.

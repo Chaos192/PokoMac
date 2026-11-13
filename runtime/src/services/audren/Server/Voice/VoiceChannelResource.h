@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/Voice/VoiceChannelResource.cs (Ryubing fork, MIT). Server state of one voice channel.
 // The C# struct is Size 0xD0 with Pack = 0x10; the C++ struct is alignas(16) so that sizeof matches that size.
 #pragma once

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Internal to src/services/: the per-service registration hooks that services::register_all() / reset_all() call.
 // Each service file defines its own pair; a service that has nothing to reset defines an empty reset.
 #pragma once

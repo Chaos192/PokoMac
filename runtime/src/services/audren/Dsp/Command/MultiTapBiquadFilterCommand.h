@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/Command/MultiTapBiquadFilterCommand.cs (Ryubing fork, MIT).
 // C# `ToArray()` copies of the parameter and flag spans become std::vector members. The C# bool[] becomes std::vector<bool>.
 #pragma once

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Time zone rules and calendar conversion for the time services (time.cpp uses it; timezone.cpp implements it).
 // A rule is the 0x4000-byte nn::time::TimeZoneRule (the tzcode `struct state` as Horizon lays it out; Ryujinx.HLE Time/TimeZone/TimeZoneRule.cs
 // is the layout reference). The guest's SDK may read it itself, so the layout is exact.

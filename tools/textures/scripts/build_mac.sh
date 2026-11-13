@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright (c) 2026 Chaos192
 # macOS build of tools/textures: fetches astc-encoder 5.7.0, bc7enc_rdo and ISPC 1.32.0 into third_party, then builds
 # build/release/libastc2bc7.a and libbc7e_ispc.a (what runtime/cmake/gfx.cmake links).

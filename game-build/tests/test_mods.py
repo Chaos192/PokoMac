@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 """Tests of the mod manager (game-build/release_b/mods.py, docs/MODS.md) and the patch formats it uses (apply_ips.py: IPS, IPS32,
 IPSwitch .pchtxt, the 0x100 + mem_off module layout). A fake title (hand-made NSOs, main.npdm, a RomFS folder; no game code or data):

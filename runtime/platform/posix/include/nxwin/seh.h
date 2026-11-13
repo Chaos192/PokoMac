@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Chaos192
 // nxwin: structured exceptions over POSIX signals.
 //  - SIGSEGV / SIGBUS / SIGILL / SIGFPE / SIGTRAP become an EXCEPTION_RECORD + CONTEXT and go, in Windows order, to the vectored

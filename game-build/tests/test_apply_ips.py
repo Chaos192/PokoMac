@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 """Tests of apply_ips.py: IPS and IPS32 parsing (incl. RLE), byte application, and an NSO decompress -> patch -> uncompressed round trip
 whose patched bytes land at the right file offset. No game code or data.

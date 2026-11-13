@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Pokémon Pokopia: repair of the shared player UUID (pkp_save_uuid.h). CMNDAT layout from berichan/PokoHex (GPL-3.0, SaveFile.cs):
 // magic 0x31227687, end of the compressed data at +0x10, zlib stream from 0x130. The rewrite is the one work/tools/pkp_uuid.py made
 // (checked in game: a save so changed joins a host made from the same original save).

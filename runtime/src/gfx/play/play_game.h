@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Play mode's half of the game boundary (docs/GAME_BOUNDARY.md, nxrt/game.h Info::play).
 //
 // Play mode itself is the game-independent PC front end: the window, the SDL event pump, the frame limiter, the binding engine that turns

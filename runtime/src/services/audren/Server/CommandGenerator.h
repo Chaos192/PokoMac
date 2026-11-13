@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/CommandGenerator.cs (Ryubing fork, MIT). Walks the voices, sub mixes, final mix, effects and sinks
 // of the server state and calls the CommandBuffer for every command, in the order of the C#. The method names and the branch structure
 // are the C# ones; the comments mark the C# line each block comes from where it is not obvious.

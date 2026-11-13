@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Local wireless through a Ryujinx LDN master ([net] protocol = ryuldn: services/ldn_ryu.cpp on net/ryuldn.h). A master server of the
 // test's own (a TCP listener on 127.0.0.1, an ephemeral port; nothing outside this machine is contacted) speaks the server side of the

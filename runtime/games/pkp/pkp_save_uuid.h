@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Pokémon Pokopia: repair of the shared player UUID (pkp_save_uuid.cpp, [pkp] uuid_repair).
 // Every save is given a player UUID at new game (main 0x5aef60, nn::util::GenerateUuid at 0x5af08c), and Link Play's host refuses a
 // visitor with its own UUID (0x5463c0, error 9005). Until GetInfo RandomEntropy came from the OS (src/kernel/svc_info.cpp) it was one

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Common/WorkBufferAllocator.cs. Hands out aligned sub-ranges of a work buffer given as base + size.
 // The C# Memory<byte> backing store is a Span<uint8_t> here; SpanMemoryManager<T>.Cast becomes Span<uint8_t>::Cast<T>().
 #pragma once

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // C++ exception support for lifted code: the unwinder (the runtime IS _Unwind_RaiseException / _Unwind_Resume), Itanium-ABI typeinfo
 // matching (__do_catch semantics) and the catch frames behind nx_catch_call. docs/S3b.md describes the whole boundary.
 //

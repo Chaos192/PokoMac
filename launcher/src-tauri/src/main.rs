@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod cheats_fetch;

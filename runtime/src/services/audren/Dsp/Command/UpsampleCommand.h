@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/Command/UpsampleCommand.cs (Ryubing fork, MIT).
 //
 // UpsamplerInfo is the server class (Server/Upsampler/UpsamplerInfo.h); the command holds a pointer to the persistent object.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // The scripted-run executor (S5): runs the steps of a parsed script (tt_script.h) one frame boundary at a time.
 // Each call to Runner::frame is one frame; a step that blocks consumes the frame, a step that does not lets the next one run in the
 // same call. Failure and pass call tt::end_run (exit code 1 / 0).

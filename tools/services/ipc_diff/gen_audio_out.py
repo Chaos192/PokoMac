@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 """audout:u / audin:u and their IAudioOut / IAudioIn streams: the managers (lists, opens with names, rates, channels), every stream command,
 the buffer protocol (append, contains, count, released tags, the 64-buffer limit, flush, stop and start), volumes, descriptors that cannot

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Play mode: from a gamepad as SDL reports it to the Switch pad the game expects. Pure functions, no SDL calls, no state.
 #pragma once
 #include "nxrt/input_source.h"

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // The launcher's start-up and menu tweaks (S46, src/gfx/play/play_fastboot.h): rows at the end of the Extras tab.
 #include <cctype>
 #include <string>

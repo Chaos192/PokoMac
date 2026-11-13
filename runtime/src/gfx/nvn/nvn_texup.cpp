@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Background upgrade pool of the BC7 disk cache. See nvn_texup.h.
 // Settings: [gfx] astc_upgrade_threads (default max(1, min(4, cpus / 6)); 0 turns the upgrade off), [gfx] astc_upgrade_mb (memory of waiting and running
 // jobs, default 192).

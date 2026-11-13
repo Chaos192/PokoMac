@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of the one Ryujinx.Common/Utilities/BitUtils.cs member the audio renderer needs (AlignUp). Not in the original stream list:
 // added so that EdgeMatrix, WorkBufferAllocator and NodeStates can call it under its C# name.
 #pragma once

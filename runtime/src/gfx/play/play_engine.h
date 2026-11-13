@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Play mode: the binding engine. Keyboard keys, mouse buttons and wheel notches go in with timestamps; the Switch-pad contribution
 // (buttons and stick deflection) comes out for any moment in time. No SDL, no game memory, no threads of its own: the caller supplies the
 // clock, so the tests drive it with made-up times.

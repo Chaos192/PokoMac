@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/CommandProcessingTimeEstimatorVersion2.cs (Ryubing fork, MIT). Version 2 (added with REV5).
 #pragma once
 #include "ICommandProcessingTimeEstimator.h"

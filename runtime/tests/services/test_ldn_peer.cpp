@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Local wireless between two processes (two PCs, or two copies on one): one hosts an ldn network, the other scans, joins, and both
 // exchange UDP datagrams through bsd on the network's addresses, as a game's local play does. Every request goes through ldn:u and

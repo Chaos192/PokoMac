@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // video_codec_probe: plays a WebM movie through the host nn::codec VP9 decoder (src/media/video_codec.cpp) the way a Switch 2 movie
 // player drives it, through the HLE entry points (guest registers in, result in x0): one image pool per output buffer, buffers
 // registered and acquired with a fence, compressed frames submitted, the oldest fence polled with nn::gs::TryWaitNativeSync, the

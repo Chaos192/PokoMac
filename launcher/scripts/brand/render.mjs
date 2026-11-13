@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Chaos192
 // Renders the PokoMac brand from the SVG sources beside this file (mark.svg, mark-testing.svg, wordmark.svg) into everything that shows
 // it: the launcher's art (src/art: logo.png, mark.svg, mark-testing.png), the app icons (src-tauri/icons and icons-testing: the PNG sizes,

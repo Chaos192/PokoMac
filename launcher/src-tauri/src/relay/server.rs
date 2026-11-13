@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //! The relay on a thread of its own (the Link Play page's relay, and `--host`): engine.rs's single poll loop, a stop flag, the stats for the page.
 //! After pokopia-native (MIT) windows/tools/coop-relay/main.c @4a72d23 (its stats line).
 

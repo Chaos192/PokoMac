@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Host probe (WP01, [diag] stutter_logs): under Wine only, once, 60 s after the first present, logs whether the heap's pages are backed by
 // transparent huge pages (AnonHugePages / Rss of the mapping holding mem::kHeapBase from Z:\proc\self\smaps, and the THP mode from
 // Z:\sys\kernel\mm\transparent_hugepage\enabled). Nothing happens elsewhere.

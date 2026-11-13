@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="-6 0 280 58">
-  <!-- SPDX-License-Identifier: GPL-3.0-or-later. The PokoMac wordmark: monoline letters (stroke centre lines on a 10/24/48 grid: cap
+  <!-- SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0. The PokoMac wordmark: monoline letters (stroke centre lines on a 10/24/48 grid: cap
        height, x-height, baseline), a sunrise gradient over a dark outline so it reads on every launcher background. -->
   <defs>
     <linearGradient id="sun" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="264" y2="0">

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 # Copyright (c) 2026 Chaos192
 """appletOE / appletAE of runtime/src/services/am.cpp and every interface they hand out: the spec's test vectors (coord/cleanroom/specs/

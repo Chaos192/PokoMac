@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/PcmHelper.cs (Ryubing fork, MIT). Static class -> struct with static members.
 #pragma once
 #include <algorithm>

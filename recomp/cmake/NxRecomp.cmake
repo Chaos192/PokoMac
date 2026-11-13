@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 #
 # nxrecomp_add_module(<target>
 #     INPUT <module file>          NSO or static ELF (see --kind)

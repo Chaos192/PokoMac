@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """Synthetic request scripts for ipc_diff.py (the replay format of runtime/tests/ipc_replay/replay_main.cpp).
 
 A Script opens services through sm: and calls their commands; `fuzz` sends one command many deterministic variants (argument sizes and

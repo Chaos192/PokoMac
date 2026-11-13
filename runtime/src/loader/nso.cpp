@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // NSO loader: turns a Nintendo Switch executable (the NSO0 container of a title's ExeFS: main, rtld, sdk, subsdk*) into a mapped
 // Module. The three segments are LZ4-decompressed (block format) into a synthetic ELF64 image (ET_DYN, one PT_LOAD per segment,
 // PT_DYNAMIC found through the MOD0 header whose offset sits at text +4) which the ordinary ELF loader (module.cpp) then maps,

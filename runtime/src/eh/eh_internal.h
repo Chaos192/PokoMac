@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Internal to src/eh: the per-thread stack of catch frames shared by the unwinder (landing) and nx_catch_call (establishing).
 #pragma once
 #include <setjmp.h>

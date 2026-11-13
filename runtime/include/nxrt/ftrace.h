@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Frame trace: a tiny zone recorder for frame-time work. Off by default (one relaxed load per zone). With [prof] trace = <file>
 // (env NXRT_PROF_TRACE) every thread appends {start, duration, zone} events to a preallocated array and a writer thread flushes
 // them to a text file once a second, so a run that ends by TerminateProcess loses nothing. tools/prof/ftrace_report.py turns the

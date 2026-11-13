@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Registry of lifted modules (nxmodule.h) and import resolution for host_import(c, import_id).
 // Pattern: smo-recomp runtime/core/hostrt.c (module tables registered at start-up, imports bound by name); the (module index, symbol)
 // addressing is the lifter's ABI 2 (recomp/include/nxrecomp/ctx.h NX_IMPORT_ID).

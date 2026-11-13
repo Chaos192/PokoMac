@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Start-up and menu tweaks (S46, docs/S46.md): the `[tweaks]` keys of controls.ini that skip the opening cutscene, skip the title's
 // intro movie and speed up the front end. All are off by default, so the game starts and plays as it always did. The game module does the
 // work (games/mpr/mpr_fastboot.cpp); this file is only the settings: the struct, the reader and the writer of its keys.

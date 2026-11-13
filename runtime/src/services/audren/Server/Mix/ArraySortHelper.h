@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of the .NET ArraySortHelper<T> introspective sort with a Comparison<T> comparer (dotnet/runtime, System.Private.CoreLib, MIT).
 // Ryujinx.Audio/Renderer/Server/Mix/MixContext.cs calls Array.Sort(int[], Comparison<int>). The order of equal keys depends on this exact
 // algorithm (it is not stable for more than 3 elements), so it is ported literally instead of using std::sort or std::stable_sort.

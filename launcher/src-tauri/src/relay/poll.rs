@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //! poll() on std sockets: WSAPoll on Windows, poll(2) elsewhere (coop_relay.c's rpoll). One thread waits on every link at once.
 
 pub const IN: i16 = 1;

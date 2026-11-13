@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
-  <!-- SPDX-License-Identifier: GPL-3.0-or-later. The PokoMac mark of Testing builds: mark.svg in sea colours. -->
+  <!-- SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0. The PokoMac mark of Testing builds: mark.svg in sea colours. -->
   <defs>
     <linearGradient id="sky" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#4fd8b8"/>

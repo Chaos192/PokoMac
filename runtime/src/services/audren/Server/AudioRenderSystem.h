@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/AudioRenderSystem.cs (Ryubing fork, MIT): one audio renderer session. It owns the work buffer
 // and the server objects built in it, applies the user's update (Update), generates the DSP command list of a frame (SendCommands) and
 // hands it to the AudioProcessor.

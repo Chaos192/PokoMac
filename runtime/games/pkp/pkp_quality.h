@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Pokémon Pokopia, PC picture quality above the console's (pkp_quality.cpp): a quality preset that sets the renderer's texture sharpness
 // ([display] lod_bias, anisotropy). The view distance is fixed at the console's (#249). Wired into play mode by pkp_game.cpp.
 #pragma once

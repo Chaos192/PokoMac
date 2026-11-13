@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // NVNformat -> storage facts and Vulkan formats (S4d). The table is nvn_format.cpp.
 #pragma once
 #include <cstdint>

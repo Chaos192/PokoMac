@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch); PokoMac has no jit service, so its step 4 is left out.
 // End-to-end test of code the lift did not see (nxrt/missed.h, docs/ARCHITECTURE.md) on the hand-made module of
 // recomp/tests/missed_fixture.py, lifted at the default entry level:

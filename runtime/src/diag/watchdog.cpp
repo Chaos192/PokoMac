@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Idea adapted from SuperMarioWonderRecomp runtime/src/kernel_watch.cpp (MIT, Copyright (c) 2026 BelmanteGu); see THIRD_PARTY_NOTICES.md.
 // Freeze watchdog (declared in nxrt/diag.h): a thread that notices when diag_frame_tick() stops advancing and then dumps
 // every registered thread's host stack and guest registers to the log and a report file. It also honours a

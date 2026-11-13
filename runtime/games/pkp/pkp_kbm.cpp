@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Pokémon Pokopia, keyboard and mouse button prompts (pkp_kbm.h). Offsets in `main` of the 2.0.1 update, found in IDA (work/re/pc_features.md).
 //
 // The game writes button prompts as text tags: "^30~153~" is the glyph of whatever pad button does input action 153 ("pick up"). The text

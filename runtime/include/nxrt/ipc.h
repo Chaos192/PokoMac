@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // HIPC/CMIF service framework: sessions, domains, the service base class, the service registry, the `sm:` service manager and
 // stub services that log every command and answer with kernel::kStubService.
 // Wire format: hipc.h (https://switchbrew.org/wiki/IPC_Marshalling). Structure after SuperMarioWonderRecomp runtime/src/ipc.h and

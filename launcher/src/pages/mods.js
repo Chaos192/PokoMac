@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Mods (docs/MODS.md): the installed ones in their order (the first wins), each on or off, what it changes and what it shares with
 // another mod; install from a .zip, .7z, .rar or folder; uninstall; and Make a mod (export the game's own files, a template, pack a

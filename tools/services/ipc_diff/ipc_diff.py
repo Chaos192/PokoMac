@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """Service differential test: an old and a new implementation of service sources answer the same requests, byte for byte.
 
   ipc_diff.py old   --rev <rev> --dest <dir> <repo path> ...     the old files from git into <dir> (written, never printed)

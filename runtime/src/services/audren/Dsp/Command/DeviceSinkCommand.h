@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/Command/DeviceSinkCommand.cs (Ryubing fork, MIT).
 // Initialize takes the server DeviceSink as a template argument (the sink port is not in the tree yet). It must provide `Parameter`
 // (a DeviceParameter of audren_types.h) and `UpsamplerInfo` (a pointer, nullptr when no upsampling; its OutputBuffer is a Span<float>).

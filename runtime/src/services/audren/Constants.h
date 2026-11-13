@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Constants.cs (Ryubing fork, MIT). The C# static class is kept as struct Constants with the same member names.
 // Six of these values already exist at namespace scope in audren_types.h; they are forwarded here, not defined twice.
 #pragma once

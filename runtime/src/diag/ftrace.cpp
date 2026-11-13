@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Frame trace recorder (include/nxrt/ftrace.h). Events go into a preallocated array claimed with one atomic add; a writer thread
 // appends them to the trace file once a second. File format, one record per line:
 //   # zone <id> <name>        # thread <index> <os tid> <name>        <t_ns> <dur_ns> <thread index> <zone id> <arg>

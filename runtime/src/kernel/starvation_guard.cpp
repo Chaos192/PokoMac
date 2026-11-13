@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Aging for guest threads that the host scheduler leaves ready but never runs (S20, debug note 422).
 //
 // The console core model pins every guest thread to one host processor and maps the HOS priorities onto six Windows bands with the wake-up

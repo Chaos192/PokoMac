@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // State and bind commands of a command buffer (S4d). Each function takes the command buffer first and appends one
 // record to the list being recorded (nvn_cmd.h, the lists of api_cmdbuf.cpp). Nothing here touches Vulkan: the replay on the
 // render thread applies the records at submit time.

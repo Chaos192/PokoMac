@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/Effect/IDelayLine.cs (Ryubing fork, MIT).
 // The C# interface properties CurrentSampleCount and SampleCountMax become pure virtual methods: a base class cannot hold
 // a data member that the implementations also provide as a C# auto-property, so implementers return them from methods.

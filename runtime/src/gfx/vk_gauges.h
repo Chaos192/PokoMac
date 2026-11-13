@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Live-object gauges of the Vulkan layer (leak monitor, see nxrt/gauge.h). Each counter is defined once, in vk_device.cpp, as a
 // function-local static. Convention: ++ right after a successful create, -- at the matching destroy (only when the handle is non-null).
 #pragma once

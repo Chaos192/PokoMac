@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Utils/Math/Matrix2x2.cs (C# record struct: value equality is kept as operator==).
 #pragma once
 #include "../../audren_common.h"

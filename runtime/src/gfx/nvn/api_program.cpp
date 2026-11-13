@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // NVNprogram: the host Program object (nvn_core.h) behind the 0xC0-byte guest object, and the entry points that set its
 // stages. SetShaders takes each NVNshaderData{data, control}: data is the GPU address of the code block (a host pointer into
 // the game's pool), control the control section. The shader cache (nvn_shaders.h) gives the ShaderInfo of the block; its

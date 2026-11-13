@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // The software keyboard's question to the player (am.cpp, swkbdui in services_api.h). The applet's host thread posts the request and waits;
 // the overlay (gfx/overlay.cpp) draws an on-screen keyboard inside the game window and answers. No second OS window: the old native prompt
 // lost its keys under Wine/Proton (issue #29), and a pop-up does not get focus in gamescope at all.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Console core model. The application cores of the console (3 on Switch 1, 6 on Switch 2) are as many host processors; every guest
 // thread's affinity is its core mask mapped onto them and its HOS priority is mapped onto six Windows priority bands with the dynamic
 // boost off. One host processor per console core matters: threads of one core never run at the same time, and GetCurrentProcessorNumber

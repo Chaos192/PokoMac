@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 //! Opens the Link Play port on the router while this Mac hosts over the internet, so visitors get in without the player forwarding the
 //! port by hand: UPnP IGD first (igd-next), then NAT-PMP (RFC 6886) on the default gateway (`route -n get default` on macOS).

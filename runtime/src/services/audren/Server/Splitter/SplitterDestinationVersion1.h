@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/Splitter/SplitterDestinationVersion1.cs (Ryubing fork, MIT).
 // Server state of one splitter destination, used when the revision has no biquad filters on splitters (revision below 12).
 // Deviation: Next() returns a pointer, null where the C# ref would be a null ref (no next element).

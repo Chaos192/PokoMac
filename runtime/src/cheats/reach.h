@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // The code a live patch makes reachable, which the dispatcher may not have yet: the code patcher (codepatch.cpp) makes all of it ready
 // on its worker thread (missed::prepare) before it swaps the patch in, so turning a code cheat on never makes a guest thread wait for the

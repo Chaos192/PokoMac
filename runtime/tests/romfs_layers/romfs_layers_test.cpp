@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch) (its runtime/tests/services/test_romfs_unpacked.cpp layer-list case,
 // without the .nup package part PokoMac's game folder does not use).
 // The RomFS mod layers ([fs] romfs_mod, runtime/src/services/fs_romfs.cpp, docs/MODS.md) on host folders made here: a mod layer list

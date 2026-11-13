@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // nifm IRequest evaluation (network.cpp RequestEval; nxnative services.md "Network requests stay on hold before they settle"): the first
 // GetRequestState after Submit answers OnHold and fires the state-change events, the next answers settled; every Submit starts over.

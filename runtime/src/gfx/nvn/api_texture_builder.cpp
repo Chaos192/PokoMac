@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // NVNtextureBuilder and NVNtextureView: plain data in the guest objects (family texture_builder). The builder keeps a
 // TexBuilderData (112 bytes incl. padding) inside its 0x80-byte object; the view keeps a ViewData (36 bytes) inside its
 // 0x28-byte object. Both are copied in and out with memcpy, so no typed pointer into guest memory is ever used. Guest

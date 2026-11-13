@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/Effect/ReverbEffect.cs (Ryubing fork, MIT).
 //
 // The C# non-generic Update overrides call `Update(out ..., in parameter, mapper)`, which resolves back to the same non-generic

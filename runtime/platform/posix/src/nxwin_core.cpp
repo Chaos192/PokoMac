@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright (c) 2026 Chaos192
 // nxwin: errors, lock slow paths, WaitOnAddress, time, strings, environment, modules, processor information, locale, UI.
 #include <windows.h>

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Common/EdgeMatrix.cs. An adjacency matrix stored as bits (used for splitter routing).
 #pragma once
 #include "../audren_common.h"

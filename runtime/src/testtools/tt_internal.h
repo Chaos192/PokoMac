@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Private header of the testtools implementation (tt_core.cpp, tt_game.cpp, tt_runner.cpp, tt_hid.cpp).
 #pragma once
 #include <atomic>

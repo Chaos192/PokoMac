@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Win32 to SDL key translation. The tables and the extended-key rules are ported from SDL3:
 // src/events/scancodes_windows.h (windows_scancode_table) and src/video/windows/SDL_windowsevents.c (WIN_KeyboardEventToSDL).
 #include "keymap_win.h"

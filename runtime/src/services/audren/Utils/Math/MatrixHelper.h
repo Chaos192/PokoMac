@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Utils/Math/MatrixHelper.cs (C# class Ryujinx.Audio.Renderer.Dsp.MatrixHelper).
 // The Vector4/Matrix4x4/Vector2 overloads use System.Numerics types in C#. No C++ equivalent exists in the port yet, so the minimal
 // stand-ins below (same field names) are defined in nxrt::audren::Numerics. Other ports that need System.Numerics should use them.

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Packs the player zip (release model b: no game code or data in it; the player's PC lifts and links pkp.exe from their own dump).
 # Everything built from this repo is taken from the given build outputs and the checkout; the unchanged third-party payload (Zig, embedded
 # Python, FSR 3 / Streamline DLLs, astcdec, fonts, input icons, licence texts) comes from a base package (the upstream v0.1.1 zip).

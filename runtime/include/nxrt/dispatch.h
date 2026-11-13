@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Indirect-call dispatch: guest address -> lifted function (hash table), and HLE thunks (placeholder guest addresses for
 // host functions: imports, run-time handed-out function pointers). The generated code's call_indirect() lands here.
 // Pattern from smo-recomp runtime/core/hostrt.c (fn hash, hostfn_address) and SuperMarioWonderRecomp loader.cpp (thunks).

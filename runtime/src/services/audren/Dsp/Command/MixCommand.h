@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/Command/MixCommand.cs (Ryubing fork, MIT). Only the scalar path (C# ProcessMixSlowPath) is ported;
 // the SIMD variants are skipped (audren_common.h).
 #pragma once

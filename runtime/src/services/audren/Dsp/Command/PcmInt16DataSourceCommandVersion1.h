@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/Command/PcmInt16DataSourceCommandVersion1.cs (Ryubing fork, MIT).
 //
 // Initialize takes the server VoiceInfo as a template argument (the VoiceInfo port is not in the tree yet). The argument must provide the

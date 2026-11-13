@@ -3,7 +3,7 @@ name = "pokopia-launcher"
 version = "0.1.1"
 description = "PokoMac launcher"
 edition = "2021"
-license = "GPL-3.0-or-later"
+license = "PolyForm-Noncommercial-1.0.0"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

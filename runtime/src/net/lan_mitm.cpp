@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // ldn_mitm's LAN protocol and the real-LAN link (lan_mitm.h). Winsock (nxwin on macOS, Linux, Android).
 // The wire format and the compression are ported from Ryujinx (MIT, Copyright (c) Ryujinx Team and Contributors):

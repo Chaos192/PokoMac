@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 //! First-run shader setup: builds `shader_cache/spirv` next to pkp.exe from the user's own romfs and main.
 //!

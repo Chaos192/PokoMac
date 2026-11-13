@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // NVNcommandHandle table and the command-memory lifetime rule. On the console a handle is valid until the game records over
 // the command memory the list used (or frees the memory pool). The back end keeps the same rule with an estimate of the
 // memory a list uses (nvn_cmd_lifecycle in api_cmdbuf.cpp): a list is dropped when a newer list occupies an overlapping

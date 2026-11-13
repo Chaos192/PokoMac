@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Site hooks: the runtime half of the lifter's site lists (recomp nxrecomp/program.py load_sites). Lifted code calls
 //   nx_site_inline(c, addr)          before the instruction at addr                       (kind inline)
 //   nx_site_midhook(c, addr)         before the instruction at addr; nonzero = "handled"   (kind midhook)

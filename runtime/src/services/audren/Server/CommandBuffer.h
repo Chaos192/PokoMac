@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/CommandBuffer.cs (Ryubing fork, MIT). An API to generate commands and add them to a CommandList.
 //
 // C# -> C++ deviations (all others follow audren_common.h):

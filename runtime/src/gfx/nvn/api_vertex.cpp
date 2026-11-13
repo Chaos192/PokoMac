@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // NVNvertexAttribState and NVNvertexStreamState: plain data in the guest object. The bit layout follows the one that
 // smo-recomp runtime/gfx/nvn_gl.c (GPL-3.0) uses for the same objects (checked there against a real game): attribute word =
 // format in bits 0..7, stream index in bits 8..12, relative offset from bit 14; stream = stride (u32) then divisor (u32).

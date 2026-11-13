@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //! The copy of the player's own data that is made before the launcher installs an OLDER build: the save folder, `pkp.ini`, `controls.ini`,
 //! `profiles.json` and the launcher's `launcher.json`, in `<game folder>/rollback-backups/<date-time>-before-<tag>/`. The last three are
 //! kept. If the copy cannot be made the install is stopped before anything is replaced. `rollback-backups` is in the update's keep list.

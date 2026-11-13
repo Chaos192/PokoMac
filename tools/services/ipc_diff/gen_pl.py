@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 """pl:u / pl:s (nn::pl::sharedresource::ISharedFontManager): every command with argument and buffer variants, and an id sweep.
 Commands from Switchbrew "Shared Database services" (pl:u): 0 RequestLoad, 1 GetLoadState, 2 GetSize, 3 GetSharedMemoryAddressOffset,

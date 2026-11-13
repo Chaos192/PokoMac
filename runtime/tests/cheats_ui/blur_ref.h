@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // The backdrop blur's arithmetic on the CPU (extras/backdrop_blur.cpp and its shader, scripts/gen_blur_shaders.py): level 0 is the frame at

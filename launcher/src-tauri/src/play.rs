@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //! Starts pkp.exe, watches it, and reports how it ended. On macOS the game is the native `pkp` (host::GAME_EXE); a crash ends it with
 //! a signal rather than an exit code, and the message names the signal.
 

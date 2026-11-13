@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 #include "nxrt/abi.h"
 namespace nxrt {
 #define NXRT_STR2(x) #x

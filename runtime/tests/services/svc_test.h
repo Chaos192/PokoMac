@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Service tests: requests go through the runtime's own dispatch (ipc::send_sync_request on a session handle from sm:), as the SDK's
 // client code sends them, and the reply is parsed back from the message words. Each family file registers its cases with SVC_TEST.

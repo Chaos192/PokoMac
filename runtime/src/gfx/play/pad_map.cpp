@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Play mode pad mapping: SDL gamepad state to the Switch pad state. Pure functions, see pad_map.h for the rules.
 #include "play/pad_map.h"
 

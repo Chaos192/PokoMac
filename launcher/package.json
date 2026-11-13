@@ -2,7 +2,7 @@
   "name": "pokopia-launcher",
   "private": true,
   "version": "0.1.0",
-  "license": "GPL-3.0-or-later",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",

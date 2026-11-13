@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // NVNblendState, NVNcolorState and NVNchannelMaskState: plain data in the guest object (8, 4 and 4 bytes). The bit layout
 // follows the one smo-recomp runtime/gfx/nvn_gl.c (GPL-3.0) uses for the same objects (checked there against a real game).
 // smo-recomp runtime/gfx/nvn_gl.c (GPL-3.0), layout/defaults checked, no code copied.

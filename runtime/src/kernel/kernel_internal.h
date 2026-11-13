@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Internal to src/kernel: state shared by thread.cpp, kernel_sync.cpp and svc_thread.cpp.
 #pragma once
 #include <windows.h>

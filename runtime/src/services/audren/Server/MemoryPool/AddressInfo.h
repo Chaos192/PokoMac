@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Server/MemoryPool/AddressInfo.cs (Ryubing fork, MIT). A CPU region shared with the DSP,
 // optionally backed by a MemoryPoolInfo. Field types are uint64_t for the same reason as in MemoryPoolInfo.h.
 #pragma once

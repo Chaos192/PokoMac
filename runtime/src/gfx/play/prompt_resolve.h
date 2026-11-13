@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Button prompts (S17): which icon of the prompt pack stands in for each of the game's own button icons. Pure functions, no
 // game memory and no graphics; prompts.cpp does the texture side.
 //

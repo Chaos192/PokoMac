@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Display tuning that the NVN back end reads on the render thread (S10): texture filtering overrides. Play mode writes them
 // from the settings page; the sampler cache includes them in its key, so a change takes effect on the next draw without a restart.
 #pragma once

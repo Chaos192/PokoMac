@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // HDR overlay composite (overlay.cpp draws ImGui here when the swapchain is HDR).
 //   The ImGui overlay is rendered into an RGBA8 UNORM target (cleared to 0, so the texels are premultiplied), then one full-screen
 //   pass reads that target, maps UI white (sRGB 1.0) to paper white, encodes the colour as HDR10 (ST 2084) or scRGB and blends it

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch) (without its jit service plugin).
 # nxrt_missed_test (tests/missed/missed_test.cpp): code the lift did not see, end to end on a hand-made module. The module is written and
 # lifted by recomp/tests/missed_fixture.py (Python with Capstone: NXRT_TEST_PYTHON) at build time, so the test always runs the lifter of

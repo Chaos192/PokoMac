@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Crash handler (declared in nxrt/diag.h): an unhandled-exception filter that writes the "HOST EXCEPTION" report, plus a
 // vectored handler that catches stack overflow on a fresh helper thread. Guest traps (0xE0000001 / 0xE0000002) arrive at
 // the unhandled filter like any other exception. The layout of the report follows crash_build_report() in diag.h.

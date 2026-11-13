@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of Ryujinx.Audio/Renderer/Dsp/Command/CaptureBufferCommand.cs (Ryubing fork, MIT). Guest reads and writes go through GuestPtr /
 // GuestSpan; the C# memoryManager parameter is dropped.
 #pragma once

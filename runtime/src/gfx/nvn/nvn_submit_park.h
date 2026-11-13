@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // [nvn] one_submit: batch flushes handed to the submit worker (nvn_submit_worker.h) wait here until one of two owners takes them:
 // - their own worker job, which submits them on their own (a kernel submission of their own), or
 // - the next present, while the job has not started yet: they ride in the present's vkQueueSubmit2 (one kernel submission for both).

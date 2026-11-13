@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Log and fatal services (S3c): lm (ILogService / ILogger), fatal:u (fatal service) and fatal:p (private fatal service).
 // Command ids and layouts: https://switchbrew.org/wiki/Log_services (LogPacketHeader, LogPacketFlags, LogDataChunkKey, ILogger),
 // https://switchbrew.org/wiki/Fatal_services (fatal:u, fatal:p, the 0x250-byte CPU context offsets) and the service list of

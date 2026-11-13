@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Port of the FidelityFX SDK v1.1.4 (MIT) CPU constant code in third_party/ffx_fsr1/fsr1/ffx_fsr1.h. The arithmetic keeps the
 // header's operand order so the float results are bit-identical; float<->uint32 casts go through memcpy.
 #include "fsr1_consts.h"

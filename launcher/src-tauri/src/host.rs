@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Portions Copyright (c) 2026 Chaos192
 //! What the launcher does differently on Linux (SteamOS, the Steam Deck, Bazzite, ...), where the game stays a Windows program,
 //! and on macOS, where it is a native one.

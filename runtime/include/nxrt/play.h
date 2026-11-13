@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Play mode (S8): the PC front end of the recompiled game. One window, the SDL event pump on the game's main thread, the frame
 // limiter on the presenting thread, real controller / keyboard / mouse input into the hid service, raw mouse aim, and the F1 settings page.
 //

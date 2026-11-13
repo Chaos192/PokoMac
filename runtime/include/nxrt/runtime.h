@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // One-call bring-up of the runtime skeleton: config, log, symbols, crash handler, memory map, SVC table, watchdog, memory guard.
 // Environment switches (all optional; each also exists as an ini key, env wins): see README.md "Configuration".
 #pragma once

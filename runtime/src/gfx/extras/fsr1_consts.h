@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // CPU-side constant setup for AMD FidelityFX FSR 1 (EASU upscale and RCAS sharpen), ported from the FidelityFX SDK v1.1.4
 // headers in third_party/ffx_fsr1 (MIT licence, see third_party/ffx_fsr1/LICENSE.txt). The constants are what the GPU
 // shaders in extras_shaders.inc read from their push constants (kFsrEasuComp, kFsrRcasComp).

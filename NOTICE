@@ -4,5 +4,8 @@ Copyright (c) 2026 Chaos192
 
 Any copy or substantial portion must keep this notice and credit the project.
 
+Licensed under the PolyForm Noncommercial License 1.0.0 (LICENSE). The lifter is GPL-3.0-or-later (RELICENSING.md,
+LICENSE.GPL-3.0.txt).
+
 Third-party code in this repository, Recompia by Dittobyte among it, keeps its own copyright and licence notices (CREDITS.md,
 runtime/THIRD_PARTY_NOTICES.md).

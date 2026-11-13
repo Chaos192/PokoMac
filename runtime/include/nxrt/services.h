@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Horizon system services at IPC level (S3c): what the recompiled SDK's own service client code (nn::fs, nn::oe, nn::account,
 // nn::time, nn::hid, nn::audio, nn::vi, ...) gets back from sm:GetServiceHandle(<name>) and the sessions behind it.
 // Each service is a nxrt::ipc::Service registered by name in the ipc registry (ipc.h); register_all() registers every one of them.

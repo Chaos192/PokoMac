@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // HDR patch of the tone-map fragment shader (hdr_tonemap_patch.h).
 #include "extras/hdr_tonemap_patch.h"
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Switch 2 platform pieces that replace guest SDK code (game::Platform::Switch2 only).
 //
 // Graphics boot: on Switch 2, nv::InitializeGraphics(void*, size_t) runs nn::gs::sdk::BootGraphicsSystem, which always takes the

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // The Pokémon Pokopia game module (docs/GAME_BOUNDARY.md): what the game-independent base needs to run this title, as one
 // nxrt::game::Info. Libraries (games/pkp/CMakeLists.txt), each a superset of the one before:
 //   nxrt_game_pkp_data   identity, branding, factory controls.ini (pure data)   the launcher           nxrt_register_game_pkp_data()
