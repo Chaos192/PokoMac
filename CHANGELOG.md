@@ -29,7 +29,8 @@ local wireless come from it, and PokoMac's services were replaced with AnySwitch
 - Added the **cheats menu** (Settings > Cheats > Enable cheats, then **F3** in the game)
   - Search memory, keep a cheat table, freeze values, browse memory, run Lua and AOB scripts, pause and step frames
   - Code cheats (ASM cheats that patch the game's code) now work while the game runs, on the Mac too: turning one on recompiles the
-    patched code on the side and swaps it in; turning it off puts the game back
+    patched code on the side and swaps it in; turning it off puts the game back. Neither the game nor the cheats menu waits for that
+    compile
   - **Find cheats online** (Settings > Cheats > Cheat file) fetches the public cheat file for your game version on your computer, with
     its author named, every cheat off until you turn it on. No cheat file is bundled
 - Added **mods** (the **Mods** page in the sidebar)
@@ -46,6 +47,10 @@ local wireless come from it, and PokoMac's services were replaced with AnySwitch
   - Before: Match window rendered at your window's size, sharper on a big screen but slower
   - Now: Console renders at 1920 x 1080 and scales it to the window. Settings > Graphics > Render resolution > Match window brings back
     the old behaviour; a percentage you picked before stays
+- Fixed short freezes the first time something is drawn with **HDR** on (the Mac's HDR displays)
+  - Before: with HDR the game draws to higher-precision targets, so every pipeline it had prepared ahead was needed a second time, in
+    an HDR version, and that one was built at its first draw
+  - Now: the HDR versions are prepared ahead too, at start-up, while you are on the title screen (`[nvn] prewarm_hdr_twins`)
 
 ### Audio
 - Several sound streams at once are mixed instead of taking turns, and the output volume the game sets is what you hear
