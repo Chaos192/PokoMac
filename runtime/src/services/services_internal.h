@@ -33,6 +33,10 @@ void register_am();          void am_reset();          // am.cpp          applet
 void register_acc();         void acc_reset();         // acc.cpp         acc:u0, acc:u1
 void register_hid();         void hid_reset();         // hid.cpp         hid
 void register_pl();          void pl_reset();          // pl.cpp          pl:u (pl:s)
+// font_engine.cpp (from AnySwitch by Chaos192): nn::fontll::ScalableFontEngine Initialize / Finalize / GetPointerToWorkBuffer (an engine
+// with less than 512 KB runs on 512 KB of runtime memory; registered by register_pl). Tests give the definitions those call.
+void install_font_engine_hle();
+void font_engine_set_originals_for_tests(uint64_t init, uint64_t fin, uint64_t work);
 void register_network();     void network_reset();     // network.cpp     nifm, bsd, ssl, nim, friend, prepo, pctl, bcat, ldn, nsd, ...
 std::shared_ptr<ipc::Service> make_ldn_user_creator();   void ldn_reset();   // ldn.cpp: ldn:u's objects (registered by network.cpp)
 void register_misc();        void misc_reset();        // misc.cpp        csrng, ldr:ro, mm:u, hwopus, aoc:u, caps, mii, irs, nfc, nfp, ...

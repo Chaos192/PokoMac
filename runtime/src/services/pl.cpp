@@ -1,314 +1,426 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Portions Copyright (c) 2026 Chaos192
-// nn::pl:u and pl:s (S3c): the six shared system fonts in the 0x1100000-byte shared memory.
-// Command ids and reply layouts: Switchbrew "Shared Database services" (the pl:s table; RequestLoad 0 .. GetSharedFontInOrderOfPriorityForSystem 6
-// are the font commands of firmware 1.0.0 to 15.0.1, and pl:u has the same ones at that firmware).
-// Adapted from ScarletNX src/nx/hle/services/pl.c (GPL-3.0-or-later): GetSharedFontInOrderOfPriority lists every font in type order
-// whatever the language, and an unknown font type answers 0 from GetSize and GetSharedMemoryAddressOffset.
-// Adapted from Ryujinx src/Ryujinx.HLE/HOS/Services/Sdb/Pl/SharedFontManager.cs and ISharedFontManager.cs (MIT): the slot order and offsets
-// (8-byte header, then the font data; the next header follows directly), the magic 0x18029A7F little-endian, the size XOR 0x49621806 stored
-// big-endian, the BFTTF file decryption (each little-endian word XOR 0x06186249 after a magic check) and the reply of a u8 flag and a u32 count.
+// pl:u / pl:s (nn::pl::sharedresource::ISharedFontManager): the six shared system fonts in one 0x1100000-byte shared memory, Switch 2's
+// built-in font memory (commands 2000 / 2010, SDK 21 nn::pl::GetBuiltInFontData), and the button icons of font 5, which follow the
+// controller the player holds (nxrt/shared_font.h). register_pl also installs the font-engine HLE (font_engine.cpp).
+// Command ids, SharedFontType order and the LoadState values: https://switchbrew.org/wiki/Shared_Database_services. The memory layout
+// a console has (each font behind an 8-byte header: magic 0x18029A7F, then the size XOR 0x49621806 stored big-endian) and the BFTTF
+// encoding of the system's font files (every u32 XOR 0x06186249) as Ryujinx (MIT) src/Ryujinx.HLE/HOS/Services/Sdb/Pl/SharedFontManager.cs
+// describes them.
 //
-// What is served: the font data in the shared memory is plain TrueType (Switchbrew: "Font data is TTF, located at the offset returned by
-// GetSharedMemoryAddressOffset"; Ryujinx and ScarletNX also store it decrypted). The real Nintendo fonts are not available: every slot takes
-// the same freely licensed DejaVu Sans (assets/fonts/DejaVuSans.ttf, Bitstream Vera licence). DejaVu Sans has no CJK glyphs and lacks
-// several symbols that the system fonts carry, so Chinese, Korean and the Nintendo symbols do not render with it.
-//
-// Lookup, per slot: a real dump file in [pl] font_dir (FontStandard.bfttf ... in BFTTF form, decrypted here) replaces its slot; otherwise the
-// first existing DejaVuSans.ttf of: [pl] font_dir, fonts\ next to the exe, assets\fonts\ under the working directory, the exe's folder.
-// When no TTF at all is found every slot still gets its 8-byte header with size 0 and a warning is logged once.
-#ifdef _WIN32
+// Where each font comes from, slot by slot: the console's own font file in [pl] font_dir (FontStandard.bfttf, ...), else for slot 5 the
+// stand-in button-icon font (pl_ext_font.cpp), else DejaVu Sans (the first DejaVuSans.ttf found in [pl] font_dir, <exe folder>/fonts,
+// ./assets/fonts or the exe folder; not copied into the sources). Everything is built at the first command that needs it and kept until
+// pl_reset.
+#define _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
+#if defined(_WIN32)
 #include <windows.h>
 #endif
 
 #include <algorithm>
-#include <cstdint>
+#include <array>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
-#if defined(__APPLE__)
-#include <mach-o/dyld.h>
-#endif
-#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
 #include "nxrt/config.h"
-#include "nxrt/ipc.h"
 #include "nxrt/log.h"
-#include "nxrt/services.h"
+#include "nxrt/shared_font.h"
+#include "pl_ext_font.h"
 #include "services_internal.h"
 
 namespace nxrt::services {
 
 namespace {
 
-constexpr uint32_t kSharedSize = 0x1100000;   // map size the guest uses (Switchbrew: size=0x1100000, permissions R--)
-constexpr uint32_t kFontCount = 6;
-constexpr uint32_t kBfttfMagic = 0x18029A7F;
-constexpr uint32_t kSizeKey = 0x49621806;      // XORed with the size in the header
-constexpr uint32_t kFileKey = 0x06186249;      // XORed with every little-endian word of a BFTTF file (and its magic)
+constexpr uint64_t kFontMemorySize = 0x1100000;
+constexpr uint32_t kSlots = 6;                 // nn::pl::SharedFontType: Standard .. NintendoExtension
+constexpr uint32_t kExtensionSlot = 5;
+constexpr uint32_t kHeaderMagic = 0x18029A7F;   // in the memory, before each font
+constexpr uint32_t kSizeKey = 0x49621806;       // the size beside it: XOR this, big-endian
+constexpr uint32_t kFileKey = 0x06186249;       // a .bfttf file: every u32 XOR this
+constexpr uint64_t kPage = 0x1000;
 
-// SharedFontType (Switchbrew): 0 Standard (Japan, US, Europe), 1 Chinese Simplified, 2 Extended Chinese Simplified, 3 Chinese Traditional,
-// 4 Korean, 5 Nintendo Extended. The dump file names are the ones of the console's font archive as they are named in it; ScarletNX and
-// Ryujinx call slot 2 FontExtendedChineseSimplified.
-constexpr const char* kDumpNames[kFontCount] = {
-    "FontStandard.bfttf",          "FontChineseSimplified.bfttf", "FontChineseSimplifiedExtension.bfttf",
-    "FontChineseTraditional.bfttf", "FontKorean.bfttf",           "FontNintendoExtended.bfttf",
+const char* const kDumpNames[kSlots] = {
+    "FontStandard.bfttf",     "FontChineseSimplified.bfttf", "FontChineseSimplifiedExtension.bfttf",
+    "FontChineseTraditional.bfttf", "FontKorean.bfttf",    "FontNintendoExtended.bfttf",
 };
 
-struct Slot {
-    uint32_t offset = 0;   // offset of the font data in the shared memory (the 8-byte header is just before it)
-    uint32_t size = 0;     // font data size
-};
-
-struct State {
-    services::ServiceSharedMemory shm{kSharedSize, "pl"};
-    Slot slot[kFontCount];
-    bool requested[kFontCount] = {};   // RequestLoad marks a font; loading is instant, so GetLoadState never waits
+// ---- the button face (survives pl_reset) ------------------------------------------------------------------------------------
+struct Face {
     std::mutex mu;
+    ButtonFace face;
+    bool set = false;
+    ButtonFace (*provider)() = nullptr;
 };
-
-std::mutex& state_mu() {
-    static std::mutex m;
-    return m;
+Face& face_state() {
+    static Face f;
+    return f;
 }
-std::unique_ptr<State>& state_slot() {
-    static std::unique_ptr<State> s;
+// The face font 5 is made with when it is built: the provider's, asked once, when no face was set before.
+ButtonFace start_face() {
+    Face& f = face_state();
+    std::lock_guard<std::mutex> lk(f.mu);
+    if (!f.set && f.provider) {
+        f.face = f.provider();
+        f.set = true;
+    }
+    return f.face;
+}
+
+// ---- the font memory ----------------------------------------------------------------------------------------------------------
+struct Slot {
+    uint32_t offset = 0;   // of the font data (the header is the 8 bytes before)
+    uint32_t size = 0;
+};
+struct Fonts {
+    std::unique_ptr<ServiceSharedMemory> mem;
+    std::array<Slot, kSlots> slots{};
+    bool extension_generated = false;   // slot 5 is the stand-in (shared_font_set_face may rewrite it)
+    std::mutex sub_mu;                  // the built-in memory and the requested flags
+    std::array<bool, kSlots> requested{};
+    std::unique_ptr<ServiceSharedMemory> builtin;
+    std::array<Slot, kSlots> builtin_slots{};
+};
+struct FontState {
+    std::mutex mu;
+    std::unique_ptr<Fonts> fonts;   // null until built (and after pl_reset)
+};
+FontState& font_state() {
+    static FontState s;
     return s;
 }
+bool g_warned_no_font = false;      // once per process
 
-void put_le32(uint8_t* p, uint32_t v) {
-    p[0] = uint8_t(v);
-    p[1] = uint8_t(v >> 8);
-    p[2] = uint8_t(v >> 16);
-    p[3] = uint8_t(v >> 24);
-}
-void put_be32(uint8_t* p, uint32_t v) {
-    p[0] = uint8_t(v >> 24);
-    p[1] = uint8_t(v >> 16);
-    p[2] = uint8_t(v >> 8);
-    p[3] = uint8_t(v);
-}
-uint32_t get_le32(const uint8_t* p) {
-    return uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
-}
-
-bool read_file(const std::filesystem::path& p, std::vector<uint8_t>& out) {
-    out.clear();
-    std::ifstream f(p, std::ios::binary | std::ios::ate);
-    if (!f) return false;
-    const std::streamoff n = f.tellg();
-    if (n <= 0) return false;
-    out.resize(size_t(n));
-    f.seekg(0, std::ios::beg);
-    f.read(reinterpret_cast<char*>(out.data()), n);
-    return f.good() || f.gcount() == n;
-}
-
-// A BFTTF file: magic word (little-endian, XOR key), size word (skipped), then the TTF as little-endian words XOR key. Ryujinx's DecryptFont.
-bool decode_bfttf(const std::vector<uint8_t>& raw, std::vector<uint8_t>& out) {
-    out.clear();
-    if (raw.size() < 8 || (get_le32(raw.data()) ^ kFileKey) != kBfttfMagic) return false;
-    const size_t words = (raw.size() - 8) / 4;
-    out.resize(words * 4);
-    for (size_t i = 0; i < words; ++i) put_le32(out.data() + 4 * i, get_le32(raw.data() + 8 + 4 * i) ^ kFileKey);
-    return true;
-}
-
-std::filesystem::path exe_dir() {
-#ifdef _WIN32
-    char buf[MAX_PATH];
-    const DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return {};
-    return std::filesystem::path(buf).parent_path();
+std::string exe_folder() {
+    namespace fs = std::filesystem;
+#if defined(_WIN32)
+    char b[MAX_PATH];
+    const DWORD n = GetModuleFileNameA(nullptr, b, sizeof b);
+    if (n == 0 || n >= sizeof b) return {};
+    return fs::path(std::string(b, n)).parent_path().string();
 #elif defined(__APPLE__)
-    uint32_t n = 0;
-    _NSGetExecutablePath(nullptr, &n);
-    std::string p(n, '\0');
-    if (_NSGetExecutablePath(p.data(), &n) != 0) return {};
+    char b[4096];
+    uint32_t n = sizeof b;
+    if (_NSGetExecutablePath(b, &n) != 0) return {};
     std::error_code ec;
-    const std::filesystem::path real = std::filesystem::canonical(p.c_str(), ec);
-    return (ec ? std::filesystem::path(p.c_str()) : real).parent_path();
+    fs::path p = fs::canonical(fs::path(b), ec);
+    if (ec) p = fs::path(b);
+    return p.parent_path().string();
+#elif defined(__linux__) && !defined(__ANDROID__)
+    std::error_code ec;
+    const fs::path p = fs::read_symlink("/proc/self/exe", ec);
+    return ec ? std::string() : p.parent_path().string();
 #else
     return {};
 #endif
 }
 
-// The DejaVu Sans fallback: the first existing candidate wins.
-std::vector<uint8_t> load_fallback(const std::filesystem::path& dir) {
+// A whole regular file, empty when it is missing, unreadable or empty.
+std::vector<uint8_t> read_file(const std::filesystem::path& p) {
     std::error_code ec;
-    std::vector<std::filesystem::path> cands;
-    if (!dir.empty()) cands.push_back(dir / "DejaVuSans.ttf");
-    const std::filesystem::path ex = exe_dir();
-    if (!ex.empty()) cands.push_back(ex / "fonts" / "DejaVuSans.ttf");
-    cands.push_back(std::filesystem::current_path(ec) / "assets" / "fonts" / "DejaVuSans.ttf");
-    if (!ex.empty()) cands.push_back(ex / "DejaVuSans.ttf");
-    for (const auto& p : cands) {
-        std::vector<uint8_t> v;
-        if (read_file(p, v)) {
-            NXLOG_I("pl", "fallback shared font: %s (%zu bytes)", p.string().c_str(), v.size());
+    if (!std::filesystem::is_regular_file(p, ec)) return {};
+    std::vector<uint8_t> v;
+    if (FILE* f = std::fopen(p.string().c_str(), "rb")) {
+        uint8_t buf[1 << 16];
+        size_t n;
+        while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) v.insert(v.end(), buf, buf + n);
+        std::fclose(f);
+    }
+    return v;
+}
+
+uint32_t rd32le(const uint8_t* p) { return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 | uint32_t(p[3]) << 24; }
+
+// A system font file (.bfttf) decoded to its TrueType bytes; false when it is not one.
+bool decode_bfttf(const std::vector<uint8_t>& in, std::vector<uint8_t>& out) {
+    if (in.size() < 8 || (rd32le(in.data()) ^ kFileKey) != kHeaderMagic) return false;
+    const size_t words = (in.size() - 8) / 4;
+    out.resize(words * 4);
+    for (size_t i = 0; i < words; ++i) {
+        const uint32_t w = rd32le(in.data() + 8 + 4 * i) ^ kFileKey;
+        std::memcpy(out.data() + 4 * i, &w, 4);
+    }
+    return true;
+}
+
+// DejaVu Sans, the font every slot without a font of its own gets.
+std::vector<uint8_t> fallback_font(const std::string& font_dir) {
+    namespace fs = std::filesystem;
+    std::vector<fs::path> where;
+    if (!font_dir.empty()) where.push_back(fs::path(font_dir) / "DejaVuSans.ttf");
+    const std::string exe = exe_folder();
+    if (!exe.empty()) where.push_back(fs::path(exe) / "fonts" / "DejaVuSans.ttf");
+    where.push_back(fs::path("assets") / "fonts" / "DejaVuSans.ttf");
+    if (!exe.empty()) where.push_back(fs::path(exe) / "DejaVuSans.ttf");
+    for (const fs::path& p : where) {
+        std::vector<uint8_t> v = read_file(p);
+        if (!v.empty()) {
+            NXLOG_I("pl", "fallback font: %s (%zu bytes)", p.string().c_str(), v.size());
             return v;
         }
     }
     return {};
 }
 
-// Fills the shared memory: header and font data for the six slots, back to back in SharedFontType order (Ryujinx SharedFontManager).
-void build(State& st) {
-    uint8_t* mem = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(st.shm.host()));
-    if (!mem || st.shm.size() != kSharedSize) {
-        NXLOG_E("pl", "shared font memory could not be created: pl:u answers with empty fonts");
-        return;
+void write_header(uint8_t* at, uint32_t size) {
+    const uint32_t magic = kHeaderMagic;
+    std::memcpy(at, &magic, 4);
+    const uint32_t s = size ^ kSizeKey;
+    const uint8_t be[4] = {uint8_t(s >> 24), uint8_t(s >> 16), uint8_t(s >> 8), uint8_t(s)};
+    std::memcpy(at + 4, be, 4);
+}
+
+// Builds the font memory (caller holds the font state's lock).
+std::unique_ptr<Fonts> build_fonts() {
+    namespace fs = std::filesystem;
+    auto f = std::make_unique<Fonts>();
+    f->mem = std::make_unique<ServiceSharedMemory>(kFontMemorySize, "pl");
+    uint8_t* base = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(f->mem->host()));
+    if (!base || f->mem->size() != kFontMemorySize) {
+        NXLOG_E("pl", "the shared font memory (0x%llx bytes) could not be made: every font is empty",
+                static_cast<unsigned long long>(kFontMemorySize));
+        return f;
     }
-    std::memset(mem, 0, kSharedSize);
-    static bool warned = false;   // process-wide: the warning is logged once
-    const std::filesystem::path dir = config_get_str("pl", "font_dir", "");
-    const std::vector<uint8_t> fallback = load_fallback(dir);
+    std::memset(base, 0, kFontMemorySize);
+    const std::string font_dir = config_get_str("pl", "font_dir", "");
+    const std::vector<uint8_t> fallback = fallback_font(font_dir);
     uint64_t cursor = 0;
-    uint32_t ttf_slots = 0;
-    for (uint32_t i = 0; i < kFontCount; ++i) {
-        std::vector<uint8_t> font;
-        const char* from = "none";
-        if (!dir.empty()) {
-            std::vector<uint8_t> raw;
-            if (read_file(dir / kDumpNames[i], raw)) {
-                if (decode_bfttf(raw, font))
-                    from = "dump";
-                else
-                    NXLOG_W("pl", "%s is not a BFTTF file: the DejaVu fallback takes its slot", (dir / kDumpNames[i]).string().c_str());
+    bool any = false;
+    for (uint32_t i = 0; i < kSlots; ++i) {
+        std::vector<uint8_t> data;
+        const char* source = "none";
+        std::string style;
+        if (!font_dir.empty()) {
+            const fs::path p = fs::path(font_dir) / kDumpNames[i];
+            const std::vector<uint8_t> file = read_file(p);
+            if (!file.empty()) {
+                if (decode_bfttf(file, data)) source = "dump";
+                else NXLOG_W("pl", "%s is not a system font file (.bfttf): not used", p.string().c_str());
             }
         }
-        if (font.empty() && !fallback.empty()) {
-            font = fallback;
-            from = "fallback";
+        if (data.empty() && i == kExtensionSlot) {
+            const ButtonFace face = start_face();
+            data = make_extension_font(face);
+            f->extension_generated = true;
+            style = "button icons (" + face.style + ")";
+            source = style.c_str();
         }
-        if (cursor + 8 + font.size() > kSharedSize) {
-            NXLOG_W("pl", "shared font %u (%zu bytes) does not fit in the shared memory: its slot is empty", i, font.size());
-            font.clear();
-            from = "none";
+        if (data.empty() && !fallback.empty()) {
+            data = fallback;
+            source = "fallback";
         }
-        if (!font.empty()) ++ttf_slots;
-        uint8_t* h = mem + cursor;
-        put_le32(h, kBfttfMagic);
-        put_be32(h + 4, uint32_t(font.size()) ^ kSizeKey);
-        if (!font.empty()) std::memcpy(h + 8, font.data(), font.size());
-        st.slot[i].offset = uint32_t(cursor + 8);
-        st.slot[i].size = uint32_t(font.size());
-        NXLOG_I("pl", "shared font %u: %s, %zu bytes at shared memory offset 0x%llx", i, from, font.size(),
-                static_cast<unsigned long long>(cursor + 8));
-        cursor += 8 + font.size();
+        if (cursor + 8 + data.size() > kFontMemorySize) {
+            NXLOG_W("pl", "font %u (%zu bytes) does not fit in the shared font memory: left empty", i, data.size());
+            data.clear();
+            source = "none";
+        }
+        if (cursor + 8 <= kFontMemorySize) write_header(base + cursor, static_cast<uint32_t>(data.size()));
+        f->slots[i].offset = static_cast<uint32_t>(cursor + 8);
+        f->slots[i].size = static_cast<uint32_t>(data.size());
+        if (!data.empty()) std::memcpy(base + cursor + 8, data.data(), data.size());
+        NXLOG_I("pl", "font %u: %s, %zu bytes at 0x%x", i, source, data.size(), f->slots[i].offset);
+        any |= !data.empty();
+        cursor += 8 + data.size();
     }
-    if (ttf_slots == 0 && !warned) {
-        warned = true;
-        NXLOG_W("pl", "no TTF font found (no fonts/ or assets/fonts/DejaVuSans.ttf, no [pl] font_dir): every shared font is empty");
+    if (!any && !g_warned_no_font) {
+        g_warned_no_font = true;
+        NXLOG_W("pl", "no TTF font found (set [pl] font_dir, or put DejaVuSans.ttf in fonts/ beside the exe): every shared font is empty");
     }
+    return f;
 }
 
-State& state() {
-    std::lock_guard<std::mutex> lk(state_mu());
-    auto& p = state_slot();
-    if (!p) {
-        p = std::make_unique<State>();
-        build(*p);
-    }
-    return *p;
+// The font memory, built at the first need. Callers hold the font state's lock.
+Fonts& fonts_locked() {
+    FontState& s = font_state();
+    if (!s.fonts) s.fonts = build_fonts();
+    return *s.fonts;
 }
 
-// GetSharedFontInOrderOfPriority / ...ForSystem: u64 language code in (not used: every language gets the same order, as in ScarletNX and
-// Ryujinx), three type-0x6 output buffers of u32 arrays (font type, offset, size), reply u8 loaded (1) and u32 count.
-uint32_t in_priority_order(ipc::Request& req, ipc::Response& rsp) {
-    const uint64_t lang = req.arg<uint64_t>(0);
-    NXLOG_D("pl", "GetSharedFontInOrderOfPriority(language 0x%llx)", static_cast<unsigned long long>(lang));
-    State& st = state();
+// Switch 2's built-in font memory: each font's TrueType bytes on its own page boundary (caller holds both locks).
+void build_builtin(Fonts& f) {
+    if (f.builtin) return;
+    uint64_t at = 0;
+    for (uint32_t i = 0; i < kSlots; ++i) {
+        f.builtin_slots[i] = Slot{static_cast<uint32_t>(at), f.slots[i].size};
+        at = (at + f.slots[i].size + kPage - 1) & ~(kPage - 1);
+    }
+    const uint64_t size = at < kPage ? kPage : at;
+    f.builtin = std::make_unique<ServiceSharedMemory>(size, "pl builtin");
+    uint8_t* dst = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(f.builtin->host()));
+    const uint8_t* src = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(f.mem ? f.mem->host() : 0));
+    if (dst) {
+        std::memset(dst, 0, f.builtin->size());
+        if (src)
+            for (uint32_t i = 0; i < kSlots; ++i)
+                if (f.slots[i].size) std::memcpy(dst + f.builtin_slots[i].offset, src + f.slots[i].offset, f.slots[i].size);
+    }
+    NXLOG_I("pl", "built-in font memory: 0x%llx bytes", static_cast<unsigned long long>(size));
+}
+
+Slot slot_of(uint32_t type, const char* what) {
+    FontState& s = font_state();
+    std::lock_guard<std::mutex> lk(s.mu);
+    Fonts& f = fonts_locked();
+    if (type >= kSlots) {
+        NXLOG_W("pl", "%s: unknown font type %u", what, type);
+        return Slot{};
+    }
+    return f.slots[type];
+}
+
+// GetSharedFontInOrderOfPriority: every font in type order, whatever the language.
+uint32_t font_order(ipc::Request& req, ipc::Response& rsp) {
+    NXLOG_D("pl", "GetSharedFontInOrderOfPriority(language code 0x%016llx)", static_cast<unsigned long long>(req.arg<uint64_t>(0)));
+    std::array<Slot, kSlots> slots;
+    {
+        FontState& s = font_state();
+        std::lock_guard<std::mutex> lk(s.mu);
+        slots = fonts_locked().slots;
+    }
     const ipc::Buffer types = req.out_buf(0), offsets = req.out_buf(1), sizes = req.out_buf(2);
-    const uint64_t n = std::min<uint64_t>({kFontCount, types.size / 4, offsets.size / 4, sizes.size / 4});
-    std::vector<uint32_t> t(n), o(n), z(n);
-    for (uint64_t i = 0; i < n; ++i) {
-        t[i] = uint32_t(i);
-        o[i] = st.slot[i].offset;
-        z[i] = st.slot[i].size;
+    uint64_t n = kSlots;
+    for (const ipc::Buffer& b : {types, offsets, sizes}) n = std::min<uint64_t>(n, b.addr ? b.size / 4 : 0);
+    for (uint32_t i = 0; i < n; ++i) {
+        const uint32_t t = i;
+        std::memcpy(buf_mut(types) + 4 * i, &t, 4);
+        std::memcpy(buf_mut(offsets) + 4 * i, &slots[i].offset, 4);
+        std::memcpy(buf_mut(sizes) + 4 * i, &slots[i].size, 4);
     }
-    services::buf_write(types, t.data(), n * 4);
-    services::buf_write(offsets, o.data(), n * 4);
-    services::buf_write(sizes, z.data(), n * 4);
-    rsp.push<uint8_t>(1);   // loaded: the fonts are all there from the start
-    rsp.push<uint8_t>(0);   // u8 padded to a word
+    rsp.push<uint8_t>(1);   // loaded: exactly 1 (newer SDKs reject anything else)
     rsp.push<uint8_t>(0);
-    rsp.push<uint8_t>(0);
-    rsp.push<uint32_t>(uint32_t(n));
+    rsp.push<uint16_t>(0);
+    rsp.push<uint32_t>(static_cast<uint32_t>(n));
     return 0;
 }
 
-std::shared_ptr<ipc::Service> make_pl(const char* name) {
+std::shared_ptr<ipc::Service> make_font_manager(const char* name) {
     return make_iface(name, [](ipc::Service& s) {
-        // 0 RequestLoad(u32 SharedFontType). Loading is instant, so this only records the request.
         s.add_cmd(0, "RequestLoad", [](ipc::Request& req, ipc::Response&) -> uint32_t {
             const uint32_t type = req.arg<uint32_t>(0);
-            NXLOG_D("pl", "RequestLoad(%u)", type);
-            State& st = state();
-            if (type >= kFontCount) {
-                NXLOG_W("pl", "RequestLoad: font type %u is not a shared font type (accepted, nothing done)", type);
-                return 0;
-            }
+            FontState& st = font_state();
             std::lock_guard<std::mutex> lk(st.mu);
-            st.requested[type] = true;
+            Fonts& f = fonts_locked();
+            if (type < kSlots) {
+                std::lock_guard<std::mutex> lk2(f.sub_mu);
+                f.requested[type] = true;
+            } else {
+                NXLOG_W("pl", "RequestLoad: unknown font type %u", type);
+            }
             return 0;
         });
-        // 1 GetLoadState(u32) -> u32 LoadState: 1 = Loaded, for every font.
         s.add_cmd(1, "GetLoadState", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
             NXLOG_D("pl", "GetLoadState(%u)", req.arg<uint32_t>(0));
-            rsp.push<uint32_t>(1);
+            rsp.push<uint32_t>(1);   // Loaded: every font is there from the start
             return 0;
         });
-        // 2 GetSize(u32) -> u32 font data size.
         s.add_cmd(2, "GetSize", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
-            const uint32_t type = req.arg<uint32_t>(0);
-            State& st = state();
-            if (type >= kFontCount) {
-                NXLOG_W("pl", "GetSize: font type %u is not a shared font type (answers 0)", type);
-                rsp.push<uint32_t>(0);
-                return 0;
-            }
-            rsp.push<uint32_t>(st.slot[type].size);
+            rsp.push<uint32_t>(slot_of(req.arg<uint32_t>(0), "GetSize").size);
             return 0;
         });
-        // 3 GetSharedMemoryAddressOffset(u32) -> u32 offset of the font data (TTF) in the shared memory.
         s.add_cmd(3, "GetSharedMemoryAddressOffset", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
-            const uint32_t type = req.arg<uint32_t>(0);
-            State& st = state();
-            if (type >= kFontCount) {
-                NXLOG_W("pl", "GetSharedMemoryAddressOffset: font type %u is not a shared font type (answers 0)", type);
-                rsp.push<uint32_t>(0);
-                return 0;
-            }
-            rsp.push<uint32_t>(st.slot[type].offset);
+            rsp.push<uint32_t>(slot_of(req.arg<uint32_t>(0), "GetSharedMemoryAddressOffset").offset);
             return 0;
         });
-        // 4 GetSharedMemoryNativeHandle() -> copy handle of the shared memory (mapped R-- by the guest).
         s.add_cmd(4, "GetSharedMemoryNativeHandle", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-            State& st = state();
-            rsp.out_copy.push_back(st.shm.new_handle());
+            FontState& st = font_state();
+            std::lock_guard<std::mutex> lk(st.mu);
+            rsp.out_copy.push_back(fonts_locked().mem->new_handle());
             return 0;
         });
-        // 5 GetSharedFontInOrderOfPriority(u64 language, 3 x buffer) -> (u8 loaded, u32 count).
-        s.add_cmd(5, "GetSharedFontInOrderOfPriority", in_priority_order);
-        // 6 GetSharedFontInOrderOfPriorityForSystem: the same answer ([4.0.0-15.0.1] in Switchbrew, ScarletNX and Ryujinx).
-        s.add_cmd(6, "GetSharedFontInOrderOfPriorityForSystem", in_priority_order);
+        s.add_cmd(5, "GetSharedFontInOrderOfPriority", font_order);
+        s.add_cmd(6, "GetSharedFontInOrderOfPriorityForSystem", font_order);
+        s.add_cmd(2000, "GetBuiltInFontSharedMemory", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            FontState& st = font_state();
+            std::lock_guard<std::mutex> lk(st.mu);
+            Fonts& f = fonts_locked();
+            std::lock_guard<std::mutex> lk2(f.sub_mu);
+            build_builtin(f);
+            rsp.push<uint32_t>(static_cast<uint32_t>(f.builtin->size()));
+            rsp.out_copy.push_back(f.builtin->new_handle());
+            return 0;
+        });
+        s.add_cmd(2010, "GetBuiltInFontData", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            const uint32_t type = req.arg<uint32_t>(0) & 0xFF;   // u8 type, then a flag byte
+            FontState& st = font_state();
+            std::lock_guard<std::mutex> lk(st.mu);
+            Fonts& f = fonts_locked();
+            std::lock_guard<std::mutex> lk2(f.sub_mu);
+            build_builtin(f);
+            const bool found = type < kSlots && f.slots[type].size != 0;
+            rsp.push<uint32_t>(found ? 1u : 0u);
+            rsp.push<uint32_t>(0);
+            rsp.push<uint32_t>(found ? f.builtin_slots[type].offset : 0u);
+            rsp.push<uint32_t>(found ? f.builtin_slots[type].size : 0u);
+            return 0;
+        });
     });
 }
 
 }  // namespace
 
+void shared_font_set_face_provider(ButtonFace (*fn)()) {
+    Face& f = face_state();
+    std::lock_guard<std::mutex> lk(f.mu);
+    f.provider = fn;
+}
+
+ButtonFace shared_font_face() {
+    Face& f = face_state();
+    std::lock_guard<std::mutex> lk(f.mu);
+    return f.face;
+}
+
+void shared_font_set_face(const ButtonFace& face) {
+    {
+        Face& f = face_state();
+        std::lock_guard<std::mutex> lk(f.mu);
+        if (f.set && f.face == face) return;
+        f.face = face;
+        f.set = true;
+    }
+    FontState& st = font_state();
+    std::lock_guard<std::mutex> lk(st.mu);
+    Fonts* f = st.fonts.get();
+    if (!f || !f->extension_generated) {
+        NXLOG_I("pl", "button icons: %s", face.style.c_str());
+        return;
+    }
+    const std::vector<uint8_t> font = make_extension_font(face);
+    uint8_t* base = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(f->mem ? f->mem->host() : 0));
+    const Slot slot = f->slots[kExtensionSlot];
+    if (!base || font.size() != slot.size) {
+        NXLOG_W("pl", "button icons %s: font 5 cannot be rewritten in place (%zu bytes, the slot has %u)", face.style.c_str(), font.size(),
+                slot.size);
+        return;
+    }
+    std::memcpy(base + slot.offset, font.data(), font.size());
+    std::lock_guard<std::mutex> lk2(f->sub_mu);
+    if (f->builtin) {
+        uint8_t* b = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(f->builtin->host()));
+        if (b) std::memcpy(b + f->builtin_slots[kExtensionSlot].offset, font.data(), font.size());
+    }
+    NXLOG_I("pl", "button icons: %s (font 5 rewritten in place)", face.style.c_str());
+}
+
 void register_pl() {
-    add("pl:u", [] { return make_pl("pl:u"); });
-    add("pl:s", [] { return make_pl("pl:s"); });
+    add("pl:u", [] { return make_font_manager("pl:u"); });
+    add("pl:s", [] { return make_font_manager("pl:s"); });
+    install_font_engine_hle();
 }
 
 void pl_reset() {
-    std::lock_guard<std::mutex> lk(state_mu());
-    state_slot().reset();   // the next call builds the shared memory again, from the config as it is then
+    FontState& s = font_state();
+    std::lock_guard<std::mutex> lk(s.mu);
+    s.fonts.reset();
 }
 
 }  // namespace nxrt::services
