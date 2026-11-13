@@ -1,175 +1,153 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// The machine the runtime runs on (include/nxrt/host_device.h). Based on the Steam Deck detection in tinfoil-chewer's Linux fork
-// (tinfoil-chewer/pokopia-recomp-linux 8b150a4), widened to the Legion Go S and to Windows handhelds.
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Copyright (c) 2026 Chaos192
+// The machine the runtime runs on (include/nxrt/host_device.h). One source for every system: on macOS and Linux the Win32 calls go
+// through the posix shim (runtime/platform/posix), where the registry and Wine's Z: drive cannot be read and no Wine ntdll exists, so
+// only the environment and the config decide there.
+// - The board: the SMBIOS product name and family from the registry's BIOS key (Windows; Wine's wineboot fills it from SMBIOS), else
+//   from Wine's view of Linux's /sys/class/dmi/id. Valve's handhelds are boards Jupiter (Steam Deck LCD) and Galileo (OLED); Lenovo's
+//   Legion Go S has family "Legion Go S ..."; ASUS's ROG Ally names itself "ROG Ally ..." in product or family.
+// - Steam: SteamDeck=1 (Steam on a Deck), SteamGamepadUI=1 (Big Picture / gamepad UI), SteamOS=1.
+// - Wine: its ntdll exports wine_get_version (Wine's documented way to tell it apart).
+// - Steam's on-screen keyboard: steam://open/keyboard?XPosition=..&YPosition=..&Width=..&Height=..&Mode=0 and steam://close/keyboard,
+//   the URLs SDL's X11 screen keyboard uses (zlib); handed to Steam's steam.exe (or Proton's helper of that name), else Wine's
+//   winebrowser, else the shell.
 #include "nxrt/host_device.h"
-
-#include "nxrt/config.h"
-#include "nxrt/log.h"
 
 #include <windows.h>
 #include <shellapi.h>
 
-#include <algorithm>
-#include <cctype>
 #include <condition_variable>
 #include <cstdio>
 #include <deque>
-#include <fstream>
 #include <mutex>
 #include <string>
 #include <thread>
 
-namespace nxrt {
+#include "nxrt/config.h"
+#include "nxrt/log.h"
 
+namespace nxrt {
 namespace {
 
-std::string lower_trimmed(std::string s) {
-    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
-    size_t i = 0;
-    while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) ++i;
-    s.erase(0, i);
-    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+constexpr const char* kTag = "host";
+
+// Leading and trailing whitespace off, ASCII lowercase.
+std::string normalised(std::string s) {
+    const auto space = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r'; };
+    size_t b = 0, e = s.size();
+    while (b < e && space(s[b])) ++b;
+    while (e > b && space(s[e - 1])) --e;
+    s = s.substr(b, e - b);
+    for (char& c : s)
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
     return s;
 }
 
-// An SMBIOS string: HKLM\HARDWARE\DESCRIPTION\System\BIOS (Windows; Wine's wineboot fills it from SMBIOS), else the Linux DMI file
-// through Wine's Z: drive (on Windows that path does not exist).
+bool starts(const std::string& s, const char* prefix) { return s.rfind(prefix, 0) == 0; }
+
+// An SMBIOS string: the registry's BIOS key value `value` (REG_SZ, up to 127 characters), else the first line of Wine's
+// Z:\sys\class\dmi\id\<dmi_file>, normalised; "" when neither is there.
 std::string smbios(const char* value, const char* dmi_file) {
-    char buf[128] = {};
-    DWORD n = sizeof buf;
-    if (RegGetValueA(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\BIOS", value, RRF_RT_REG_SZ, nullptr, buf, &n) == ERROR_SUCCESS)
-        return lower_trimmed(buf);
-    std::ifstream f(std::string("Z:\\sys\\class\\dmi\\id\\") + dmi_file);
-    std::string s;
-    if (f && std::getline(f, s)) return lower_trimmed(s);
-    return {};
+    char buf[128];
+    DWORD size = sizeof buf;
+    if (RegGetValueA(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\BIOS", value, RRF_RT_REG_SZ, nullptr, buf, &size) == ERROR_SUCCESS)
+        return normalised(buf);
+    const std::string path = std::string("Z:\\sys\\class\\dmi\\id\\") + dmi_file;
+    if (FILE* f = std::fopen(path.c_str(), "rb")) {
+        std::string line;
+        for (int c = std::fgetc(f); c != EOF && c != '\n'; c = std::fgetc(f)) line.push_back(static_cast<char>(c));
+        std::fclose(f);
+        return normalised(line);
+    }
+    return "";
 }
 
-bool detect(std::string* why) {
-    const std::string forced = lower_trimmed(config_get_str("host", "handheld", "auto"));
-    if (forced == "1" || forced == "on" || forced == "true" || forced == "yes") return *why = "[host] handheld = on", true;
-    if (forced == "0" || forced == "off" || forced == "false" || forced == "no") return *why = "[host] handheld = off", false;
-    char env[16] = {};
-    const DWORD n = GetEnvironmentVariableA("SteamDeck", env, sizeof env);
-    if (n > 0 && n < sizeof env && lower_trimmed(std::string(env, n)) == "1") return *why = "Steam's SteamDeck=1", true;
-    const std::string product = smbios("SystemProductName", "product_name"), family = smbios("SystemFamily", "product_family");
-    // Steam Deck LCD / OLED. The Go S's product names are SKU codes (83N6, ...), its family names the model: "Legion Go S 8APU1".
-    // ROG Ally and Ally X: product "ROG Ally RC71L_RC71L" / "ROG Ally X RC72LA_RC72LA", family "ROG Ally" (read on an Ally under CachyOS).
-    if (product == "jupiter" || product == "galileo" || family.rfind("legion go s", 0) == 0 || product.rfind("rog ally", 0) == 0 ||
-        family.rfind("rog ally", 0) == 0)
-        return *why = "board " + product + " / " + family, true;
-    *why = "not a known handheld (board '" + product + "' / '" + family + "')";
-    return false;
+std::string product() { return smbios("SystemProductName", "product_name"); }
+std::string family() { return smbios("SystemFamily", "product_family"); }
+
+// An environment variable of at most cap - 1 characters, normalised; "" when unset, empty or longer.
+std::string env(const char* name, DWORD cap) {
+    char buf[64];
+    const DWORD n = GetEnvironmentVariableA(name, buf, cap);
+    if (n == 0 || n >= cap) return "";
+    return normalised(std::string(buf, n));
 }
 
-}  // namespace
+enum class Switch { kAuto, kOn, kOff };
 
-bool host_is_handheld() {
-    static const bool handheld = [] {
-        std::string why;
-        const bool h = detect(&why);
-        NXLOG_I("host", "handheld: %s (%s)", h ? "yes" : "no", why.c_str());
-        return h;
-    }();
-    return handheld;
+Switch config_switch(const char* section, const char* key) {
+    const std::string v = normalised(config_get_str(section, key, "auto"));
+    if (v == "1" || v == "on" || v == "true" || v == "yes") return Switch::kOn;
+    if (v == "0" || v == "off" || v == "false" || v == "no") return Switch::kOff;
+    return Switch::kAuto;
 }
 
-bool host_is_steam_deck() {
-    static const bool deck = [] {
-        char env[16] = {};
-        const DWORD n = GetEnvironmentVariableA("SteamDeck", env, sizeof env);
-        const std::string product = smbios("SystemProductName", "product_name");
-        const bool d = (n > 0 && n < sizeof env && lower_trimmed(std::string(env, n)) == "1") || product == "jupiter" || product == "galileo";
-        NXLOG_I("host", "steam deck: %s (board '%s')", d ? "yes" : "no", product.c_str());
-        return d;
-    }();
-    return deck;
+// ---- the keyboard URLs, handed to Steam one at a time by one worker (FIFO; never stopped, never destroyed)
+
+struct UrlQueue {
+    std::mutex m;
+    std::condition_variable cv;
+    std::deque<std::string> urls;
+    bool worker = false;
+};
+
+UrlQueue& url_queue() {
+    static UrlQueue* q = new UrlQueue;   // outlives static destruction: the worker may still run then
+    return *q;
 }
 
-bool host_is_wine() {
-    static const bool wine = [] {
-        HMODULE nt = GetModuleHandleW(L"ntdll.dll");
-        return nt && GetProcAddress(nt, "wine_get_version");
-    }();
-    return wine;
-}
-
-// ---- Steam's on-screen keyboard -------------------------------------------------------------------------------------------------------
-
-namespace {
-
-std::string env_lower(const char* name) {
-    char v[64] = {};
-    const DWORD n = GetEnvironmentVariableA(name, v, sizeof v);
-    return n > 0 && n < sizeof v ? lower_trimmed(std::string(v, n)) : std::string();
-}
-
-bool file_exists(const wchar_t* path) {
-    const DWORD a = GetFileAttributesW(path);
-    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
-}
-
-// Runs `exe "url"` and waits for it (up to 5 s): the commands reach Steam in the order they were asked.
-bool run_with_url(const wchar_t* exe, const std::string& url) {
-    std::wstring cmd = L"\"" + std::wstring(exe) + L"\" \"" + std::wstring(url.begin(), url.end()) + L"\"";   // the URL is ASCII
-    STARTUPINFOW si = {sizeof si};
-    PROCESS_INFORMATION pi = {};
-    if (!CreateProcessW(exe, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) return false;
+// Starts `path` "url" without a window and waits up to 5 s for it. False when the file is not there or cannot be started.
+bool run_with(const char* path, const std::string& url) {
+    std::wstring wpath, wurl;
+    for (const char* p = path; *p; ++p) wpath.push_back(static_cast<wchar_t>(static_cast<unsigned char>(*p)));
+    for (const char c : url) wurl.push_back(static_cast<wchar_t>(static_cast<unsigned char>(c)));
+    const DWORD attr = GetFileAttributesW(wpath.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY)) return false;
+    std::wstring cmd = L"\"" + wpath + L"\" \"" + wurl + L"\"";
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(wpath.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) return false;
     WaitForSingleObject(pi.hProcess, 5000);
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     return true;
 }
 
-// Hands a steam:// URL to the Steam client. Under Proton, the prefix's steam.exe is Proton's helper, which forwards steam:// arguments to
-// the native client (steam_helper: steam-runtime-steam-remote, else steam); on Windows it is Steam itself. Plain Wine without Proton:
-// winebrowser (xdg-open, which reaches Steam through its x-scheme-handler/steam). Last: ShellExecute.
-void send_to_steam(const std::string& url) {
-    static const wchar_t* const kSteamExe[] = {L"C:\\Program Files (x86)\\Steam\\steam.exe", L"C:\\windows\\system32\\steam.exe"};
-    for (const wchar_t* exe : kSteamExe) {
-        if (file_exists(exe) && run_with_url(exe, url)) {
-            NXLOG_I("host", "Steam keyboard: %s (through %ls)", url.c_str(), exe);
+void hand_to_steam(const std::string& url) {
+    // Steam's own client, then Proton's steam.exe helper in the prefix (it forwards steam:// to the native client)
+    for (const char* path : {"C:\\Program Files (x86)\\Steam\\steam.exe", "C:\\windows\\system32\\steam.exe"}) {
+        if (run_with(path, url)) {
+            NXLOG_I(kTag, "Steam keyboard: %s (through %s)", url.c_str(), path);
             return;
         }
     }
-    if (host_is_wine() && run_with_url(L"C:\\windows\\system32\\winebrowser.exe", url)) {
-        NXLOG_I("host", "Steam keyboard: %s (through winebrowser)", url.c_str());
+    if (host_is_wine() && run_with("C:\\windows\\system32\\winebrowser.exe", url)) {
+        NXLOG_I(kTag, "Steam keyboard: %s (through winebrowser)", url.c_str());
         return;
     }
     const INT_PTR r = reinterpret_cast<INT_PTR>(ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
-    if (r > 32) NXLOG_I("host", "Steam keyboard: %s (ShellExecute)", url.c_str());
-    else NXLOG_W("host", "Steam keyboard: %s could not be handed to Steam (no steam.exe, ShellExecute %lld)", url.c_str(), static_cast<long long>(r));
+    if (r > 32) NXLOG_I(kTag, "Steam keyboard: %s (ShellExecute)", url.c_str());
+    else NXLOG_W(kTag, "Steam keyboard: %s could not be handed to Steam (no steam.exe, ShellExecute %lld)", url.c_str(), static_cast<long long>(r));
 }
 
-struct SteamQueue {
-    std::mutex mu;
-    std::condition_variable cv;
-    std::deque<std::string> urls;
-    bool started = false;
-};
-SteamQueue& steam_queue() {
-    static SteamQueue* q = new SteamQueue;   // never destroyed: the worker may still run at exit
-    return *q;
-}
-
-// One worker, in order: an open and the close right after it must not reach Steam swapped.
 void queue_url(std::string url) {
-    SteamQueue& q = steam_queue();
-    std::lock_guard<std::mutex> lk(q.mu);
+    UrlQueue& q = url_queue();
+    std::lock_guard<std::mutex> g(q.m);
     q.urls.push_back(std::move(url));
-    if (!q.started) {
-        q.started = true;
-        std::thread([] {
-            SteamQueue& w = steam_queue();
+    if (!q.worker) {
+        q.worker = true;
+        std::thread([&q] {
             for (;;) {
-                std::string u;
+                std::string next;
                 {
-                    std::unique_lock<std::mutex> l(w.mu);
-                    w.cv.wait(l, [&] { return !w.urls.empty(); });
-                    u = std::move(w.urls.front());
-                    w.urls.pop_front();
+                    std::unique_lock<std::mutex> lk(q.m);
+                    q.cv.wait(lk, [&q] { return !q.urls.empty(); });
+                    next = std::move(q.urls.front());
+                    q.urls.pop_front();
                 }
-                send_to_steam(u);
+                hand_to_steam(next);
             }
         }).detach();
     }
@@ -178,41 +156,83 @@ void queue_url(std::string url) {
 
 }  // namespace
 
+bool host_is_handheld() {
+    static const bool handheld = [] {
+        bool yes = false;
+        std::string why;
+        const Switch s = config_switch("host", "handheld");
+        if (s == Switch::kOn) {
+            yes = true;
+            why = "[host] handheld = on";
+        } else if (s == Switch::kOff) {
+            why = "[host] handheld = off";
+        } else if (env("SteamDeck", 16) == "1") {
+            yes = true;
+            why = "Steam's SteamDeck=1";
+        } else {
+            const std::string p = product(), f = family();
+            yes = p == "jupiter" || p == "galileo" || starts(f, "legion go s") || starts(p, "rog ally") || starts(f, "rog ally");
+            why = yes ? "board " + p + " / " + f : "not a known handheld (board '" + p + "' / '" + f + "')";
+        }
+        NXLOG_I(kTag, "handheld: %s (%s)", yes ? "yes" : "no", why.c_str());
+        return yes;
+    }();
+    return handheld;
+}
+
+bool host_is_steam_deck() {
+    static const bool deck = [] {
+        const std::string p = product();
+        const bool yes = env("SteamDeck", 16) == "1" || p == "jupiter" || p == "galileo";
+        NXLOG_I(kTag, "steam deck: %s (board '%s')", yes ? "yes" : "no", p.c_str());
+        return yes;
+    }();
+    return deck;
+}
+
+bool host_is_wine() {
+    static const bool wine = [] {
+        const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        return ntdll != nullptr && GetProcAddress(ntdll, "wine_get_version") != nullptr;
+    }();
+    return wine;
+}
+
 bool host_steam_keyboard_wanted() {
-    static const bool want = [] {
-        const std::string c = lower_trimmed(config_get_str("applet", "steam_keyboard", "auto"));
-        bool w = false;
-        const char* why = "";
-        if (c == "1" || c == "on" || c == "true" || c == "yes") {
-            w = true;
+    static const bool wanted = [] {
+        bool yes = false;
+        std::string why;
+        const Switch s = config_switch("applet", "steam_keyboard");
+        if (s == Switch::kOn) {
+            yes = true;
             why = "[applet] steam_keyboard = on";
-        } else if (c == "0" || c == "off" || c == "false" || c == "no") {
+        } else if (s == Switch::kOff) {
             why = "[applet] steam_keyboard = off";
         } else if (!host_is_wine()) {
             why = "Windows (a steam:// URL would start Steam if it is not running)";
         } else if (host_is_steam_deck()) {
-            w = true;
-            why = "a Steam Deck";
-        } else if (env_lower("SteamGamepadUI") == "1") {
-            w = true;
+            yes = true;
+            why = "Steam Deck";
+        } else if (env("SteamGamepadUI", 64) == "1") {
+            yes = true;
             why = "Steam's gamepad UI (SteamGamepadUI=1)";
-        } else if (env_lower("SteamOS") == "1") {
-            w = true;
+        } else if (env("SteamOS", 64) == "1") {
+            yes = true;
             why = "SteamOS (SteamOS=1)";
         } else {
-            why = "not a handheld, SteamOS or Steam's gamepad UI";
+            why = "Wine, but not a Steam Deck, SteamOS or Steam's gamepad UI";
         }
-        NXLOG_I("host", "Steam keyboard for text the game asks for: %s (%s)", w ? "yes" : "no", why);
-        return w;
+        NXLOG_I(kTag, "Steam keyboard for text the game asks for: %s (%s)", yes ? "yes" : "no", why.c_str());
+        return yes;
     }();
-    return want;
+    return wanted;
 }
 
 void host_steam_keyboard_open(int x, int y, int w, int h) {
-    // Mode 0 = single line: Steam's Enter sends Return and closes its keyboard (SDL's X11 backend asks the same way).
+    const auto clamp0 = [](int v) { return v < 0 ? 0 : v; };
     char url[160];
-    std::snprintf(url, sizeof url, "steam://open/keyboard?XPosition=%d&YPosition=%d&Width=%d&Height=%d&Mode=0", std::max(0, x), std::max(0, y),
-                  std::max(0, w), std::max(0, h));
+    std::snprintf(url, sizeof url, "steam://open/keyboard?XPosition=%d&YPosition=%d&Width=%d&Height=%d&Mode=0", clamp0(x), clamp0(y),
+                  clamp0(w), clamp0(h));
     queue_url(url);
 }
 
