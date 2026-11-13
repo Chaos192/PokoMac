@@ -123,8 +123,10 @@ void fill_request_buffers(const hipc::Message& m, Request& req) {
 // Runs the handler of `svc` (not under the lock). A C++ exception becomes kInvalidState and drops the outputs.
 uint32_t run_handler(const std::shared_ptr<Service>& svc, Request& req, Response& rsp) {
     count_request(*svc);
+    const uint64_t rec = record::on() ? record::request(*svc, req) : 0;
     try {
         const uint32_t result = svc->handle(req, rsp);
+        if (rec) record::response(rec, req, rsp, result);
         NXLOG_T("ipc", "%s cmd %u (in %zu bytes, %zu copy, %zu move) -> 0x%x (out %zu bytes, %zu copy, %zu objects)", svc->name().c_str(), req.cmd,
                 req.in_size, req.in_copy.size(), req.in_move.size(), result, rsp.out.size(), rsp.out_copy.size(), rsp.out_objects.size());
         return result;
@@ -134,6 +136,7 @@ uint32_t run_handler(const std::shared_ptr<Service>& svc, Request& req, Response
         NXLOG_E("ipc", "service '%s' cmd %u threw a non-standard exception", svc->name().c_str(), req.cmd);
     }
     rsp = Response{};
+    if (rec) record::response(rec, req, rsp, kernel::kInvalidState);
     return kernel::kInvalidState;
 }
 
@@ -375,14 +378,20 @@ KSession::~KSession() {
     if (dom_dies) {
         g_domain_objects.sub(static_cast<int64_t>(dom->objects.size()));
         for (const auto& kv : dom->objects)
-            if (kv.second != svc && kv.second.use_count() == 1) kv.second->on_close();
+            if (kv.second != svc && kv.second.use_count() == 1) {
+                record::closed(*kv.second);
+                kv.second->on_close();
+            }
     }
     if (svc) {
         long own = 1;   // this session's reference
         if (dom_dies)
             for (const auto& kv : dom->objects)
                 if (kv.second == svc) own++;   // the domain's reference to this service, which dies with it
-        if (svc.use_count() == own) svc->on_close();
+        if (svc.use_count() == own) {
+            record::closed(*svc);
+            svc->on_close();
+        }
     }
 }
 
@@ -495,7 +504,10 @@ uint32_t send_sync_request(::Ctx* c, uint32_t session_handle, uint64_t msg_addr,
                     g_domain_objects.sub(1);
                 }
             }
-            if (dying && dying.use_count() == 1) dying->on_close();
+            if (dying && dying.use_count() == 1) {
+                record::closed(*dying);
+                dying->on_close();
+            }
             Response rsp;
             write_reply(words, cap, Wire::Domain, 0, &rsp, dom);
             return 0;

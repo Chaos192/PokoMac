@@ -64,6 +64,18 @@ struct Response {
 
 using Handler = std::function<uint32_t(Request&, Response&)>;   // returns a Result code (0 = success)
 
+// ---- request recorder (src/ipc/record.cpp) ---------------------------------------------------------------------------------
+// [ipc] record = <file> (off by default): every request a service handles, its reply and every service closed are written to the file,
+// so a game's run can be replayed against two builds of a service (tools/services/ipc_diff, runtime/tests/ipc_replay). Format: record.cpp.
+namespace record {
+bool on();                                                   // decided at the first request (the config is loaded by then)
+bool begin(const std::string& path);                         // tests: record into `path` from now on (a new file, sids from 1)
+void end();                                                  // tests: stop and close the file
+uint64_t request(const Service& svc, const Request& req);   // before the handler: the request's sequence number (0: not written)
+void response(uint64_t seq, const Request& req, const Response& rsp, uint32_t result);
+void closed(const Service& svc);                             // Service::on_close is about to run
+}  // namespace record
+
 class Service : public std::enable_shared_from_this<Service> {
 public:
     explicit Service(std::string name) : name_(std::move(name)) {}
