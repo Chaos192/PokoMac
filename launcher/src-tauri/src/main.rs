@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod cheats_fetch;
 mod cheats_themes;
 mod dlss;
 mod dump;
@@ -71,6 +72,9 @@ struct Config {
     icloud_synced: std::collections::BTreeMap<String, String>,
     /// The player switched off opening the Link Play port on the router (portmap.rs); forwarding is on by default.
     port_forward_off: bool,
+    /// Fetch the game's public cheat file (cheats_fetch.rs); absent: on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    online_cheats: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -1755,6 +1759,9 @@ fn main() {
             cheats_themes::cheats_themes,
             cheats_themes::cheats_theme_import,
             cheats_themes::cheats_themes_open,
+            cheats_fetch::cheats_info,
+            cheats_fetch::cheats_fetch,
+            cheats_fetch::cheats_dir_open,
             mods::mods_list,
             mods::mods_install,
             mods::mods_change,

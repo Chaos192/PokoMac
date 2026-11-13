@@ -59,7 +59,7 @@ Put "$root\game-build\src\pkp_rt_api.h" 'tools\build\sdk\pkp_rt_api.h'
 Put "$root\game-build\src\pkp_stub.cpp" 'tools\build\sdk\pkp_stub.cpp'
 Put "$root\game-build\res\pkp.manifest" 'tools\build\sdk\pkp.manifest'
 Put "$root\game-build\res\pkp.rc" 'tools\build\sdk\pkp.rc'
-foreach ($f in 'pkp_build.py', 'apply_ips.py', 'mods.py', 'dump_hashes.json', 'fetch_dlss.py') { Put "$root\game-build\release_b\$f" "tools\build\$f" }
+foreach ($f in 'pkp_build.py', 'apply_ips.py', 'mods.py', 'cheats_fetch.py', 'dump_hashes.json', 'fetch_dlss.py') { Put "$root\game-build\release_b\$f" "tools\build\$f" }
 (Get-Content -Raw "$root\game-build\release_b\README.txt").Replace('@VERSION@', $Version) | Set-Content -NoNewline (Join-Path $pkg 'README.txt')
 Put "$root\game-build\release_b\BUNDLED_TOOLS.txt" 'licenses\BUNDLED_TOOLS.txt'
 Put "$root\launcher\release\Play.bat" 'Play.bat'

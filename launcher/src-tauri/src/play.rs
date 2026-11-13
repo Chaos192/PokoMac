@@ -146,6 +146,8 @@ pub fn start(app: &AppHandle, game_dir: &Path, minimize: bool) -> Result<(), Str
                 }
             }
         }
+        // cheats on and no cheat file for this version: its public one, fetched once a day at most, every cheat off (cheats_fetch.rs)
+        crate::cheats_fetch::before_play(&dir, &tools, cfg_file.as_deref().and_then(crate::cheats_fetch::configured));
         // Calculate after shader preparation, immediately before the process starts, so a long preparation cannot age the offset.
         let mut cmd = match crate::events::override_for(&dir).and_then(|clock| game_command(&exe, &dir, clock)) {
             Ok(c) => c,
@@ -280,6 +282,7 @@ pub fn run_cli(game_dir: &Path, tools: &Path) -> i32 {
     if let Some(n) = cfg_file.as_deref().and_then(|cfg| crate::icloud::before_play(game_dir, cfg)) {
         println!("{}", n.text);
     }
+    crate::cheats_fetch::before_play(game_dir, tools, cfg_file.as_deref().and_then(crate::cheats_fetch::configured));
     let clock = match crate::events::override_for(game_dir) {
         Ok(clock) => clock,
         Err(e) => return fail(e),

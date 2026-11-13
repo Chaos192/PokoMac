@@ -54,6 +54,18 @@ windows of their own and where) is remembered per title in `<cheats dir>/<build 
 - **Overlay controller combo** — `[cheats] pad`: none, `minus+rstick`, `minus+lstick`, `plus+rstick`, `l+r+minus`, `zl+zr+minus`
   (never `minus+plus`).
 - **Cheats folder** — `[cheats] dir`, default `<game folder>/cheats`.
+- **Cheat file** (`cheats_fetch.rs`, from AnySwitch's 5f43b106): PokoMac bundles no cheat file (their authors publish them with no
+  licence to redistribute); the launcher fetches the public one for the player's game version on the player's machine, the way Breeze
+  or EdiZon do on a console: `tools/build/cheats_fetch.py` (stdlib Python, shared with AnySwitch) asks by program id (`0400A3A01EE4C000`)
+  and main's build id, tomvita's MyNXCheats first (`github.com/tomvita/MyNXCheats/releases/download/<TID>/<BID>.txt`), then
+  switch-cheats-db (`cheats/<TID>.json`); it takes only a plain Atmosphère cheat file (names and 8-digit hex words, under 64 KiB) and
+  writes `<cheats dir>/<build id>.txt` (after label lines naming the source and author), `toggles.txt` with every cheat `false` (the
+  player's earlier choices kept) and `<build id>.fetched.json` (source, author, page, licence, sha256). The row shows whose the cheats
+  are, **Find cheats online** / **Check for a newer one** and **Open the folder**, and a note credits the author. It also runs when the
+  player turns **Enable cheats** on, and at Play with cheats on and no cheat file for this version (once a day at most). A file of the
+  player's own (no `.fetched.json`) is never replaced. **Find cheat files online** (launcher.json `online_cheats`, default on;
+  `POKOMAC_ONLINE_CHEATS=0` for a command-line run) turns it off. Only the program id and build id go to GitHub, never to Nintendo.
+  Tests: `game-build/tests/test_cheats_fetch.py` (no network), `cheats_fetch.rs` unit tests.
 - **While open: input reaches the game** / **pause the game** / **Active cheats strip when hidden** — `pass_input`, `pause_game`, `mini`.
 - **Overlay look** — the `[cheats]` look keys of pkp.ini: **Theme** (the six built-in themes and the player's own theme files), **Your
   themes** (Import theme... copies a theme and the font it names into `<app config dir>/cheats-themes/` and selects it; Open the folder),

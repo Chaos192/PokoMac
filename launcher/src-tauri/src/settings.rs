@@ -39,6 +39,11 @@ fn map_of(ini: &Option<Ini>) -> HashMap<String, String> {
     ini.as_ref().map(|i| i.all().into_iter().collect()).unwrap_or_default()
 }
 
+/// One value of pkp.ini (None: no file, or no such key): cheats_fetch.rs reads [cheats] dir / enable and [fs] exefs.
+pub fn pkp_value(dir: &Path, section: &str, key: &str) -> Option<String> {
+    load(&dir.join(PKP_INI))?.get(section, key)
+}
+
 pub fn file_for(dir: &Path, which: &str) -> Result<PathBuf, String> {
     match which {
         "pkp" => Ok(dir.join(PKP_INI)),

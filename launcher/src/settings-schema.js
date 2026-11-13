@@ -43,6 +43,22 @@ const controls = (section, key) => ({ file: 'controls', section, key });
 const pkp = (section, key) => ({ file: 'pkp', section, key });
 const config = (key) => ({ file: 'config', section: '', key });
 
+/** Settings > Cheats: what the game's cheat file is (cheats_fetch.rs Info). Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch). */
+function cheatFileText(e) {
+  const i = e.cheatsInfo;
+  if (!i) return '';
+  if (!i.build) return 'Set the game up first: its version decides the cheat file.';
+  if (i.own) return 'Your own file for this version';
+  if (i.fetched) return `${i.fetched.cheats ?? 0} cheats by ${i.fetched.author ?? 'their author'}, all off until you turn them on in the game`;
+  return i.online ? 'None yet for this version' : 'None yet (finding them online is off)';
+}
+
+/** Whose the fetched cheats are, as the source says (cheats_fetch.py SOURCES). */
+function cheatCredit(f) {
+  const home = String(f.home ?? '').replace(/^https:\/\//, '');
+  return `Cheats by ${f.author ?? 'their author'}, from ${f.source_name ?? 'a public collection'} (${home}), fetched ${f.fetched ?? ''}. Licence: ${f.license ?? 'none stated'}. PokoMac fetched them for this computer only.`;
+}
+
 const keyOf = (at) => (at.file === 'config' ? at.key : `${at.section}.${at.key}`);
 const rawOf = (src, at) => src[at.file]?.[keyOf(at)];
 const has = (src, at) => {
@@ -590,6 +606,26 @@ export const SECTIONS = [
         rows: [
           { id: 'cheats_enable', label: 'Enable cheats', type: 'toggle', at: pkp('cheats', 'enable'), def: '0' },
           { id: 'cheats_enable_note', type: 'note', note: () => ({ text: 'An in-game overlay to search memory and run cheat files. For single player.' }) },
+          {
+            // cheats_fetch.rs: the game's public cheat file for its version, fetched on this computer (never bundled), every cheat off
+            id: 'cheats_file', label: 'Cheat file', type: 'info',
+            value: (e) => cheatFileText(e),
+            actions: (e) => [
+              ...(e.cheatsInfo?.online && !e.cheatsInfo?.own
+                ? [{ act: 'cheats-fetch', label: e.cheatsFetching ? 'Looking…' : e.cheatsInfo?.fetched ? 'Check for a newer one' : 'Find cheats online', icon: 'download', disabled: e.cheatsFetching || !e.cheatsInfo?.build }]
+                : []),
+              { act: 'cheats-dir-open', label: 'Open the folder', icon: 'folder-open' },
+            ],
+          },
+          {
+            id: 'cheats_file_note', type: 'note', when: (v, env) => !!env.cheatsInfo?.fetched,
+            note: (e) => ({ text: cheatCredit(e.cheatsInfo.fetched) }),
+          },
+          { id: 'online_cheats', label: 'Find cheat files online', type: 'toggle', at: config('online_cheats'), def: true },
+          {
+            id: 'online_cheats_note', type: 'note',
+            note: () => ({ text: "With cheats on: the game version's public cheat file (tomvita's MyNXCheats first, then switch-cheats-db), fetched on this computer when you turn cheats on or press Play, never bundled with PokoMac. Every cheat starts off and its author is named here. Only the game's id and version go to GitHub." }),
+          },
           {
             // F1 is the settings menu's, so it is not offered. Stored as SDL's names; a select reads its value lower-cased, hence aliases
             id: 'cheats_key', label: 'Overlay key', type: 'select', at: pkp('cheats', 'key'), def: 'F3', aliases: CHEATS_KEY_ALIASES,

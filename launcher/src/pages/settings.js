@@ -51,6 +51,26 @@ export async function render(el, ctx) {
   let cheatsThemes = [];
   const loadCheatsThemes = () => api('cheats_themes').then((l) => { cheatsThemes = l ?? []; }).catch(() => { cheatsThemes = []; });
   await loadCheatsThemes();
+  let cheatsInfo = null;         // cheats_fetch.rs Info: the cheat file (whose, how many) and whether fetching is on
+  let cheatsFetching = false;
+  const loadCheatsInfo = () => api('cheats_info').then((i) => { cheatsInfo = i; }).catch(() => { cheatsInfo = null; });
+  await loadCheatsInfo();
+  /** The game's public cheat file (cheats_fetch.rs): every cheat off, its author named. quiet: no message when there is none. */
+  async function fetchCheats(quiet) {
+    if (cheatsFetching) return;
+    cheatsFetching = true;
+    draw();
+    try {
+      const r = await api('cheats_fetch');
+      if (!quiet || r?.installed) toast(r?.message ?? 'Done', r?.found ? 'ok' : undefined);
+    } catch (e) {
+      if (!quiet) toast(errText(e), 'error');
+    } finally {
+      cheatsFetching = false;
+      await loadCheatsInfo();
+      draw();
+    }
+  }
   let section = store.state.dlss ? 'graphics' : ctx.section || lastSection;
 
   const customOpen = new Set();   // choice rows showing their number field although the value is a preset
@@ -92,6 +112,8 @@ export async function render(el, ctx) {
       steamBusy,
       icloud,
       cheatsThemes,
+      cheatsInfo,
+      cheatsFetching,
       backupDetail: backupDetail(backups),
       importing,
       importResult,
@@ -355,7 +377,12 @@ export async function render(el, ctx) {
       if (!t.value || !Number.isFinite(picked.getTime())) return draw(true);
       return commit(f, Math.round((picked.getTime() - Date.now()) / 60000));
     }
-    if (f.type === 'toggle') return commit(f, t.checked);
+    if (f.type === 'toggle') {
+      // cheats turned on without a cheat file for this version: its public one, every cheat off (cheats_fetch.rs)
+      if (f.id === 'cheats_enable' && t.checked && cheatsInfo && !cheatsInfo.present && cheatsInfo.online) fetchCheats(true);
+      if (f.id === 'online_cheats') setTimeout(() => loadCheatsInfo().then(() => draw()), 300);
+      return commit(f, t.checked);
+    }
     if (f.type === 'slider') return commit(f, Number(t.value));
     return commit(f, t.value);
   }
@@ -599,6 +626,8 @@ export async function render(el, ctx) {
       toast(`Theme \u201c${t.name}\u201d imported`);
     },
     'cheats-themes-open': () => api('cheats_themes_open'),
+    'cheats-fetch': () => fetchCheats(false),
+    'cheats-dir-open': () => api('cheats_dir_open'),
     async 'builds-open'() {
       await flush();
       await chooseBuild(src.config.channel === 'testing' ? 'testing' : 'stable', false);
