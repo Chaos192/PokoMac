@@ -32,7 +32,7 @@ Python is `tools\.venv\Scripts\python.exe` at the repository root (3.13; package
 
 In a CMake build (the game), `cmake/NxRecomp.cmake` gives `nxrecomp_add_module(<target> INPUT <file> ...)`, which
 lifts as a build step and builds the result as a static library (flags: C++20, `-fno-strict-aliasing`, `-ffp-contract=off`,
-`-mcx16`, optnone for functions over `optnone_insns` instructions; `NX_USE_LAUNCHER` adds a time-limit fallback; `NX_SPIN_YIELD`
+`-mcx16`, optnone for functions over `optnone_insns` instructions; `NX_SPIN_YIELD`
 passes `--spin-yield`). Presets:
 `cmake --preset default`.
 

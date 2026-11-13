@@ -37,8 +37,7 @@ class GameConfig:
     # instruction patches: file of `<address> <original word> <new word>` lines (see program.load_patches), or None
     patches = None
 
-    # a function with more than this many instructions is compiled with optnone (bounded compile time); the build's
-    # time-limit fallback (cmake/nx_cc_launcher.py) lowers it when a file still takes too long
+    # a function with more than this many instructions is compiled with optnone (bounded compile time)
     optnone_insns = 20000
 
     # spin loops (spin.py): their head also calls nx_spin_hint(2), the runtime's spin hook (`lift --spin-yield` turns it on too).

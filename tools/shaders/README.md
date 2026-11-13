@@ -7,16 +7,15 @@ then it is tested on a stand-in corpus of real Maxwell binaries.
 | Translator | Source | Output | Role |
 |---|---|---|---|
 | Ryujinx `Ryujinx.Graphics.Shader` (C#) | harness ported from SuperMarioWonderRecomp, built against `refs\ryubing` | SPIR-V directly | primary candidate; also writes `results.tsv`, the binding contract |
-| smo-recomp `mx_translate.c` | copied from smo-recomp | GLSL, compiled to SPIR-V by the Vulkan SDK's `glslang` | second candidate, same inputs |
+| smo-recomp `mx_translate.c` | removed from the tree (2026-11-12, licence: GPL-3.0); git history keeps it | GLSL, compiled to SPIR-V by the Vulkan SDK's `glslang` | was the second candidate |
 
 ## Layout
 
 | Path | What |
 |---|---|
 | `harness/` | C# console `spirv_harness` (single stage or `--batch`), `StaticGpuAccessor.cs` (answers the translator's GPU queries), `translator/` (csproj that builds Ryujinx's translator from staged sources plus the `.patch` files) |
-| `smo/` | `mx_translate.c/.h`, `mx_ops.h` (unmodified), `mx_batch.c` (parallel batch driver), `build.ps1` |
-| `scripts/` | `setup_ryujinx.ps1` (stage Ryujinx sources), `apply_patch.py`, `dksh_to_corpus.py`, `corpus_to_mxs.py`, `build_corpus.py` |
-| `oracle/` | `run_oracle.py` and `expected_sascha.json` |
+| `scripts/` | `setup_ryujinx.ps1` (stage Ryujinx sources), `apply_patch.py`, `dksh_to_corpus.py`, `build_corpus.py` |
+| `oracle/` | `run_oracle.py` and `expected_sascha.json` (it needs the smo candidate, which is no longer in the tree: run it from a checkout before 2026-11-12) |
 | `corpus/sascha_dksh/` | 289 stand-in Maxwell binaries (`.dksh`) plus the build report |
 | `licenses/` | licence texts of the borrowed code |
 | `third_party/`, `build/` | git-ignored: staged Ryujinx sources, build output |
@@ -26,7 +25,6 @@ then it is tested on a stand-in corpus of real Maxwell binaries.
 ```powershell
 powershell -File tools\shaders\scripts\setup_ryujinx.ps1          # copies 3 projects from refs\ryubing (never builds in refs\)
 dotnet build tools\shaders\harness\SpirvHarness.csproj -c Release   # first restore ~2 min (an unreachable NuGet feed times out), then seconds
-pwsh -File tools\shaders\smo\build.ps1                              # clang-cl + vcvars64, builds build\smo\mx_batch.exe
 ```
 
 Needs .NET SDK 10, the Vulkan SDK (`spirv-val`, `glslang`; the oracle defaults to `C:\VulkanSDK\1.4.363.0\Bin`) and the
@@ -50,7 +48,7 @@ uniform buffers with binding 0 reserved for the support buffer, set 1 storage bu
 `refs\SuperMarioWonderRecomp\docs\nvn\TRANSLATOR.md`, which also explains the `ok-retry` status).
 
 Stand-in corpus to translator input: `scripts\dksh_to_corpus.py <dksh dir> --out <dir>` (DKSH to the layout above);
-`scripts\corpus_to_mxs.py <corpus> --out <mxs dir>` (layout above to smo's stage files). The oracle does both itself.
+The oracle does this itself.
 
 ### Differences from Wonder's harness
 
@@ -90,8 +88,6 @@ DebugMode retry); smo 135 valid (87 not translated, 72 of them texture handles, 
 |---|---|---|
 | `harness/*`, `harness/translator/*` (csproj, `spirv-else-if.patch`, `spirv-fmz.patch`, `spirv-nan.patch`), `scripts/apply_patch.py` | SuperMarioWonderRecomp `tools/maxwell/` | MIT, Copyright (c) 2026 BelmanteGu (`licenses/LICENSE.SuperMarioWonderRecomp.MIT`); modified as listed above |
 | staged `third_party/ryubing` (not committed) | Ryubing, Codeberg archive `a82350bb77`, via `refs\ryubing` | MIT (`licenses/LICENSE.Ryubing.MIT`) |
-| `smo/mx_translate.c`, `mx_translate.h`, `mx_ops.h` | smo-recomp `runtime/gfx/` | GPL-3.0 (`licenses/LICENSE.smo-recomp.GPL-3.0`), unmodified |
-| `smo/mx_batch.c`, `scripts/corpus_to_mxs.py` | derived from smo-recomp `tests/mx_all.c`, `tests/check_all_shaders.py` | GPL-3.0 |
 | `corpus/sascha_dksh/*.dksh` | compiled from SaschaWillems/Vulkan GLSL by `uam` 1.0.0 | sources MIT (Sascha Willems); `uam` is zlib-style plus Mesa MIT; output carries the source licence |
 | `ampere/decoder/*.cs` (decode rules) | inverted from Mesa NAK `src/nouveau/compiler/nak/sm70_encode.rs` (no code copied); gaps filled by nvdisasm bit probing (`ampere/probe`) | MIT, Copyright © 2022 Collabora, Ltd. (`licenses/LICENSE.mesa-nak.MIT`) |
 
