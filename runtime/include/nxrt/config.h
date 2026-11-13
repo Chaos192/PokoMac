@@ -22,6 +22,9 @@ void config_clear();
 void config_set(const char* section, const char* key, const char* value);
 
 std::string config_get_str(const char* section, const char* key, const char* def = "");
+// The folder of a run's own reports: the folder of [report] run_file (NXRT_REPORT_RUN_FILE), else of [report] history
+// (NXRT_REPORT_HISTORY); "" when neither is set (Play: the reports stay in the game folder). From AnySwitch by Chaos192.
+std::string run_report_dir();
 int64_t config_get_int(const char* section, const char* key, int64_t def = 0);      // decimal, 0x hex, optional k/m/g suffix not supported
 double config_get_double(const char* section, const char* key, double def = 0.0);
 bool config_get_bool(const char* section, const char* key, bool def = false);       // 1/0 true/false yes/no on/off, case-insensitive

@@ -46,6 +46,7 @@ ScanOptions options() {
     o.filter = s.filter;
     o.ignore_case = s.ignore_case;
     if (o.kind != ScanKind::Numeric) o.text = s.val1;
+    o.spill_dir = scan_spill_dir();
     return o;
 }
 
@@ -88,6 +89,7 @@ void start_first_scan() {
         s.first_done = true;
         s.last_count = s.scanner->result_count();
         NXLOG_I("cheats", "first scan (%s): %zu results", kind_name(opt.kind), s.last_count);
+        after_scan("first scan");
         {
             std::lock_guard<std::recursive_mutex> lk(s.mu);
             char b[256];
@@ -125,6 +127,7 @@ void start_next_scan() {
         s.scanner->next_scan(cmp, v1, v2, s.prog);
         s.last_count = s.scanner->result_count();
         NXLOG_I("cheats", "next scan: %zu results", s.last_count);
+        after_scan("next scan");
         {
             std::lock_guard<std::recursive_mutex> lk(s.mu);
             char b[256];

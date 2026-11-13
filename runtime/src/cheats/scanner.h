@@ -11,6 +11,13 @@
 //   - string (UTF-8 and UTF-16LE, optionally ignoring ASCII case) and array-of-bytes with `??` / nibble wildcards (ScanKind; aob.h);
 //   - alignment, fast scan, a region filter (main, heap, alias, stack, writable only, a custom range), a result cap, undo of one scan.
 //
+// An unknown initial value keeps no entry per address: it keeps a snapshot of the scanned memory, as Cheat Engine's and the Switch cheat
+// tools' memory dumps do, and the candidates stay a bit per slot over it until a next scan leaves few enough for a list (result_cap). The
+// snapshot drops all-zero 4 KiB blocks, keeps the rest in RAM up to a budget that scales with the host's RAM (host RAM / 16, 128 MiB to
+// 2 GiB) and puts what is over it in a file in the run's folder (ScanOptions::spill_dir), deleted with it. Pages the game never touched are
+// not read at all (MemSource::untouched): on macOS reading one gives the process a new zero page. (Live on Pokopia, 11-12: "scan u32
+// unknown" copied the 11 GB heap into the process and took the footprint from 8.2 GB to 19 GB, past the 16 GB memory limit.)
+//
 // The scanner reads memory through a MemSource so it can be tested without the runtime. The live source (LiveSource) is gmem.
 #pragma once
 #include <atomic>
@@ -67,6 +74,13 @@ public:
     virtual std::vector<ScanRegion> regions(const RegionFilter& f) = 0;
     // Copies [addr, addr+n) into dst; false (and the scanner skips the chunk) if any of it is unreadable.
     virtual bool read(uint64_t addr, void* dst, size_t n) = 0;
+    // The pages of [addr, addr+n) the game never touched: they hold zeros, so the scanner does not read them (on macOS a read gives the
+    // process a new zero page: reading 1 GiB of untouched memory adds 1 GiB to its footprint). One flag per *page bytes, the first for the
+    // page holding addr; nonzero = never touched. False: the source cannot tell, and every page is read.
+    virtual bool untouched(uint64_t addr, size_t n, size_t* page, std::vector<uint8_t>* flags) {
+        (void)addr; (void)n; (void)page; (void)flags;
+        return false;
+    }
 };
 
 // What a scan looks for: one numeric type, every numeric type at once, a text, or a byte pattern.
@@ -82,8 +96,20 @@ struct ScanOptions {
     unsigned alignment = 0;           // 0 = the type's own size; 1 = every byte; else the given step
     bool fast = true;                 // align to `alignment`; false scans every byte
     RegionFilter filter;
-    size_t result_cap = 2000000;      // stop collecting results past this many (the count is still reported)
+    size_t result_cap = 2000000;      // stop collecting results past this many (the count is still reported); an unknown value's candidates
+                                      // stay bits over its snapshot until a next scan leaves this many or fewer
     unsigned threads = 0;             // 0 = hardware concurrency, capped
+    uint64_t snapshot_ram = 0;        // unknown value: RAM for its snapshot; 0 = host RAM / 16, 128 MiB to 2 GiB
+    std::string spill_dir;            // where the snapshot's bytes over that go (the run's folder); "" or unwritable = the temp folder
+};
+
+// What an unknown-value snapshot costs now (Scanner::snapshot_stats).
+struct SnapshotStats {
+    uint64_t bytes = 0;               // the memory it stands for (the current snapshot and the undo step's)
+    uint64_t zero = 0;                // of that, all-zero blocks: a bit each
+    uint64_t ram = 0, ram_peak = 0, ram_budget = 0;
+    uint64_t file = 0, file_peak = 0; // bytes in the spill file now, its largest size
+    std::string file_path;            // the spill file (removed from its folder once open: POSIX unlinks it, Windows deletes it on close)
 };
 
 struct ScanProgress {
@@ -103,6 +129,8 @@ struct ScanResult {
     size_t len = 4;                   // bytes the match covers (a text or pattern match: its length)
 };
 
+class SnapStore;   // scanner.cpp
+
 class Scanner {
 public:
     explicit Scanner(std::shared_ptr<MemSource> src);
@@ -115,9 +143,9 @@ public:
 
     bool can_undo() const { return !undo_.empty(); }
     void undo();                      // restore the result set before the last scan
-    void clear();                     // drop results and the snapshot
+    void clear();                     // drop results, the snapshot and the undo steps
 
-    size_t result_count() const;      // total matches (may exceed the results actually stored)
+    size_t result_count() const;      // total matches (may exceed the results actually stored); an unknown value: its candidates
     bool capped() const { return capped_; }
     ScanType type() const { return opt_.type; }
     ScanKind kind() const { return kind_; }
@@ -126,10 +154,15 @@ public:
     std::vector<ScanResult> results(size_t start, size_t max);
     // The value at `addr` of the scan's type, read now.
     bool read_value(uint64_t addr, ScanType t, Value* out);
+    // Why the last scan stopped ("" when it did not: the spill file could not be written or read back).
+    const std::string& error() const { return error_; }
+    SnapshotStats snapshot_stats() const;
 
 private:
     struct Snapshot;
     std::shared_ptr<MemSource> src_;
+    std::shared_ptr<SnapStore> store_;   // the snapshots' bytes (RAM within the budget, then the spill file)
+    std::string error_;
     ScanOptions opt_;
     bool is_unknown_ = false;          // the current results come from an Unknown first scan (snapshot, not a result list)
     bool capped_ = false;
@@ -140,7 +173,7 @@ private:
     ScanKind kind_ = ScanKind::Numeric;
     std::vector<uint8_t> pat_val_, pat_mask_;   // Utf8 / Utf16 / Aob: the pattern the results matched
     size_t pat_len_ = 0;
-    std::shared_ptr<Snapshot> snap_;   // Unknown first scan: the scanned bytes
+    std::shared_ptr<Snapshot> snap_;   // Unknown first scan: the scanned bytes and the candidates over them
     // The result set before each of the last few scans (undo).
     struct UndoState {
         std::vector<uint64_t> addrs, first, last;
@@ -153,6 +186,9 @@ private:
     };
     std::vector<UndoState> undo_;
     void push_undo_state();
+    unsigned slot_step() const;
+    void next_snapshot(NextScan cmp, const Value& v1, const Value& v2, ScanProgress& prog);
+    bool lists_from(const Snapshot& s);
 };
 
 // The live memory source over gmem.

@@ -1060,6 +1060,27 @@ bool animations() {
     return st().animations;
 }
 
+std::string scan_spill_dir() {
+    if (std::string d = run_report_dir(); !d.empty()) return d;
+    return Engine::instance().folder();
+}
+
+void after_scan(const char* what) {
+    State& s = st();
+    if (!s.scanner->error().empty()) {
+        NXLOG_W(kTag, "%s: %s", what, s.scanner->error().c_str());
+        std::lock_guard<std::recursive_mutex> lk(s.mu);   // the page reads it while it draws
+        s.scan_msg = s.scanner->error();
+    }
+    const SnapshotStats ss = s.scanner->snapshot_stats();
+    if (ss.bytes == 0 && ss.file_peak == 0) return;
+    const double mib = 1048576.0;
+    NXLOG_I(kTag, "%s: the search's snapshot stands for %.0f MiB (%.0f MiB of it all-zero blocks, not kept): %.0f MiB in RAM (peak %.0f, "
+            "budget %.0f), %.0f MiB in its file (peak %.0f) %s", what, static_cast<double>(ss.bytes) / mib, static_cast<double>(ss.zero) / mib,
+            static_cast<double>(ss.ram) / mib, static_cast<double>(ss.ram_peak) / mib, static_cast<double>(ss.ram_budget) / mib,
+            static_cast<double>(ss.file) / mib, static_cast<double>(ss.file_peak) / mib, ss.file_path.c_str());
+}
+
 void init() {
     State& s = st();
     if (s.inited) return;

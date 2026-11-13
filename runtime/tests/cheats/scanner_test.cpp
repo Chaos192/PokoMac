@@ -2,14 +2,18 @@
 // Portions Copyright (c) 2026 Chaos192
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // Standalone test of the memory scanner (runtime/src/cheats/scanner.*) against a fake memory source. No runtime dependency: it provides
-// its own MemSource, and gmem is stubbed out (scanner.cpp's GmemSource / live_source are not exercised here).
+// its own MemSource, and gmem is stubbed out (scanner.cpp's GmemSource / live_source are not exercised here). The large-region case spills
+// an unknown value's snapshot to a file in argv[1] (default: the current folder); the file is gone once the search is cleared.
 #define _CRT_SECURE_NO_WARNINGS
 #include "scanner.h"
 #include "gmem.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <map>
+#include <string>
 
 // Stub the two gmem functions scanner.cpp's live source references, so the test links without the runtime (its GmemSource is not used here).
 namespace nxrt::cheats::gmem {
@@ -21,6 +25,98 @@ bool read(uint64_t, void*, size_t) { return false; }
 #include "aob.cpp"
 
 using namespace nxrt::cheats;
+
+#if defined(_WIN32)
+#include <psapi.h>
+#elif defined(__APPLE__)
+#include <mach/mach.h>
+#endif
+
+// The process's memory as the memory guard counts it (Windows: private commit; macOS: the footprint), now and at its peak; 0 elsewhere.
+static uint64_t process_memory() {
+#if defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS_EX pm{};
+    if (K32GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pm), sizeof pm)) return pm.PrivateUsage;
+#elif defined(__APPLE__)
+    task_vm_info_data_t vi{};
+    mach_msg_type_number_t n = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&vi), &n) == KERN_SUCCESS) return vi.phys_footprint;
+#endif
+    return 0;
+}
+static uint64_t process_memory_peak() {
+#if defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS_EX pm{};
+    if (K32GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pm), sizeof pm)) return pm.PeakPagefileUsage;
+#elif defined(__APPLE__)
+    task_vm_info_data_t vi{};
+    mach_msg_type_number_t n = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&vi), &n) == KERN_SUCCESS) return vi.ledger_phys_footprint_peak;
+#endif
+    return 0;
+}
+
+static std::string g_spill_dir = ".";
+
+// A large sparse source: `size` bytes of address space in which one page in `every` holds data (a nonzero pattern of the address); the rest
+// were never touched (zeros, and untouched() says so, as the live source's mincore does on macOS). set() changes a u32; in a page never
+// touched it touches that page (zeros around the value).
+constexpr uint64_t kBigPage = 16384;
+struct BigSource : MemSource {
+    uint64_t base, size, every;
+    std::vector<uint8_t> mode;            // per page: 0 never touched, 1 the pattern, 2 touched later (zeros)
+    std::map<uint64_t, uint32_t> words;   // set() values
+    std::atomic<uint64_t> untouched_reads{0};
+    BigSource(uint64_t b, uint64_t n, uint64_t e) : base(b), size(n), every(e), mode(static_cast<size_t>(n / kBigPage), 0) {
+        for (size_t i = 0; i < mode.size(); i += static_cast<size_t>(e)) mode[i] = 1;
+    }
+    uint64_t data_bytes() const { return (mode.size() + every - 1) / every * kBigPage; }
+    static uint32_t pattern(uint64_t a) { return static_cast<uint32_t>(((a * 0x9E3779B97F4A7C15ull) >> 40) & 0x0FFFFFFF) | 1; }
+    size_t page_of(uint64_t a) const { return static_cast<size_t>((a - base) / kBigPage); }
+    bool is_touched(uint64_t a) const { return mode[page_of(a)] != 0; }
+    uint32_t word(uint64_t a) const {
+        auto it = words.find(a);
+        if (it != words.end()) return it->second;
+        return mode[page_of(a)] == 1 ? pattern(a) : 0;
+    }
+    void set(uint64_t a, uint32_t v) {
+        uint8_t& m = mode[page_of(a)];
+        if (!m) m = 2;
+        words[a] = v;
+    }
+    std::vector<ScanRegion> regions(const RegionFilter&) override { return {{base, size, 3, "heap"}}; }
+    bool read(uint64_t a, void* d, size_t n) override {
+        if (a < base || a + n > base + size) return false;
+        uint8_t* out = static_cast<uint8_t*>(d);
+        for (uint64_t q = a; q < a + n;) {
+            const size_t pi = page_of(q);
+            const uint64_t pe = std::min<uint64_t>(a + n, base + (pi + 1) * kBigPage);
+            if (mode[pi] == 0) untouched_reads += pe - q;
+            if (mode[pi] == 1) {
+                for (uint64_t x = q; x < pe; ++x) out[x - a] = static_cast<uint8_t>(pattern(x & ~uint64_t{3}) >> (8 * (x & 3)));
+            } else {
+                std::memset(out + (q - a), 0, static_cast<size_t>(pe - q));
+            }
+            q = pe;
+        }
+        for (auto it = words.lower_bound(a >= 3 ? a - 3 : 0); it != words.end() && it->first < a + n; ++it)
+            for (uint64_t k = 0; k < 4; ++k) {
+                const uint64_t x = it->first + k;
+                if (x >= a && x < a + n) out[x - a] = static_cast<uint8_t>(it->second >> (8 * k));
+            }
+        return true;
+    }
+    bool untouched(uint64_t a, size_t n, size_t* page, std::vector<uint8_t>* flags) override {
+        const uint64_t lo = a & ~(kBigPage - 1), hi = (a + n + kBigPage - 1) & ~(kBigPage - 1);
+        flags->assign(static_cast<size_t>((hi - lo) / kBigPage), 0);
+        for (size_t i = 0; i < flags->size(); ++i) {
+            const uint64_t pa = lo + i * kBigPage;
+            (*flags)[i] = pa >= base && pa < base + size && mode[page_of(pa)] == 0;
+        }
+        *page = static_cast<size_t>(kBigPage);
+        return true;
+    }
+};
 
 // A fake source: one region backed by a byte vector.
 struct FakeSource : MemSource {
@@ -40,7 +136,8 @@ struct FakeSource : MemSource {
 static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #c); ++g_fail; } } while (0)
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc > 1) g_spill_dir = argv[1];     // where the large region's snapshot spills (the build folder by default)
     const uint64_t B = 0x7800000000ull;
     auto src = std::make_shared<FakeSource>(B, 0x10000);
     FakeSource& f = *src;
@@ -95,7 +192,7 @@ int main() {
     Scanner sc2(src);
     ScanProgress p2;
     sc2.first_scan(opt, FirstScan::Unknown, v1, v2, p2);
-    CHECK(sc2.result_count() == 0);     // not materialised yet
+    CHECK(sc2.result_count() == 0x10000 / 4);     // every u32 slot is a candidate (a bit over the snapshot, not a list entry)
     f.put<uint32_t>(B + 0x2000, 1);     // this one drops
     sc2.next_scan(NextScan::Decreased, v1, v2, p2);
     CHECK(sc2.result_count() >= 1);
@@ -286,6 +383,159 @@ int main() {
         sk.next_scan(NextScan::Decreased, z, z, p);
         CHECK(sk.result_count() == 1 && sk.results(0, 1)[0].addr == B + 0x80);
         CHECK(sk.results(0, 1)[0].first.as_int() == 5);
+    }
+
+    // --- unknown value with few slots allowed in a list (result_cap 100): the candidates stay bits over the snapshot until a next scan
+    //     leaves 100 or fewer; undo returns to the snapshot; "same as first" reads the first scan's bytes ---
+    {
+        auto ks = std::make_shared<FakeSource>(B, 0x10000);
+        ks->put<uint32_t>(B + 0x100, 7);
+        Scanner sk(ks);
+        ScanOptions o; o.type = ScanType::U32; o.result_cap = 100;
+        ScanProgress p;
+        Value z;
+        sk.first_scan(o, FirstScan::Unknown, z, z, p);
+        CHECK(sk.result_count() == 0x10000 / 4);
+        sk.next_scan(NextScan::Unknown, z, z, p);               // everything stays: still the snapshot, its last values now separate
+        CHECK(sk.result_count() == 0x10000 / 4);
+        {
+            auto r = sk.results(0x40, 2);                       // the 0x40th slot on: B+0x100 holds 7 (first and now)
+            CHECK(r.size() == 2 && r[0].addr == B + 0x100 && r[0].first.as_int() == 7 && r[0].last.as_int() == 7 && r[1].addr == B + 0x104);
+        }
+        ks->put<uint32_t>(B + 0x100, 9);
+        ks->put<uint32_t>(B + 0x200, 3);
+        sk.next_scan(NextScan::Changed, z, z, p);               // two left: a list
+        CHECK(sk.result_count() == 2);
+        {
+            auto r = sk.results(0, 10);
+            CHECK(r.size() == 2 && r[0].addr == B + 0x100 && r[0].first.as_int() == 7 && r[0].last.as_int() == 9);
+            CHECK(r.size() == 2 && r[1].addr == B + 0x200 && r[1].first.as_int() == 0 && r[1].last.as_int() == 3);
+        }
+        sk.undo();                                              // back to the snapshot
+        CHECK(sk.result_count() == 0x10000 / 4);
+        ks->put<uint32_t>(B + 0x100, 7);                        // back to its first value; B+0x200 stays 3
+        sk.next_scan(NextScan::SameAsFirst, z, z, p);
+        CHECK(sk.result_count() == 0x10000 / 4 - 1);
+        {
+            auto r = sk.results(0, sk.result_count());
+            bool a = false, b = false, ordered = true;
+            for (size_t k = 0; k < r.size(); ++k) {
+                a |= r[k].addr == B + 0x100;
+                b |= r[k].addr == B + 0x200;
+                if (k && r[k].addr <= r[k - 1].addr) ordered = false;
+            }
+            CHECK(r.size() == 0x10000 / 4 - 1 && a && !b && ordered);
+        }
+        ks->put<uint32_t>(B + 0x3000, 1);
+        sk.next_scan(NextScan::Increased, z, z, p);
+        CHECK(sk.result_count() == 1 && sk.results(0, 1)[0].addr == B + 0x3000 && sk.results(0, 1)[0].first.as_int() == 0);
+        sk.clear();
+        CHECK(sk.result_count() == 0 && !sk.can_undo() && sk.snapshot_stats().bytes == 0);
+    }
+
+    // --- all numeric types, unknown value: a u32 that drops from 100 to 95 is found in every type that covers it, in address order ---
+    {
+        auto as = std::make_shared<FakeSource>(B, 0x1000);
+        as->put<uint32_t>(B + 0x304, 100);
+        Scanner sa(as);
+        ScanOptions o; o.kind = ScanKind::AllNumeric; o.type = ScanType::U32;
+        ScanProgress p;
+        Value z;
+        sa.first_scan(o, FirstScan::Unknown, z, z, p);
+        CHECK(sa.result_count() == 0x1000 + 0x800 + 0x400 + 0x200 + 0x400 + 0x200);   // u8, u16, u32, u64, f32, f64 slots
+        as->put<uint32_t>(B + 0x304, 95);
+        sa.next_scan(NextScan::Decreased, z, z, p);
+        auto r = sa.results(0, 10);
+        CHECK(r.size() == 6);
+        bool ordered = true, u32 = false;
+        for (size_t k = 0; k < r.size(); ++k) {
+            if (k && (r[k].addr < r[k - 1].addr || (r[k].addr == r[k - 1].addr && r[k].type <= r[k - 1].type))) ordered = false;
+            if (r[k].addr == B + 0x304 && r[k].type == ScanType::U32 && r[k].first.as_int() == 100 && r[k].last.as_int() == 95) u32 = true;
+        }
+        CHECK(ordered && u32 && r.size() == 6 && r[0].addr == B + 0x300 && r[0].type == ScanType::U64);
+    }
+
+    // --- a large region: an unknown u32 over 8 GiB of address space, as Pokopia's 11 GB heap (11-12: "scan u32 unknown" copied all of it
+    //     and took the process from 8.2 GB to 19 GB). Untouched pages are never read; the snapshot keeps 16 MiB in RAM and spills the rest
+    //     to its file; the process grows by about the budget, not by the region; the values that come back from the file are right ---
+    {
+        const uint64_t size = uint64_t{8} << 30;
+        auto bs = std::make_shared<BigSource>(B, size, 256);     // one page in 256 holds data: 32 MiB
+        Scanner sb(bs);
+        ScanOptions o; o.type = ScanType::U32; o.snapshot_ram = uint64_t{16} << 20; o.spill_dir = g_spill_dir;
+        ScanProgress p;
+        Value z;
+        const uint64_t mem0 = process_memory();
+        sb.first_scan(o, FirstScan::Unknown, z, z, p);
+        const SnapshotStats s1 = sb.snapshot_stats();
+        std::printf("large region: first scan: %llu candidates; snapshot of %llu MiB: %llu MiB zero, %llu MiB RAM (budget %llu), %llu MiB in %s; "
+                    "untouched bytes read %llu\n", (unsigned long long)sb.result_count(), (unsigned long long)(s1.bytes >> 20),
+                    (unsigned long long)(s1.zero >> 20), (unsigned long long)(s1.ram >> 20), (unsigned long long)(s1.ram_budget >> 20),
+                    (unsigned long long)(s1.file >> 20), s1.file_path.c_str(), (unsigned long long)bs->untouched_reads.load());
+        CHECK(sb.error().empty());
+        CHECK(sb.result_count() == size / 4);
+        CHECK(bs->untouched_reads.load() == 0);
+        CHECK(s1.bytes == size && s1.zero == size - bs->data_bytes());
+        CHECK(s1.ram <= o.snapshot_ram && s1.ram_peak <= o.snapshot_ram);
+        CHECK(s1.file == bs->data_bytes() - s1.ram);             // the rest is in the file
+        // values change: in data pages (most of them past the RAM budget, so in the file) and one in a page never touched before
+        const uint64_t at[] = {B + 0x40, B + (uint64_t{1} << 30) + 0x80, B + (uint64_t{5} << 30) + 0x1234, B + size - kBigPage * 256 + 0x10};
+        uint32_t was[4];
+        for (int k = 0; k < 4; ++k) { was[k] = bs->word(at[k]); bs->set(at[k], was[k] + 5); }
+        const uint64_t fresh = B + (uint64_t{3} << 30) + kBigPage + 8;   // the page after 3 GiB: untouched
+        CHECK(!bs->is_touched(fresh));
+        bs->set(fresh, 77);
+        sb.next_scan(NextScan::Unchanged, z, z, p);               // nearly every slot: still the snapshot
+        CHECK(sb.result_count() == size / 4 - 5);
+        CHECK(sb.error().empty());
+        sb.undo();
+        sb.next_scan(NextScan::Increased, z, z, p);               // five: a list
+        CHECK(sb.result_count() == 5);
+        {
+            auto r = sb.results(0, 10);
+            bool ok = r.size() == 5;
+            for (int k = 0; k < 4 && ok; ++k) {
+                bool hit = false;
+                for (auto& e : r) hit |= e.addr == at[k] && (uint32_t)e.first.bits == was[k] && (uint32_t)e.last.bits == was[k] + 5;
+                ok = hit;
+            }
+            bool hit = false;
+            for (auto& e : r) hit |= e.addr == fresh && e.first.bits == 0 && e.last.bits == 77;
+            CHECK(ok && hit);
+        }
+        sb.undo();                                               // the unchanged step and the snapshot again
+        CHECK(sb.result_count() == size / 4);
+        const uint64_t mem1 = process_memory_peak();
+        const SnapshotStats s2 = sb.snapshot_stats();
+        std::printf("large region: process memory %llu MiB before, peak %llu MiB; snapshot RAM peak %llu MiB, file peak %llu MiB\n",
+                    (unsigned long long)(mem0 >> 20), (unsigned long long)(mem1 >> 20), (unsigned long long)(s2.ram_peak >> 20),
+                    (unsigned long long)(s2.file_peak >> 20));
+        CHECK(s2.ram_peak <= o.snapshot_ram);
+        if (mem0 && mem1) CHECK(mem1 < mem0 + (uint64_t{160} << 20));   // the budget and the workers' chunks, not 8 GiB
+        const std::string spill = s2.file_path;
+        sb.clear();
+        const SnapshotStats s3 = sb.snapshot_stats();
+        CHECK(s3.bytes == 0 && s3.ram == 0 && s3.file == 0);
+        std::error_code ec;
+        CHECK(!spill.empty() && !std::filesystem::exists(std::filesystem::path(reinterpret_cast<const char8_t*>(spill.c_str())), ec));   // the spill file is gone
+    }
+
+    // --- a spill folder that is not there (a game's cheats folder before its first cheat): the snapshot spills to the temp folder; the
+    //     values come back from it ---
+    {
+        auto ks = std::make_shared<FakeSource>(B, 0x400000);
+        for (uint64_t a = 0; a < 0x400000; a += 4) ks->put<uint32_t>(B + a, static_cast<uint32_t>(a | 1));
+        Scanner sk(ks);
+        ScanOptions o; o.type = ScanType::U32; o.snapshot_ram = 1 << 20; o.spill_dir = g_spill_dir + "/no such folder/x";
+        ScanProgress p;
+        Value z;
+        sk.first_scan(o, FirstScan::Unknown, z, z, p);
+        const SnapshotStats ss = sk.snapshot_stats();
+        std::printf("spill folder not there: %s%s\n", ss.file_path.c_str(), sk.error().c_str());
+        CHECK(sk.error().empty() && sk.result_count() == 0x400000 / 4 && ss.file > 0 && ss.file_path.find("no such folder") == std::string::npos);
+        ks->put<uint32_t>(B + 0x3FFFF0, 1);                    // was 0x3FFFF1 (three of the four chunks are in the file)
+        sk.next_scan(NextScan::Decreased, z, z, p);
+        CHECK(sk.result_count() == 1 && sk.results(0, 1)[0].addr == B + 0x3FFFF0 && sk.results(0, 1)[0].first.bits == 0x3FFFF1);
     }
 
     if (g_fail == 0) std::printf("ALL SCANNER TESTS PASSED\n");

@@ -10,6 +10,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <filesystem>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -306,6 +307,22 @@ bool config_cache_env(bool on) {
     bump_gen();
     if (on && config_get_bool("config", "cache", true)) g_cache_on.store(true, std::memory_order_relaxed);
     return g_cache_on.load(std::memory_order_relaxed);
+}
+
+std::string run_report_dir() {
+    namespace fs = std::filesystem;
+    auto folder_of = [](const std::string& file) {
+        if (file.empty() || file == "off" || file == "0" || file == "false") return std::string();
+        const auto u8 = fs::absolute(fs::u8path(file)).parent_path().u8string();
+        return std::string(u8.begin(), u8.end());
+    };
+    if (config_has("report", "run_file")) {
+        if (std::string d = folder_of(config_get_str("report", "run_file")); !d.empty()) return d;
+    }
+    if (config_has("report", "history")) {
+        if (std::string d = folder_of(config_get_str("report", "history")); !d.empty()) return d;
+    }
+    return std::string();
 }
 
 std::string config_get_str(const char* section, const char* key, const char* def) {

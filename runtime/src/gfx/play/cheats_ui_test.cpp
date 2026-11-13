@@ -225,6 +225,7 @@ void step(const Step& sp) {
             if (o.kind == ScanKind::AllNumeric && w.size() > 3) o.text = w[3];   // parsed as each type ("100" also finds 100.0f)
             label = w[1] + " " + w[2] + (w.size() > 3 ? " " + w[3] : "") + (w.size() > 4 ? " " + w[4] : "");
         }
+        o.spill_dir = scan_spill_dir();
         const ScanType t = o.type;
         run_bg([o, cmp, v1, v2, t, label] {
             State& s = st();
@@ -235,6 +236,7 @@ void step(const Step& sp) {
             s.kind_i = static_cast<int>(t);
             NXLOG_I(kTag, "test: first scan (%s): %zu results, %.1f MiB scanned", label.c_str(), s.last_count,
                     static_cast<double>(s.prog.bytes_total.load()) / 1048576.0);
+            after_scan("test: first scan");
             std::lock_guard<std::recursive_mutex> lk(s.mu);
             s.history.push_back("first: " + label + " -> " + std::to_string(s.last_count) + " results");
         });
@@ -259,6 +261,7 @@ void step(const Step& sp) {
             s.scanner->next_scan(c, v1, v2, s.prog);
             s.last_count = s.scanner->result_count();
             NXLOG_I(kTag, "test: next scan (%s): %zu results", name.c_str(), s.last_count);
+            after_scan("test: next scan");
             std::lock_guard<std::recursive_mutex> lk(s.mu);
             s.history.push_back("next: " + name + " -> " + std::to_string(s.last_count) + " results");
         });

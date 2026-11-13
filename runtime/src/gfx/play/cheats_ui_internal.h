@@ -280,6 +280,11 @@ const char* const* kind_names();                              // the scan kind l
 int kind_count();
 ScanType kind_type(int i);
 std::string value_text(uint64_t addr, ScanType t);
+// Where an unknown-value search keeps what is over its RAM budget (ScanOptions::spill_dir): the run's own folder (a test run's), else the
+// game's cheats folder. The file leaves the folder as soon as it is open (scanner.cpp SnapStore).
+std::string scan_spill_dir();
+// After a scan: its error for the page (scan_msg), and a log line of what an unknown value's snapshot costs.
+void after_scan(const char* what);
 
 // ---- text entry with the on-screen keyboard (cheats_ui_osk.cpp) ------------------------------------------------------------------------
 enum class Keys : uint8_t { Text, Hex, Number };

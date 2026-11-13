@@ -5,8 +5,11 @@
 #include "scanner.h"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
+#include <filesystem>
 #include <limits>
+#include <map>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -15,6 +18,23 @@
 
 #include "aob.h"
 #include "gmem.h"
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <process.h>
+#else
+#include <sys/mman.h>
+#include <unistd.h>
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
+#endif
 
 namespace nxrt::cheats {
 
@@ -234,16 +254,28 @@ public:
         return out;
     }
     bool read(uint64_t addr, void* dst, size_t n) override { return gmem::read(addr, dst, n); }
+#if defined(__APPLE__)
+    // mincore: a page of anonymous memory that is neither resident nor paged out (compressed or swapped: MINCORE_PAGED_OUT) was never
+    // touched and reads as zeros. Measured on the Mac (scratch/pokopia-cheats/tools/fp_probe.c, a named memory entry as the heap is mapped):
+    // an untouched page answers 0x80 (anonymous only), a written one 0x87, and reading 768 MiB of untouched pages raised the footprint
+    // from 257 MB to 1026 MB. A page of a file mapping is always read.
+    bool untouched(uint64_t addr, size_t n, size_t* page, std::vector<uint8_t>* flags) override {
+        const uint64_t pg = static_cast<uint64_t>(getpagesize());
+        if (pg == 0 || n == 0) return false;
+        const uint64_t lo = addr & ~(pg - 1), hi = (addr + n + pg - 1) & ~(pg - 1);
+        flags->assign(static_cast<size_t>((hi - lo) / pg), 0);
+        if (mincore(reinterpret_cast<void*>(lo), static_cast<size_t>(hi - lo), reinterpret_cast<char*>(flags->data())) != 0) return false;
+        constexpr uint8_t kIncore = 0x01, kPagedOut = 0x20, kAnonymous = 0x80;   // MINCORE_INCORE, MINCORE_PAGED_OUT, MINCORE_ANONYMOUS
+        for (uint8_t& v : *flags) v = (v & kAnonymous) && !(v & (kIncore | kPagedOut)) ? 1 : 0;
+        *page = static_cast<size_t>(pg);
+        return true;
+    }
+#endif
 };
 
 }  // namespace
 
 std::shared_ptr<MemSource> live_source() { return std::make_shared<GmemSource>(); }
-
-struct Scanner::Snapshot {
-    struct Chunk { uint64_t addr; std::vector<uint8_t> bytes; };
-    std::vector<Chunk> chunks;
-};
 
 const char* kind_name(ScanKind k) {
     switch (k) {
@@ -320,9 +352,373 @@ bool build_pattern(const ScanOptions& opt, std::vector<uint8_t>* val, std::vecto
 bool is_pattern_kind(ScanKind k) { return k == ScanKind::Utf8 || k == ScanKind::Utf16 || k == ScanKind::Aob; }
 }  // namespace
 
+// ---- the unknown value's snapshot ---------------------------------------------------------------------------------------------------------
+
+namespace {
+constexpr size_t kChunk = size_t{1} << 20;   // the unit the scanner reads, keeps in a snapshot, and splits the work by
+constexpr size_t kBlock = 4096;              // a snapshot keeps an all-zero block of this size as one bit
+constexpr uint64_t kNoFile = ~uint64_t{0};
+
+uint64_t host_ram() {
+#if defined(_WIN32)
+    MEMORYSTATUSEX m;
+    m.dwLength = sizeof m;
+    if (GlobalMemoryStatusEx(&m)) return m.ullTotalPhys;
+#elif defined(__APPLE__)
+    uint64_t v = 0;
+    size_t n = sizeof v;
+    if (sysctlbyname("hw.memsize", &v, &n, nullptr, 0) == 0 && v) return v;
+#else
+    const long pages = sysconf(_SC_PHYS_PAGES), ps = sysconf(_SC_PAGE_SIZE);
+    if (pages > 0 && ps > 0) return static_cast<uint64_t>(pages) * static_cast<uint64_t>(ps);
+#endif
+    return uint64_t{8} << 30;
+}
+// RAM for the snapshot: a sixteenth of the host's (2 GiB of a 32 GiB machine and up, 1 GiB of a 16 GiB one), at least 128 MiB.
+uint64_t snapshot_budget() { return std::clamp<uint64_t>(host_ram() / 16, uint64_t{128} << 20, uint64_t{2} << 30); }
+
+bool zero_block(const uint8_t* p, size_t n) {
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t w;
+        std::memcpy(&w, p + i, 8);
+        if (w) return false;
+    }
+    for (; i < n; ++i)
+        if (p[i]) return false;
+    return true;
+}
+
+int seek_to(std::FILE* f, uint64_t off) {
+#if defined(_WIN32)
+    return _fseeki64(f, static_cast<long long>(off), SEEK_SET);
+#else
+    return fseeko(f, static_cast<off_t>(off), SEEK_SET);
+#endif
+}
+
+unsigned process_id() {
+#if defined(_WIN32)
+    return static_cast<unsigned>(_getpid());
+#else
+    return static_cast<unsigned>(getpid());
+#endif
+}
+}  // namespace
+
+// The bytes of the snapshots: per 1 MiB chunk a blob whose all-zero 4 KiB blocks are only bits; the rest in RAM while the store's RAM is
+// under its budget, else in the spill file (first fit over the space blobs gave back). Thread safe.
+class SnapStore : public std::enable_shared_from_this<SnapStore> {
+public:
+    struct Blob {
+        std::shared_ptr<SnapStore> store;
+        uint32_t size = 0;
+        std::vector<uint64_t> zero;          // a bit per block: all zero, not kept
+        std::vector<uint8_t> ram;            // the other blocks, packed, when kept in RAM
+        uint64_t file_off = kNoFile;         // or where they are in the spill file
+        uint64_t packed = 0;                 // their bytes
+        ~Blob() {
+            if (store) store->release(*this);
+        }
+    };
+    using BlobRef = std::shared_ptr<const Blob>;
+
+    SnapStore(uint64_t budget, std::string dir) : budget_(budget), dir_(std::move(dir)) {}
+    ~SnapStore() { close_file(); }
+    uint64_t budget() const { return budget_; }
+    const std::string& dir() const { return dir_; }
+
+    // Keeps n bytes; null when the spill file could not take them (error()).
+    BlobRef put(const uint8_t* p, size_t n) {
+        thread_local std::vector<uint8_t> packed;
+        packed.clear();
+        auto b = std::make_shared<Blob>();
+        b->size = static_cast<uint32_t>(n);
+        const size_t nb = (n + kBlock - 1) / kBlock;
+        b->zero.assign((nb + 63) / 64, 0);
+        for (size_t k = 0; k < nb; ++k) {
+            const size_t o = k * kBlock, len = std::min(kBlock, n - o);
+            if (zero_block(p + o, len)) b->zero[k >> 6] |= uint64_t{1} << (k & 63);
+            else packed.insert(packed.end(), p + o, p + o + len);
+        }
+        b->packed = packed.size();
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!packed.empty()) {
+            if (ram_ + packed.size() <= budget_) {
+                b->ram.assign(packed.begin(), packed.end());
+                ram_ += packed.size();
+                ram_peak_ = std::max(ram_peak_, ram_);
+            } else {
+                if (!f_ && !open_file()) return nullptr;
+                const uint64_t off = alloc(packed.size());
+                if (seek_to(f_, off) != 0 || std::fwrite(packed.data(), 1, packed.size(), f_) != packed.size()) {
+                    error_ = "could not write the search's snapshot file " + path_ + " (is the disk full?)";
+                    free_extent(off, packed.size());
+                    return nullptr;
+                }
+                b->file_off = off;
+                file_live_ += packed.size();
+                file_peak_ = std::max(file_peak_, end_);
+            }
+        }
+        bytes_ += n;
+        zero_ += n - b->packed;
+        b->store = shared_from_this();
+        return b;
+    }
+    // The blob's bytes into dst (b.size bytes); false when the spill file could not be read back.
+    bool get(const Blob& b, uint8_t* dst) const {
+        thread_local std::vector<uint8_t> tmp;
+        const uint8_t* src = b.ram.data();
+        if (b.file_off != kNoFile) {
+            tmp.resize(static_cast<size_t>(b.packed));
+            std::lock_guard<std::mutex> lk(mu_);
+            if (!f_ || seek_to(f_, b.file_off) != 0 || std::fread(tmp.data(), 1, tmp.size(), f_) != tmp.size()) {
+                error_ = "could not read back the search's snapshot file " + path_;
+                return false;
+            }
+            src = tmp.data();
+        }
+        size_t q = 0;
+        for (size_t k = 0, nb = (b.size + kBlock - 1) / kBlock; k < nb; ++k) {
+            const size_t o = k * kBlock, len = std::min<size_t>(kBlock, b.size - o);
+            if ((b.zero[k >> 6] >> (k & 63)) & 1) {
+                std::memset(dst + o, 0, len);
+            } else {
+                std::memcpy(dst + o, src + q, len);
+                q += len;
+            }
+        }
+        return true;
+    }
+    SnapshotStats stats() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        SnapshotStats st;
+        st.bytes = bytes_;
+        st.zero = zero_;
+        st.ram = ram_;
+        st.ram_peak = ram_peak_;
+        st.ram_budget = budget_;
+        st.file = file_live_;
+        st.file_peak = file_peak_;
+        st.file_path = path_;
+        return st;
+    }
+    std::string error() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return error_;
+    }
+
+private:
+    void release(const Blob& b) {
+        std::lock_guard<std::mutex> lk(mu_);
+        bytes_ -= b.size;
+        zero_ -= b.size - b.packed;
+        ram_ -= b.ram.size();
+        if (b.file_off != kNoFile) {
+            file_live_ -= b.packed;
+            free_extent(b.file_off, b.packed);
+            if (file_live_ == 0) close_file();
+        }
+    }
+    // Opens the spill file in the store's folder (else the temp folder: a game's cheats folder may not be there yet) and takes it out of
+    // the folder at once: POSIX unlinks the open file, Windows' "D" deletes it when it is closed (by the system too, however the process
+    // ends). The space goes back when the last blob in it goes.
+    bool open_file() {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        std::vector<fs::path> dirs;
+        if (!dir_.empty()) dirs.push_back(fs::path(reinterpret_cast<const char8_t*>(dir_.c_str())));
+        if (const fs::path tmp = fs::temp_directory_path(ec); !ec && !tmp.empty()) dirs.push_back(tmp);
+        static std::atomic<unsigned> seq{0};
+        std::string tried;
+        for (const fs::path& dir : dirs) {
+            char name[80];
+            std::snprintf(name, sizeof name, "nxrt-search-%u-%u.snapshot", process_id(), seq.fetch_add(1));
+            const fs::path p = dir / name;
+            const auto u8 = p.u8string();
+            path_.assign(u8.begin(), u8.end());
+#if defined(_WIN32)
+            f_ = _wfopen(p.c_str(), L"w+bD");
+#else
+            f_ = std::fopen(p.c_str(), "w+b");
+            if (f_) ::unlink(p.c_str());
+#endif
+            if (f_) return true;
+            tried += (tried.empty() ? "" : ", ") + path_;
+        }
+        error_ = "could not create the search's snapshot file (" + (tried.empty() ? std::string("no folder") : tried) + ")";
+        return false;
+    }
+    void close_file() {
+        if (f_) std::fclose(f_);
+        f_ = nullptr;
+        end_ = 0;
+        free_.clear();
+    }
+    uint64_t alloc(uint64_t n) {
+        for (auto it = free_.begin(); it != free_.end(); ++it) {
+            if (it->second < n) continue;
+            const uint64_t off = it->first, rest = it->second - n;
+            free_.erase(it);
+            if (rest) free_[off + n] = rest;
+            return off;
+        }
+        const uint64_t off = end_;
+        end_ += n;
+        return off;
+    }
+    void free_extent(uint64_t off, uint64_t n) {
+        if (n == 0) return;
+        auto it = free_.emplace(off, n).first;
+        if (auto nx = std::next(it); nx != free_.end() && it->first + it->second == nx->first) {
+            it->second += nx->second;
+            free_.erase(nx);
+        }
+        if (it != free_.begin()) {
+            auto pv = std::prev(it);
+            if (pv->first + pv->second == it->first) {
+                pv->second += it->second;
+                free_.erase(it);
+                it = pv;
+            }
+        }
+        if (it->first + it->second == end_) {
+            end_ = it->first;
+            free_.erase(it);
+        }
+    }
+
+    const uint64_t budget_;
+    const std::string dir_;
+    mutable std::mutex mu_;
+    std::FILE* f_ = nullptr;
+    std::string path_;
+    mutable std::string error_;
+    uint64_t end_ = 0, file_live_ = 0, file_peak_ = 0, ram_ = 0, ram_peak_ = 0, bytes_ = 0, zero_ = 0;
+    std::map<uint64_t, uint64_t> free_;   // spill file space blobs gave back: offset -> bytes
+};
+
+// An unknown value's state: per chunk the bytes at the first scan, the bytes at the last scan (only the candidates' bytes: the rest zeroed,
+// so the blocks without a candidate cost a bit), and the candidates as a bit per slot (null: every slot still is one).
+struct Scanner::Snapshot {
+    struct Chunk {
+        uint64_t addr = 0;
+        uint32_t size = 0;
+        SnapStore::BlobRef first, last, cand;
+        uint64_t count = 0;           // candidates in the chunk
+    };
+    std::vector<Chunk> chunks;        // in address order
+    uint64_t count = 0;               // candidates in all
+};
+
+namespace {
+// The slots of one chunk: per type (one, or the six of an all-numeric search) the offsets 0, step, 2*step, ... whose value fits in the chunk,
+// as the first scan of a known value walks them. A slot's candidate bit is its plane's base + offset / step.
+struct Plane {
+    ScanType t;
+    size_t size, step, base, n;
+};
+std::vector<Plane> planes_for(size_t chunk, bool all, ScanType t, unsigned step, bool fast) {
+    std::vector<Plane> out;
+    size_t base = 0;
+    auto add = [&](ScanType at, size_t st) {
+        const size_t s = type_size(at);
+        const size_t n = chunk >= s ? (chunk - s) / st + 1 : 0;
+        out.push_back({at, s, st, base, n});
+        base += n;
+    };
+    if (all) {
+        for (ScanType at : kAllTypes) add(at, fast ? type_size(at) : 1);
+    } else {
+        add(t, step ? step : 1);
+    }
+    return out;
+}
+size_t slot_count(const std::vector<Plane>& pl) { return pl.empty() ? 0 : pl.back().base + pl.back().n; }
+bool bit_at(const uint64_t* bits, size_t b) { return !bits || ((bits[b >> 6] >> (b & 63)) & 1); }
+
+// fn(plane, offset, bit) for every candidate (every slot when bits is null), plane by plane.
+template <class Fn>
+void each_slot(const std::vector<Plane>& planes, const uint64_t* bits, Fn&& fn) {
+    for (const Plane& pl : planes) {
+        for (size_t k = 0; k < pl.n;) {
+            const size_t b = pl.base + k;
+            if (bits) {
+                const uint64_t w = bits[b >> 6] >> (b & 63);
+                if (!w) { k += 64 - (b & 63); continue; }
+                if (!(w & 1)) { k += static_cast<size_t>(std::countr_zero(w)); continue; }
+            }
+            fn(pl, k * pl.step, b);
+            ++k;
+        }
+    }
+}
+// The same in address order (an all-numeric search: each offset's types in kAllTypes order, as a first scan lists them); fn returns false
+// to stop.
+template <class Fn>
+bool each_slot_ordered(const std::vector<Plane>& planes, const uint64_t* bits, size_t chunk, Fn&& fn) {
+    if (planes.size() == 1) {
+        bool go = true;
+        const Plane& pl = planes[0];
+        for (size_t k = 0; k < pl.n && go;) {
+            const size_t b = pl.base + k;
+            if (bits) {
+                const uint64_t w = bits[b >> 6] >> (b & 63);
+                if (!w) { k += 64 - (b & 63); continue; }
+                if (!(w & 1)) { k += static_cast<size_t>(std::countr_zero(w)); continue; }
+            }
+            go = fn(pl, k * pl.step);
+            ++k;
+        }
+        return go;
+    }
+    for (size_t p = 0; p < chunk; ++p)
+        for (const Plane& pl : planes) {
+            if (p % pl.step) continue;
+            const size_t k = p / pl.step;
+            if (k < pl.n && bit_at(bits, pl.base + k) && !fn(pl, p)) return false;
+        }
+    return true;
+}
+
+bool blob_get(const SnapStore::Blob& b, uint8_t* dst) {
+    if (b.store) return b.store->get(b, dst);
+    std::memset(dst, 0, b.size);
+    return true;
+}
+bool bits_get(const SnapStore::Blob& b, std::vector<uint64_t>* out) {
+    out->assign((b.size + 7) / 8, 0);
+    return blob_get(b, reinterpret_cast<uint8_t*>(out->data()));
+}
+
+// Reads [addr, addr+n): the pages the source says the game never touched are zeros, not read (MemSource::untouched).
+bool read_chunk(MemSource& src, uint64_t addr, uint8_t* dst, size_t n, std::vector<uint8_t>& flags) {
+    size_t page = 0;
+    if (n == 0 || !src.untouched(addr, n, &page, &flags) || page == 0) return src.read(addr, dst, n);
+    const uint64_t base = addr & ~(static_cast<uint64_t>(page) - 1), end = addr + n;
+    auto zero_at = [&](uint64_t a) {
+        const size_t i = static_cast<size_t>((a - base) / page);
+        return i < flags.size() && flags[i] != 0;
+    };
+    for (uint64_t a = addr; a < end;) {
+        const bool z = zero_at(a);
+        uint64_t e = std::min(end, base + ((a - base) / page + 1) * page);
+        while (e < end && zero_at(e) == z) e = std::min(end, e + page);
+        if (z) std::memset(dst + (a - addr), 0, static_cast<size_t>(e - a));
+        else if (!src.read(a, dst + (a - addr), static_cast<size_t>(e - a))) return false;
+        a = e;
+    }
+    return true;
+}
+}  // namespace
+
 Scanner::Scanner(std::shared_ptr<MemSource> src) : src_(std::move(src)) {}
 
-size_t Scanner::result_count() const { return is_unknown_ ? 0 : addrs_.size(); }
+size_t Scanner::result_count() const {
+    if (is_unknown_) return snap_ ? static_cast<size_t>(snap_->count) : 0;
+    return addrs_.size();
+}
 
 void Scanner::clear() {
     addrs_.clear();
@@ -330,8 +726,18 @@ void Scanner::clear() {
     last_bits_.clear();
     types_.clear();
     snap_.reset();
+    undo_.clear();                      // the undo steps may hold a snapshot: its RAM and spill file go too
     is_unknown_ = false;
     capped_ = false;
+    error_.clear();
+}
+
+SnapshotStats Scanner::snapshot_stats() const { return store_ ? store_->stats() : SnapshotStats{}; }
+
+unsigned Scanner::slot_step() const {
+    const size_t ts = type_size(opt_.type);
+    const unsigned step = opt_.alignment ? opt_.alignment : (opt_.fast ? static_cast<unsigned>(ts) : 1u);
+    return step ? step : 1u;
 }
 
 void Scanner::push_undo_state() {
@@ -349,6 +755,13 @@ void Scanner::push_undo_state() {
     u.pat_len = pat_len_;
     undo_.push_back(std::move(u));
     if (undo_.size() > 4) undo_.erase(undo_.begin());    // keep the last few scans' worth
+    // a snapshot stands for the scanned memory (RAM up to the budget, the rest in the spill file): the steps keep the newest one only, and
+    // the steps before it go with it (undo never skips a step)
+    for (size_t k = undo_.size(); k-- > 1;)
+        if (undo_[k].snap) {
+            undo_.erase(undo_.begin(), undo_.begin() + static_cast<std::ptrdiff_t>(k));
+            break;
+        }
 }
 
 void Scanner::undo() {
@@ -380,6 +793,7 @@ void Scanner::first_scan(const ScanOptions& opt_in, FirstScan cmp, const Value& 
     types_.clear();
     snap_.reset();
     capped_ = false;
+    error_.clear();
     pat_len_ = 0;
     const bool pattern = is_pattern_kind(kind_);
     if (pattern) {
@@ -409,12 +823,18 @@ void Scanner::first_scan(const ScanOptions& opt_in, FirstScan cmp, const Value& 
     prog.running = true;
 
     is_unknown_ = cmp == FirstScan::Unknown && !pattern;
-    if (is_unknown_) snap_ = std::make_shared<Snapshot>();   // the first next scan turns the snapshot into results
+    if (is_unknown_) {
+        // the snapshot: the first next scan compares memory to it (no list of every address: 11 GB of heap is 2.8 billion u32 slots)
+        const uint64_t budget = opt.snapshot_ram ? opt.snapshot_ram : snapshot_budget();
+        if (!store_ || store_->budget() != budget || store_->dir() != opt.spill_dir) store_ = std::make_shared<SnapStore>(budget, opt.spill_dir);
+        snap_ = std::make_shared<Snapshot>();
+    }
+    const bool all = kind_ == ScanKind::AllNumeric;
 
     // all numeric types: the reference text parsed as each type (a type it does not parse as is skipped), so "100" also finds 100.0f
     struct TypeRef { ScanType t; Value a, b; };
     std::vector<TypeRef> refs;
-    if (kind_ == ScanKind::AllNumeric) {
+    if (all) {
         const std::string t1 = opt.text.empty() ? v1.text() : opt.text;
         const std::string t2 = v2.text();
         for (ScanType at : kAllTypes) {
@@ -436,27 +856,32 @@ void Scanner::first_scan(const ScanOptions& opt_in, FirstScan cmp, const Value& 
 
     std::mutex out_mu;
     std::atomic<size_t> ri{0};
+    std::atomic<bool> failed{false};
     const unsigned nthreads = worker_count(opt.threads);
     const size_t overlap = ts > 1 ? ts - 1 : 0;   // a text or pattern may straddle two chunks
     auto work = [&] {
-        std::vector<uint8_t> buf;
+        std::vector<uint8_t> buf, flags;
         for (;;) {
             const size_t i = ri.fetch_add(1);
-            if (i >= regions.size() || prog.cancel.load()) break;
+            if (i >= regions.size() || prog.cancel.load() || failed.load()) break;
             const ScanRegion& r = regions[i];
-            const size_t chunk = 1 << 20;
-            for (uint64_t off = 0; off < r.size; off += chunk) {
-                if (prog.cancel.load()) break;
-                const size_t n = static_cast<size_t>(std::min<uint64_t>(chunk, r.size - off));
+            for (uint64_t off = 0; off < r.size; off += kChunk) {
+                if (prog.cancel.load() || failed.load()) break;
+                const size_t n = static_cast<size_t>(std::min<uint64_t>(kChunk, r.size - off));
                 const size_t extra = pattern ? static_cast<size_t>(std::min<uint64_t>(overlap, r.size - off - n)) : 0;
                 buf.resize(n + extra);
-                if (!src_->read(r.addr + off, buf.data(), n + extra)) {
+                if (!read_chunk(*src_, r.addr + off, buf.data(), n + extra, flags)) {
                     prog.bytes_done += n;
                     continue;
                 }
                 if (is_unknown_) {
+                    SnapStore::BlobRef b = store_->put(buf.data(), n);
+                    if (!b) { failed = true; break; }
+                    const uint64_t slots = slot_count(planes_for(n, all, t, step, opt.fast));
                     std::lock_guard<std::mutex> lk(out_mu);
-                    snap_->chunks.push_back({r.addr + off, buf});
+                    snap_->chunks.push_back({r.addr + off, static_cast<uint32_t>(n), b, b, nullptr, slots});
+                    snap_->count += slots;
+                    prog.results = snap_->count;
                     prog.bytes_done += n;
                     continue;
                 }
@@ -470,7 +895,7 @@ void Scanner::first_scan(const ScanOptions& opt_in, FirstScan cmp, const Value& 
                         la.push_back(r.addr + off + p);
                         lv.push_back(hash_bytes(buf.data() + p, ts));
                     }
-                } else if (kind_ == ScanKind::AllNumeric) {
+                } else if (all) {
                     for (size_t p = 0; p < n; ++p) {
                         for (const TypeRef& tr : refs) {
                             const size_t s = type_size(tr.t);
@@ -511,6 +936,14 @@ void Scanner::first_scan(const ScanOptions& opt_in, FirstScan cmp, const Value& 
     for (unsigned k = 1; k < nthreads; ++k) pool.emplace_back(work);
     work();
     for (auto& th : pool) th.join();
+    if (failed.load()) {                // the spill file could not take the snapshot: no half snapshot
+        error_ = store_->error();
+        snap_.reset();
+        is_unknown_ = false;
+        prog.results = 0;
+        prog.running = false;
+        return;
+    }
     // the workers append in any order: sort by address (values and types move with them) so the list reads in memory order
     if (!addrs_.empty()) {
         std::vector<size_t> idx(addrs_.size());
@@ -537,85 +970,195 @@ void Scanner::first_scan(const ScanOptions& opt_in, FirstScan cmp, const Value& 
     prog.running = false;
 }
 
-void Scanner::next_scan(NextScan cmp, const Value& v1, const Value& v2, ScanProgress& prog) {
-    push_undo_state();
+// A next scan of an unknown value: each chunk's candidates are compared with memory now; the survivors' bytes become the chunk's last
+// values (the others zeroed: their blocks then cost a bit) and their bits the new candidates. Once few enough are left (result_cap), they
+// become the result list. Peak memory: the store's budget, plus a few chunks per worker.
+void Scanner::next_snapshot(NextScan cmp, const Value& v1, const Value& v2, ScanProgress& prog) {
+    const Snapshot& old = *snap_;
     const ScanType t = opt_.type;
-    const bool pattern = is_pattern_kind(kind_);
-    const size_t ts = pattern ? pat_len_ : type_size(t);
-    unsigned step = opt_.alignment ? opt_.alignment : (opt_.fast ? static_cast<unsigned>(ts) : 1);
-    if (step == 0) step = 1;
-
-    if (is_unknown_ && snap_) {
-        // the snapshot becomes the first result list: compare the snapshot to memory now
-        prog.running = true;
-        uint64_t total = 0;
-        for (const auto& c : snap_->chunks) total += c.bytes.size();
-        prog.bytes_total = total;
-        prog.bytes_done = 0;
-        struct Part { std::vector<uint64_t> a, f, l; std::vector<uint8_t> ty; };
-        std::vector<Part> parts(snap_->chunks.size());
-        std::atomic<size_t> ci{0};
-        const bool all = kind_ == ScanKind::AllNumeric;
-        const bool fast = opt_.fast;
-        auto work = [&] {
-            std::vector<uint8_t> buf;
-            for (;;) {
-                const size_t i = ci.fetch_add(1);
-                if (i >= snap_->chunks.size() || prog.cancel.load()) break;
-                const auto& c = snap_->chunks[i];
-                buf.resize(c.bytes.size());
-                if (!src_->read(c.addr, buf.data(), buf.size())) { prog.bytes_done += c.bytes.size(); continue; }
-                Part& pt = parts[i];
-                if (all) {
-                    for (size_t p = 0; p < buf.size(); ++p)
-                        for (ScanType at : kAllTypes) {
-                            const size_t s = type_size(at);
-                            if ((fast && p % s) || p + s > buf.size()) continue;
-                            const uint64_t prev = load_bits(c.bytes.data() + p, at), cur = load_bits(buf.data() + p, at);
-                            Value a = v1, b = v2;
-                            if (at != t) { parse_value(at, v1.text(), &a); parse_value(at, v2.text(), &b); }
-                            if (cmp_next(at, cur, prev, prev, cmp, a.bits, b.bits)) {
-                                pt.a.push_back(c.addr + p); pt.f.push_back(prev); pt.l.push_back(cur); pt.ty.push_back(static_cast<uint8_t>(at));
-                            }
-                        }
-                } else {
-                    for (size_t p = 0; p + ts <= buf.size(); p += step) {
-                        const uint64_t prev = load_bits(c.bytes.data() + p, t);
-                        const uint64_t cur = load_bits(buf.data() + p, t);
-                        if (cmp_next(t, cur, prev, prev, cmp, v1.bits, v2.bits)) {
-                            pt.a.push_back(c.addr + p); pt.f.push_back(prev); pt.l.push_back(cur);
-                        }
+    const bool all = kind_ == ScanKind::AllNumeric;
+    const unsigned step = slot_step();
+    const bool fast = opt_.fast;
+    const bool need_first = cmp == NextScan::SameAsFirst;
+    // the reference values in each type (an all-numeric search: the text as each type, as the list's next scan reads them)
+    uint64_t ref_a[6], ref_b[6];
+    for (ScanType at : kAllTypes) {
+        Value a = v1, b = v2;
+        if (all && at != t) {
+            parse_value(at, v1.text(), &a);
+            parse_value(at, v2.text(), &b);
+        }
+        ref_a[static_cast<int>(at)] = a.bits;
+        ref_b[static_cast<int>(at)] = b.bits;
+    }
+    if (!store_) store_ = std::make_shared<SnapStore>(snapshot_budget(), std::string());
+    auto next = std::make_shared<Snapshot>();
+    next->chunks.resize(old.chunks.size());
+    uint64_t total_bytes = 0;
+    for (const auto& c : old.chunks) total_bytes += c.size;
+    prog.running = true;
+    prog.bytes_total = total_bytes;
+    prog.bytes_done = 0;
+    prog.results = 0;
+    std::atomic<size_t> ci{0};
+    std::atomic<uint64_t> total{0};
+    std::atomic<bool> failed{false};
+    auto work = [&] {
+        std::vector<uint8_t> cur, last, first, keep, flags;
+        std::vector<uint64_t> cand, bits;
+        for (;;) {
+            const size_t i = ci.fetch_add(1);
+            if (i >= old.chunks.size() || prog.cancel.load() || failed.load()) break;
+            const Snapshot::Chunk& c = old.chunks[i];
+            Snapshot::Chunk& o = next->chunks[i];
+            o.addr = c.addr;
+            o.size = c.size;
+            cur.resize(c.size);
+            if (!read_chunk(*src_, c.addr, cur.data(), c.size, flags)) {   // unreadable now: its candidates go
+                prog.bytes_done += c.size;
+                continue;
+            }
+            const bool same = c.first == c.last;      // the first next scan: the first values are the last ones
+            if (!need_first && c.last->packed == 0 && zero_block(cur.data(), c.size)) {
+                // all zero at the last scan and now (most of a heap the game never used): each type's candidates all answer the same
+                int keep_n = 0, planes_n = 0;
+                for (const Plane& pl : planes_for(c.size, all, t, step, fast)) {
+                    ++planes_n;
+                    const int ti = static_cast<int>(pl.t);
+                    keep_n += cmp_next(pl.t, 0, 0, 0, cmp, ref_a[ti], ref_b[ti]) ? 1 : 0;
+                }
+                if (keep_n == 0 || keep_n == planes_n) {
+                    if (keep_n) {
+                        o.first = c.first;
+                        o.last = c.last;
+                        o.cand = c.cand;
+                        o.count = c.count;
+                        total += c.count;
+                    }
+                    prog.bytes_done += c.size;
+                    prog.results = total.load();
+                    continue;
+                }
+            }
+            last.resize(c.size);
+            bool ok = blob_get(*c.last, last.data());
+            if (ok && need_first && !same) {
+                first.resize(c.size);
+                ok = blob_get(*c.first, first.data());
+            }
+            if (ok && c.cand) ok = bits_get(*c.cand, &cand);
+            if (!ok) { failed = true; break; }
+            const uint8_t* fp = need_first && !same ? first.data() : last.data();
+            const auto planes = planes_for(c.size, all, t, step, fast);
+            const size_t slots = slot_count(planes);
+            bits.assign((slots + 63) / 64, 0);
+            keep.assign(c.size, 0);
+            uint64_t n = 0;
+            each_slot(planes, c.cand ? cand.data() : nullptr, [&](const Plane& pl, size_t p, size_t b) {
+                const uint64_t prev = load_bits(last.data() + p, pl.t), now = load_bits(cur.data() + p, pl.t);
+                const uint64_t f = need_first ? load_bits(fp + p, pl.t) : prev;
+                const int ti = static_cast<int>(pl.t);
+                if (!cmp_next(pl.t, now, prev, f, cmp, ref_a[ti], ref_b[ti])) return;
+                bits[b >> 6] |= uint64_t{1} << (b & 63);
+                std::memcpy(keep.data() + p, cur.data() + p, pl.size);
+                ++n;
+            });
+            if (n) {
+                o.count = n;
+                o.last = store_->put(keep.data(), c.size);
+                o.cand = n == slots ? nullptr : store_->put(reinterpret_cast<const uint8_t*>(bits.data()), bits.size() * 8);
+                o.first = c.first;
+                if (n * 2 <= c.count) {
+                    // half the candidates or more went: keep only the survivors' first-scan bytes (the full copy goes with the undo step)
+                    if (!need_first || same) {
+                        if (same) first.assign(last.begin(), last.end());
+                        else { first.resize(c.size); ok = blob_get(*c.first, first.data()); }
+                    }
+                    if (ok) {
+                        keep.assign(c.size, 0);
+                        each_slot(planes, bits.data(), [&](const Plane& pl, size_t p, size_t) { std::memcpy(keep.data() + p, first.data() + p, pl.size); });
+                        o.first = store_->put(keep.data(), c.size);
                     }
                 }
-                prog.bytes_done += c.bytes.size();
+                if (!ok || !o.last || !o.first || (n != slots && !o.cand)) { failed = true; break; }
+                total += n;
             }
-        };
-        const unsigned nthreads = worker_count(opt_.threads);
-        std::vector<std::thread> pool;
-        for (unsigned k = 1; k < nthreads; ++k) pool.emplace_back(work);
-        work();
-        for (auto& th : pool) th.join();
-        addrs_.clear();
-        first_bits_.clear();
-        last_bits_.clear();
-        types_.clear();
-        for (Part& pt : parts) {          // the snapshot's chunks are in address order, so the merged list is too
-            addrs_.insert(addrs_.end(), pt.a.begin(), pt.a.end());
-            first_bits_.insert(first_bits_.end(), pt.f.begin(), pt.f.end());
-            last_bits_.insert(last_bits_.end(), pt.l.begin(), pt.l.end());
-            types_.insert(types_.end(), pt.ty.begin(), pt.ty.end());
+            prog.bytes_done += c.size;
+            prog.results = total.load();
+        }
+    };
+    const unsigned nthreads = worker_count(opt_.threads);
+    std::vector<std::thread> pool;
+    for (unsigned k = 1; k < nthreads; ++k) pool.emplace_back(work);
+    work();
+    for (auto& th : pool) th.join();
+    if (failed.load() || prog.cancel.load()) {
+        if (failed.load()) error_ = store_->error();
+        undo();                         // stopped or failed: the candidates stay as they were before this scan
+        prog.results = result_count();
+        prog.running = false;
+        return;
+    }
+    next->chunks.erase(std::remove_if(next->chunks.begin(), next->chunks.end(), [](const Snapshot::Chunk& c) { return c.count == 0; }),
+                       next->chunks.end());
+    next->count = total.load();
+    if (next->count <= opt_.result_cap) {
+        if (!lists_from(*next)) {
+            error_ = store_->error();
+            undo();
+            prog.results = result_count();
+            prog.running = false;
+            return;
         }
         is_unknown_ = false;
         snap_.reset();
-        if (addrs_.size() > opt_.result_cap) {
-            capped_ = true;
-            addrs_.resize(opt_.result_cap);
-            first_bits_.resize(opt_.result_cap);
-            last_bits_.resize(opt_.result_cap);
-            if (!types_.empty()) types_.resize(opt_.result_cap);
-        }
-        prog.results = addrs_.size();
-        prog.running = false;
+    } else {
+        snap_ = std::move(next);
+    }
+    prog.results = result_count();
+    prog.running = false;
+}
+
+// The candidates of a snapshot as the result list, in address order.
+bool Scanner::lists_from(const Snapshot& s) {
+    const bool all = kind_ == ScanKind::AllNumeric;
+    const unsigned step = slot_step();
+    addrs_.clear();
+    first_bits_.clear();
+    last_bits_.clear();
+    types_.clear();
+    addrs_.reserve(static_cast<size_t>(s.count));
+    first_bits_.reserve(static_cast<size_t>(s.count));
+    last_bits_.reserve(static_cast<size_t>(s.count));
+    if (all) types_.reserve(static_cast<size_t>(s.count));
+    std::vector<uint8_t> first, last;
+    std::vector<uint64_t> cand;
+    for (const auto& c : s.chunks) {
+        first.resize(c.size);
+        last.resize(c.size);
+        if (!blob_get(*c.first, first.data()) || !blob_get(*c.last, last.data())) return false;
+        if (c.cand && !bits_get(*c.cand, &cand)) return false;
+        each_slot_ordered(planes_for(c.size, all, opt_.type, step, opt_.fast), c.cand ? cand.data() : nullptr, c.size, [&](const Plane& pl, size_t p) {
+            addrs_.push_back(c.addr + p);
+            first_bits_.push_back(load_bits(first.data() + p, pl.t));
+            last_bits_.push_back(load_bits(last.data() + p, pl.t));
+            if (all) types_.push_back(static_cast<uint8_t>(pl.t));
+            return true;
+        });
+    }
+    capped_ = false;
+    return true;
+}
+
+void Scanner::next_scan(NextScan cmp, const Value& v1, const Value& v2, ScanProgress& prog) {
+    push_undo_state();
+    error_.clear();
+    const ScanType t = opt_.type;
+    const bool pattern = is_pattern_kind(kind_);
+    const size_t ts = pattern ? pat_len_ : type_size(t);
+
+    if (is_unknown_ && snap_) {
+        next_snapshot(cmp, v1, v2, prog);
         return;
     }
 
@@ -682,7 +1225,35 @@ bool Scanner::read_value(uint64_t addr, ScanType t, Value* out) {
 
 std::vector<ScanResult> Scanner::results(size_t start, size_t max) {
     std::vector<ScanResult> out;
-    if (is_unknown_) return out;       // not materialised until the first next scan
+    if (is_unknown_) {
+        // the candidates of a snapshot, as many as asked from `start` in address order: the value at the first scan and the one now
+        if (!snap_ || max == 0) return out;
+        const bool all = kind_ == ScanKind::AllNumeric;
+        const unsigned step = slot_step();
+        uint64_t skip = start;
+        std::vector<uint8_t> first;
+        std::vector<uint64_t> cand;
+        for (const auto& c : snap_->chunks) {
+            if (out.size() >= max) break;
+            if (skip >= c.count) { skip -= c.count; continue; }
+            first.resize(c.size);
+            if (!blob_get(*c.first, first.data())) break;
+            if (c.cand && !bits_get(*c.cand, &cand)) break;
+            each_slot_ordered(planes_for(c.size, all, opt_.type, step, opt_.fast), c.cand ? cand.data() : nullptr, c.size, [&](const Plane& pl, size_t p) {
+                if (skip) { --skip; return true; }
+                ScanResult r;
+                r.addr = c.addr + p;
+                r.type = pl.t;
+                r.len = pl.size;
+                r.first = Value{pl.t, load_bits(first.data() + p, pl.t)};
+                Value now;
+                r.last = read_value(r.addr, pl.t, &now) ? now : r.first;
+                out.push_back(r);
+                return out.size() < max;
+            });
+        }
+        return out;
+    }
     const bool pattern = is_pattern_kind(kind_);
     const size_t end = std::min(addrs_.size(), start + max);
     for (size_t i = start; i < end; ++i) {
