@@ -35,6 +35,7 @@
 #include <vector>
 
 #include "nxrt/config.h"
+#include "nxrt/extras.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
@@ -190,14 +191,93 @@ void add_rec_locked(const Rec& r) {
     g_recs.push_back(r);
 }
 
-void load_file() {
-    std::vector<Rec> rs;
-    read_key_file(g_path, &rs, true);
-    for (const Rec& r : rs) {
-        if (g_recs.size() + g_cs_recs.size() >= kMaxRecords) break;
-        if (g_digests.insert(digest_of(r.h, r.rest)).second) add_rec_locked(r);
+// HDR twins (ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch, 6daebeaa). With an HDR scene (nxrt/extras.h
+// hdr_scene_active), the game's RGBA8_SRGB render targets are made RGBA16F (nvn_gpu_texture.cpp, extras::hdr_promote_target), so every
+// pipeline that draws to one has another key: the same record with that colour format. A key file written by SDR runs (a headless prepare,
+// the shipped pipeline seed, a test run) holds only the RGBA8_SRGB keys, and an HDR play built each twin at its first draw (Pokopia on an
+// HDR Mac display: 65 of the 117 keys new in a 6.4-minute AnySwitch session were such twins, and draws waited 15 s for builds). The twin of
+// each recorded key with an RGBA8_SRGB colour slot is built ahead too, when this run shows an HDR scene (a play's boot prewarm) or the file
+// shows that the title is played in HDR (it holds the twin of one of its own keys: a headless prepare for an HDR player, which has no
+// display to ask). A twin is not written to the file; a draw that uses it records it. [nvn] prewarm_hdr_twins = auto | on | off.
+bool hdr_twin_of(const Rec& r, Rec* out) {
+    if (r.h[0] == kComputeTag) return false;
+    bool any = false;
+    Rec t = r;
+    for (size_t i = 0; i < 8; ++i) {
+        uint32_t f;
+        std::memcpy(&f, t.rest + offsetof(GraphicsKey, color_format) - kStageBytes + i * sizeof f, sizeof f);
+        if (f != VK_FORMAT_R8G8B8A8_SRGB) continue;
+        f = VK_FORMAT_R16G16B16A16_SFLOAT;
+        std::memcpy(t.rest + offsetof(GraphicsKey, color_format) - kStageBytes + i * sizeof f, &f, sizeof f);
+        any = true;
     }
-    g_stats.loaded = g_recs.size() + g_cs_recs.size();
+    if (any) *out = t;
+    return any;
+}
+
+std::unordered_set<uint64_t> g_twin_digests;   // HDR twins queued from the file's keys (not in the file): a draw that takes one records it
+
+// Whether the twins are built (the rule above). *why says what decided it.
+bool hdr_twins_on(const std::vector<Rec>& rs, const std::unordered_set<uint64_t>& in_file, bool scene_hdr, const std::string& mode, const char** why) {
+    *why = "";
+    if (mode == "off" || mode == "false" || mode == "0") return false;
+    if (mode == "on" || mode == "true" || mode == "1") {
+        *why = "[nvn] prewarm_hdr_twins = on";
+        return true;
+    }
+    if (scene_hdr) {
+        *why = "this run shows an HDR scene";
+        return true;
+    }
+    Rec t;
+    for (const Rec& r : rs)
+        if (hdr_twin_of(r, &t) && in_file.count(digest_of(t.h, t.rest))) {
+            *why = "the key file holds keys of an HDR play";
+            return true;
+        }
+    return false;
+}
+
+// The records of `rs` in order, each followed by its HDR twin when the twins are on and the twin is neither in the file nor already in `taken`
+// (the digests of what is queued). Records already in `taken` are left out. Returns how many twins were added.
+size_t with_hdr_twins(const std::vector<Rec>& rs, bool scene_hdr, const std::string& mode, std::unordered_set<uint64_t>& taken,
+                      std::unordered_set<uint64_t>& twin_digests, std::vector<Rec>* out, const char** why) {
+    std::unordered_set<uint64_t> in_file;
+    for (const Rec& r : rs) in_file.insert(digest_of(r.h, r.rest));
+    const bool twins = hdr_twins_on(rs, in_file, scene_hdr, mode, why);
+    size_t made = 0;
+    for (const Rec& r : rs) {
+        if (taken.insert(digest_of(r.h, r.rest)).second) out->push_back(r);
+        Rec t;
+        if (!twins || !hdr_twin_of(r, &t)) continue;
+        const uint64_t d = digest_of(t.h, t.rest);
+        if (in_file.count(d) || taken.count(d) || !twin_digests.insert(d).second) continue;   // recorded itself, or already queued
+        out->push_back(t);   // right after its RGBA8_SRGB key: the same place in the order of first use
+        ++made;
+    }
+    return made;
+}
+
+void load_file() {
+    std::vector<Rec> rs, ordered;
+    read_key_file(g_path, &rs, true);
+    const char* why = "";
+    std::unordered_set<uint64_t> taken = g_digests;
+    const size_t made = with_hdr_twins(rs, nxrt::extras::hdr_scene_active(), config_get_str("nvn", "prewarm_hdr_twins", "auto"), taken,
+                                       g_twin_digests, &ordered, &why);
+    size_t twins = 0;
+    for (const Rec& r : ordered) {
+        if (g_recs.size() + g_cs_recs.size() >= kMaxRecords) break;
+        const uint64_t d = digest_of(r.h, r.rest);
+        if (g_twin_digests.count(d)) {   // a twin stays out of g_digests: a draw that uses it records it in the file
+            add_rec_locked(r);
+            ++twins;
+        } else if (g_digests.insert(d).second) {
+            add_rec_locked(r);
+        }
+    }
+    g_stats.loaded = g_recs.size() + g_cs_recs.size() - twins;   // from the file (the twins are counted in their own line)
+    if (made) NXLOG_I(kTag, "%zu HDR twins (an RGBA8_SRGB colour target made RGBA16F for the HDR scene) of recorded keys are built ahead too: %s", twins, why);
 }
 
 void append_records(const Rec* rs, size_t n) {
@@ -516,6 +596,12 @@ bool prewarm_take(const GraphicsKey& key, VkPipeline* out, const std::function<b
             *out = j->pipe;
             j->pipe = VK_NULL_HANDLE;
             ++g_stats.taken;
+            if (g_twin_digests.count(digest) && g_recs.size() < kMaxRecords && g_digests.insert(digest).second) {
+                g_recs.push_back(want);                          // an HDR twin a draw used: recorded like a key built at its draw
+                g_rec_jobs.push_back(nullptr);
+                ++g_stats.recorded;
+                append_record(want);
+            }
             return true;
         }
         if (j->state == 3) return false;
@@ -593,6 +679,7 @@ void prewarm_shutdown() {
     g_rec_jobs.clear();
     g_by_any.clear();
     g_digests.clear();
+    g_twin_digests.clear();
 }
 
 PrewarmStats prewarm_stats() {
