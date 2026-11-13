@@ -89,6 +89,14 @@ if(NXRT_BUILD_GFX)
     include(cmake/gfx.cmake)
 endif()
 
+# Code the lift did not see (tests/missed; ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch): mid-function entries and
+# units recompiled on demand, on a hand-made module that the lifter of this checkout lifts at build time (needs a Python with Capstone).
+# Not part of a game build's default target.
+set(NXRT_TEST_PYTHON "" CACHE FILEPATH "Python with Capstone for nxrt_missed_test (empty: the test is not defined)")
+if(NXRT_TEST_PYTHON)
+    include(tests/missed/missed_test.cmake)
+endif()
+
 if(NXRT_BUILD_GAMES)
     foreach(_game ${NXRT_GAMES})
         add_subdirectory(games/${_game})

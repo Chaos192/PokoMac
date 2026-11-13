@@ -22,6 +22,12 @@ the lifter's include/ tree, the compiler and the flags (class ObjCache), so Set 
 translation units compiles only those. It survives the stamp reset and the cleanup after linking, is trimmed to --cache-mb
 (default 3072, 0 = off) and never serves a partial or damaged entry.
 
+Live code patches (the cheats overlay; ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch): every module is lifted with
+--live-patch by default (each function entry and loop head checks Ctx.ov: recomp ctx.h NX_OV / NX_OVL), so a patch the overlay makes reaches
+every caller while the game runs. The lift also writes a lift map per module into <game>/build/missed/map and the manifest
+<game>/build/missed/manifest.tsv: with them the runtime (core/missed.cpp) makes a patched function again on demand, with this script's
+--ondemand (the bundled lifter and Zig), cached in build/missed/cache. --no-live-patch lifts without the checks (to measure their cost).
+
 Resumable: a module's lift counts once its marker file is written, an object once it is renamed into place, so a stopped
 build continues where it stopped. A file named <game>/build/cancel stops it (the launcher's Pause).
 Output for the launcher, one per line on stdout:  @progress <phase> <done> <total> <text>  /  @error <text>
@@ -124,10 +130,12 @@ def tree_hash(root, rels):
     return h.hexdigest()
 
 
-def tool_stamp():
-    """The part of the build stamp this package decides: a release that changes any of it rebuilds pkp.exe."""
+def tool_stamp(live_patch=True):
+    """The part of the build stamp this package decides: a release that changes any of it rebuilds pkp.exe. live_patch: every function
+    entry and loop head checks for live code patches (NX_OV, NX_OVL)."""
     stamp = {'lifter': tree_hash(RECOMP, LIFTER), 'sites': tree_hash(RECOMP, [SITES]), 'sdk': tree_hash(SDK, SDK_FILES),
-             'runtime': sha256(os.path.join(SDK, RT_LIB)), 'cxxflags': CXXFLAGS, 'modules': [list(m) for m in MODULES]}
+             'runtime': sha256(os.path.join(SDK, RT_LIB)), 'cxxflags': CXXFLAGS, 'modules': [list(m) for m in MODULES],
+             'live_patch': bool(live_patch)}
     if MACOS:
         stamp['identity'] = IDENTITY
     return stamp
@@ -267,8 +275,10 @@ class Runner:
         return rc, '\n'.join(tail)
 
 
-def lift(runner, exefs, gen, jobs):
-    """One lifter process per module (the lifter itself runs `jobs` worker processes)."""
+def lift(runner, exefs, gen, jobs, missed_dir=None, missed_txt=None, live_patch=True):
+    """One lifter process per module (the lifter itself runs `jobs` worker processes). missed_dir: where the lift maps go (code made again
+    on demand is lifted with them); missed_txt: the game's missed.txt, whose addresses become entries or functions of this lift; live_patch:
+    the NX_OV / NX_OVL checks (the cheats overlay's live code patches)."""
     sites = os.path.join(RECOMP, 'games', 'pkp', 'main.sites')
     for k, (name, nso, base, index, shards) in enumerate(MODULES):
         out = os.path.join(gen, name)
@@ -283,6 +293,13 @@ def lift(runner, exefs, gen, jobs):
                 '--jobs', str(jobs), '--game', 'pkp', '--index', str(index)]
         if name == 'main':
             args += ['--sites', sites]
+        if missed_dir:
+            os.makedirs(os.path.join(missed_dir, 'map'), exist_ok=True)
+            args += ['--map', os.path.join(missed_dir, 'map', '%s.json.gz' % name)]
+        if missed_txt and os.path.isfile(missed_txt):
+            args += ['--entries', missed_txt]
+        if live_patch:
+            args += ['--live-patch']
         cmd = [sys.executable, '-I', os.path.abspath(__file__), '--lift-one', json.dumps(args)]
         rc, tail = runner.run(cmd, cwd=RECOMP)
         if rc != 0:
@@ -618,7 +635,122 @@ def link(runner, obj, game, env):
     return dst
 
 
+# ---- code made again on demand (ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch): runtime core/missed.cpp ----------------
+UNIT_EXT = '.dylib' if MACOS else '.dll' if os.name == 'nt' else '.so'   # core/missed.cpp kUnitExt
+
+
+def missed_stamp(game):
+    """The game's missed.txt as the stamp sees it: a new line re-lifts (the address becomes part of the build)."""
+    path = os.path.join(game, 'missed.txt')
+    return sha256(path) if os.path.isfile(path) else None
+
+
+def ondemand_key():
+    """What the runtime's unit cache is keyed by besides the module build and the address: the lifter, the compiler and its flags."""
+    compiler = ','.join(sha256(c) if os.path.isfile(c) else c for c in COMPILER)
+    return hashlib.sha256(('%s|%s|%s' % (tree_hash(RECOMP, LIFTER), compiler, ' '.join(CXXFLAGS))).encode('utf-8')).hexdigest()
+
+
+def write_manifest(missed_dir, game, exefs):
+    """build/missed/manifest.tsv for the runtime (core/missed.cpp): the helper command, the unit cache, missed.txt and, per module, its
+    base, build id, lift map and input file. Tab separated; relative paths are relative to this folder."""
+    rows = ['# PokoMac: how code is made again on demand (pkp_build.py --ondemand; runtime core/missed.cpp)',
+            'format\t1', 'lifter_hash\t%s' % ondemand_key(), 'cache\tcache', 'log\tondemand.log',
+            'missed\t%s' % os.path.relpath(os.path.join(game, 'missed.txt'), missed_dir),
+            # the compiler by its path: the game does not run with the build's environment (PKP_ZIG)
+            'command\t%s\t-IB\t%s\t--ondemand\t--zig\t%s' % (sys.executable, os.path.abspath(__file__), os.path.abspath(COMPILER[0]))]
+    for name, nso, base, index, _ in MODULES:
+        path = os.path.abspath(os.path.join(exefs, nso))
+        with open(path, 'rb') as f:
+            bid = f.read(0x60)[0x40:0x60].hex()
+        rows.append('module\t%s\t%x\t%s\t%s\t%s' % (name, base, bid, os.path.join('map', '%s.json.gz' % name), path))
+    os.makedirs(missed_dir, exist_ok=True)
+    tmp = os.path.join(missed_dir, 'manifest.tsv.tmp')
+    with open(tmp, 'w', encoding='utf-8', newline='\n') as f:
+        f.write('\n'.join(rows) + '\n')
+    os.replace(tmp, os.path.join(missed_dir, 'manifest.tsv'))
+
+
+def unit_command(src, out, include):
+    """The compile command of one unit: the build's COMPILER and CXXFLAGS, as a shared library that exports only its entry."""
+    cmd = COMPILER + CXXFLAGS + ['-shared', '-fvisibility=hidden', '-I', include, src, '-o', out]
+    if not MACOS and os.name != 'nt':
+        cmd.insert(len(COMPILER), '-fPIC')
+    return cmd
+
+
+def unit_env(cache):
+    env = dict(os.environ)
+    env['ZIG_GLOBAL_CACHE_DIR'] = os.path.join(cache, 'zig-cache')
+    env['ZIG_LOCAL_CACHE_DIR'] = os.path.join(cache, 'zig-cache')
+    return env
+
+
+def ondemand(argv):
+    """--ondemand: make one unit (the runtime runs this while the game waits). Lifts the code at --addr with the module's lift map (or
+    --code: bytes at --base, the cheats overlay's patched function, with --sites for its breakpoints), compiles it with COMPILER + CXXFLAGS
+    as a shared library and puts it at --out. Exit 0 when --out was written."""
+    global COMPILER
+    ap = argparse.ArgumentParser(prog='pkp_build.py --ondemand')
+    ap.add_argument('--map')
+    ap.add_argument('--input')
+    ap.add_argument('--code')
+    ap.add_argument('--base')
+    ap.add_argument('--name', default='code')
+    ap.add_argument('--sites', help='--code only: a site list (inline <addr> lines) compiled into the unit, the cheats overlay breakpoints')
+    ap.add_argument('--addr', default='0')
+    ap.add_argument('--out', required=True)
+    ap.add_argument('--log')
+    ap.add_argument('--recomp', help='the lifter folder (default: the one next to this script)')
+    ap.add_argument('--zig', help='the compiler (default: the bundled Zig)')
+    a = ap.parse_args(argv)
+    recomp = a.recomp or RECOMP
+    if a.zig:
+        COMPILER = [a.zig, 'c++']
+    log = open(a.log, 'a', encoding='utf-8') if a.log else sys.stdout
+    t0 = time.time()
+
+    def say_(text):
+        log.write('[%s] %s\n' % (time.strftime('%H:%M:%S'), text))
+        log.flush()
+    try:
+        sys.path.insert(0, recomp)
+        from nxrecomp import ondemand as od
+        work = a.out + '.work'
+        os.makedirs(work, exist_ok=True)
+        addr = int(a.addr, 16)
+        if a.code:
+            sites = []
+            if a.sites:
+                with open(a.sites) as f:
+                    sites = [int(t.split()[1], 16) for t in f if t.split() and t.split()[0] == 'inline']
+            with open(a.code, 'rb') as f:
+                r = od.lift_code(f.read(), int(a.base, 16), addr, work, a.name, log=say_, sites=sites)
+        else:
+            r = od.lift_at(a.map, addr, work, a.input, log=say_)
+        t1 = time.time()
+        tmp = a.out + '.tmp' + os.path.splitext(a.out)[1]
+        p = subprocess.run(unit_command(r['source'], tmp, os.path.join(recomp, 'include')), env=unit_env(os.path.dirname(os.path.abspath(a.out))),
+                           capture_output=True, text=True, errors='replace')
+        if p.returncode != 0:
+            say_('compiling %s failed (exit %d):\n%s%s' % (r['source'], p.returncode, p.stdout, p.stderr))
+            return 1
+        if MACOS:      # ad hoc signature: Apple silicon runs no unsigned code
+            subprocess.run(['/usr/bin/codesign', '-s', '-', '-f', tmp], capture_output=True)
+        os.replace(tmp, a.out)
+        say_('unit %s for 0x%x (%s 0x%x..0x%x, %d instructions): lift %.2fs, compile %.2fs'
+             % (os.path.basename(a.out), addr, r['kind'], r['start'], r['end'], r['instructions'], t1 - t0, time.time() - t1))
+        shutil.rmtree(work, ignore_errors=True)
+        return 0
+    except Exception as e:                  # say what it was; the runtime reports the exit code and points at this log
+        import traceback
+        say_('on-demand unit for %s failed: %s\n%s' % (a.addr, e, traceback.format_exc()))
+        return 1
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == '--ondemand':
+        return ondemand(sys.argv[2:])
     ap = argparse.ArgumentParser()
     ap.add_argument('--exefs')
     ap.add_argument('--game')
@@ -627,6 +759,10 @@ def main():
     ap.add_argument('--keep', action='store_true', help='keep the generated sources and objects')
     ap.add_argument('--check', action='store_true', help='only say whether <game>/build/done.json matches these tools')
     ap.add_argument('--lift-one', help=argparse.SUPPRESS)
+    ap.add_argument('--live-patch', dest='live_patch', action='store_true', default=True,
+                    help='lift every function with the live-patch checks (recomp ctx.h NX_OV / NX_OVL), so the cheats overlay\'s code patches '
+                         'reach every caller while the game runs (the default)')
+    ap.add_argument('--no-live-patch', dest='live_patch', action='store_false', help=argparse.SUPPRESS)   # only to measure the checks' cost
     a = ap.parse_args()
     if a.lift_one:                       # child process: one lifter run (keeps the lifter's own pool out of this process)
         sys.path.insert(0, RECOMP)
@@ -655,7 +791,8 @@ def main():
         if not os.path.isfile(ZIG):
             raise Fail('The bundled compiler is missing (%s). Extract the release zip again.' % ZIG)
         want = verify(a.exefs)
-        stamp = {'format': FORMAT, 'main_build_id': want['main_build_id'], 'sha256': want['sha256'], 'tools': tool_stamp()}
+        stamp = {'format': FORMAT, 'main_build_id': want['main_build_id'], 'sha256': want['sha256'], 'tools': tool_stamp(a.live_patch),
+                 'missed': missed_stamp(game)}
         state_p = os.path.join(build, 'state.json')
         # another dump or another release (or no readable state): start over. Removing lift/ drops the modules' .lifted
         # markers too, so a changed lifter or main.sites lifts everything again, not only recompiles
@@ -670,7 +807,9 @@ def main():
         env['ZIG_LOCAL_CACHE_DIR'] = os.path.join(build, 'zig-cache')
         gen, obj = os.path.join(build, 'lift'), os.path.join(build, 'obj')
         t = time.time()
-        lift(runner, a.exefs, gen, a.jobs)
+        missed_dir = os.path.join(build, 'missed')
+        lift(runner, a.exefs, gen, a.jobs, missed_dir, os.path.join(game, 'missed.txt'), a.live_patch)
+        write_manifest(missed_dir, game, a.exefs)
         times['lift'] = round(time.time() - t, 1)
         t = time.time()
         compile_all(runner, gen, obj, a.jobs, env, make_cache(os.path.join(build, 'objcache'), a.cache_mb))

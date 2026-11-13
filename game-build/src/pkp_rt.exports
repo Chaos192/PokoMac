@@ -9,5 +9,7 @@ _guest_msr
 _nx_site_inline
 _nx_site_midhook
 _nx_hook_entry
+_nx_hook_resume
 _stx_diag
 _nx_catch_call
+_nx_no_entry

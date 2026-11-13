@@ -21,4 +21,9 @@ struct CatchRec {
 
 std::vector<CatchRec*>& catch_stack();   // thread_local; the top is the innermost activation
 
+// The CFA of the frame of the lifted function holding `pc` when its code is about to run the instruction at pc with the registers of c
+// (the CFI row covering pc itself, not pc - 1: pc is not a return address). False when no FDE or row covers pc. A mid-function entry into
+// a function with a catch clause keys its catch frame by it (nx_catch_call_at).
+bool cfa_at(const ::Ctx* c, uint64_t pc, uint64_t* cfa);
+
 }  // namespace nxrt::eh::detail

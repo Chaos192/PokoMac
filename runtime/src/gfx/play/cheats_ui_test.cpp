@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Copyright (c) 2026 Chaos192
 // The scripted test of the cheats overlay ([cheats] test = <file>): steps that drive the same state the windows show (scans, the list,
 // freezes, find what writes, code patches, pointer scans, breakpoints, game control, exports), one at a time at the frame boundaries, each
 // logged as "cheats test: ...". With the test runner's screenshots and scripted input (tt.h) it gives a headless run's evidence that the
-// tools work on a real game; the windows show the results while it runs. Off unless the key is set.
+// tools work on a real game; the windows show the results while it runs. Off unless the key is set. With [cheats] test_live = true the
+// file is read again for lines appended while the game runs (a live session, beside the test runner's [test] live script).
 //
 // One step per line, lines starting with `#` are comments, an entry is its index in the list or `last`; a step waits until the previous one finished (a scan, a pointer scan) and its delay has passed:
 //   wait <seconds> | at <seconds since the runtime started> | log <text> | open <window title> | close <window title> | save
@@ -21,7 +23,7 @@
 //   `loopy`: the first whose writer's start did not run at all, a loop already running) | nop_loopy
 //   trace_loops <thread name> [frames] (trace points at the loops a thread's frames are inside, and at those functions' starts) | loop_hits
 //   focus <item>   (the pad's focus put on an item, as the D-pad leaves it: "Add address", the Address list's first button)
-//   ptrscan <entry> [levels] | paths <n> | ptradd <path> | export | import <file> | reload | cheat <n|all> on|off
+//   ptrscan <entry> [levels] | paths <n> | ptradd <path> | export | import <file> | reload | cheat <n|all> on|off | codewords
 //   pause | resume | advance <n> | speed <x> | snapshot | diff
 //   cpu   (the process's CPU time and the frame number now: two of them give the CPU time per frame of what ran between)
 //   lua <file> | script <file> [description]   (an AOB script entry, switched on) | enable <entry> on|off   (a script entry)
@@ -69,6 +71,13 @@ struct T {
     std::vector<Step> steps;
     size_t next = 0;
     double due = 0;
+    // [cheats] test_live = true: lines appended to the file while the game runs become more steps (with the test runner's live script
+    // a session drives the tools step by step, as that script drives the pad)
+    bool live = false;
+    std::string path;
+    uint64_t read_to = 0;              // bytes of the file taken so far (whole lines)
+    int lines = 0;
+    double next_look = 0;
     std::unique_ptr<std::thread> worker;
     std::atomic<bool> busy{false};
     uint64_t writer_fn = 0;           // the first accessor of the last "writes"
@@ -764,6 +773,21 @@ void step(const Step& sp) {
         }
         return;
     }
+    if (op == "codewords") {                       // the cheats' code and cave words held now (vmcode.h) and the router's counters
+        const auto c = Engine::instance().stats().code;
+        say("code writes %llu, cave writes %llu, passes with code %llu, words patched %llu, reverted %llu, refused %llu, cave words %llu "
+            "written %llu restored",
+            (unsigned long long)c.code_writes, (unsigned long long)c.cave_writes, (unsigned long long)c.passes_with_code,
+            (unsigned long long)c.words_patched, (unsigned long long)c.words_reverted, (unsigned long long)c.patch_failures,
+            (unsigned long long)c.cave_words_written, (unsigned long long)c.cave_words_restored);
+        for (const auto& h : Engine::instance().code_held()) {
+            std::string owners;
+            for (int e : h.owners) owners += (owners.empty() ? "" : ",") + std::to_string(e);
+            say("held %s %s: %08x -> %08x (cheats %s)%s", h.place.kind == vmcode::Kind::Code ? "code" : "cave", cp::where(h.addr).c_str(),
+                h.original, h.now, owners.c_str(), h.plain ? " plain bytes" : "");
+        }
+        return;
+    }
     if (op == "cpu") {                              // a measurement point: CPU time per frame between two of them
         static double cpu0 = 0, t0 = 0;
         static uint64_t f0 = 0;
@@ -823,34 +847,63 @@ void step(const Step& sp) {
 }
 }  // namespace
 
-void test_init() {
-    const std::string path = config_get_str("cheats", "test", "");
-    if (path.empty()) return;
-    std::ifstream f(std::filesystem::u8path(path));
-    if (!f) {
-        NXLOG_W(kTag, "test: cannot read %s", path.c_str());
-        return;
-    }
-    std::string line;
-    int n = 0;
-    while (std::getline(f, line)) {
-        ++n;
+namespace {
+// The file's whole lines from read_to on become steps. False when the file cannot be read.
+bool read_steps() {
+    std::ifstream f(std::filesystem::u8path(g_t.path), std::ios::binary);
+    if (!f) return false;
+    f.seekg(0, std::ios::end);
+    const uint64_t size = static_cast<uint64_t>(f.tellg());
+    if (size <= g_t.read_to) return true;
+    std::string text(static_cast<size_t>(size - g_t.read_to), '\0');
+    f.seekg(static_cast<std::streamoff>(g_t.read_to));
+    f.read(&text[0], static_cast<std::streamsize>(text.size()));
+    const size_t nl = text.rfind('\n');
+    if (nl == std::string::npos) return true;                 // a line still being written
+    text.resize(nl + 1);
+    g_t.read_to += text.size();
+    size_t at = 0;
+    while (at < text.size()) {
+        const size_t e = text.find('\n', at);
+        std::string line = text.substr(at, e - at);
+        at = e + 1;
+        ++g_t.lines;
+        while (!line.empty() && line.back() == '\r') line.pop_back();
         // a comment is a line that starts with # (A64 immediates in `inject` lines carry a # too)
         const size_t first = line.find_first_not_of(" \t\r");
         if (first == std::string::npos || line[first] == '#') continue;
-        g_t.steps.push_back({n, line});
+        g_t.steps.push_back({g_t.lines, line});
     }
-    g_t.on = !g_t.steps.empty();
+    return true;
+}
+}  // namespace
+
+void test_init() {
+    g_t.path = config_get_str("cheats", "test", "");
+    if (g_t.path.empty()) return;
+    g_t.live = config_get_bool("cheats", "test_live", false);
+    if (!read_steps()) {
+        NXLOG_W(kTag, "test: cannot read %s", g_t.path.c_str());
+        if (!g_t.live) return;
+    }
+    g_t.on = !g_t.steps.empty() || g_t.live;
     g_t.due = now_s();
-    NXLOG_I(kTag, "test: %zu steps from %s", g_t.steps.size(), path.c_str());
+    NXLOG_I(kTag, "test: %zu steps from %s%s", g_t.steps.size(), g_t.path.c_str(), g_t.live ? " (live: lines added later run too)" : "");
 }
 
 void test_tick() {
     if (!g_t.on || g_t.busy.load() || st().prog.running.load() || now_s() < g_t.due) return;
     if (g_t.next >= g_t.steps.size()) {
-        g_t.on = false;
-        NXLOG_I(kTag, "test: all steps done");
-        return;
+        if (g_t.live) {                                       // look for appended lines four times a second
+            if (now_s() < g_t.next_look) return;
+            g_t.next_look = now_s() + 0.25;
+            read_steps();
+            if (g_t.next >= g_t.steps.size()) return;
+        } else {
+            g_t.on = false;
+            NXLOG_I(kTag, "test: all steps done");
+            return;
+        }
     }
     step(g_t.steps[g_t.next++]);
 }

@@ -74,6 +74,22 @@ def analyse(img):
             f = containing(pc)
             if f is not None and ts <= t < te and not (f <= t < ends[f]):
                 tail.add(t)
+    # every code address the module takes, for mid-function entries (entries.py; ported from AnySwitch by Chaos192, github.com/Chaos192/
+    # AnySwitch): the relocations, plus the addresses code makes with `adr xD, t` or `adrp xD, page; add xD, xD, #lo`. Only collected here:
+    # PokoMac does not make them functions of their own (AnySwitch does, for code with no FDEs), so its function discovery stays as it was.
+    code_refs = set(rel)
+    for i, w in enumerate(words):
+        pc = ts + 4 * i
+        t = None
+        if (w & 0x9f000000) == 0x10000000:                                         # adr xD, t
+            t = pc + sext(((w >> 29) & 3) | (((w >> 5) & 0x7ffff) << 2), 21)
+        elif (w & 0x9f000000) == 0x90000000 and i + 1 < len(words):                 # adrp xD, page; add xD, xD, #lo
+            v = words[i + 1]
+            if (v & 0xffc00000) == 0x91000000 and ((v >> 5) & 31) == (w & 31):
+                page = (pc & ~0xfff) + (sext(((w >> 29) & 3) | (((w >> 5) & 0x7ffff) << 2), 21) << 12)
+                t = page + ((v >> 10) & 0xfff)
+        if t is not None and ts < t < te and not t % 4:
+            code_refs.add(t)
     # a heuristic start strictly inside an exact function is not a function of its own: in compiled code nothing
     # calls into the middle of a function; in hand-written assembly `bl next; .word x` reads a PC-relative word
     # (nn::os::detail::UserExceptionHandler in sdk). Such addresses are kept as secondary entries, not functions.
@@ -144,6 +160,7 @@ def analyse(img):
              'header_refs_dropped': ['%x' % a for a in header],
              'secondary_examples': ['%x in %x' % (a, containing(a)) for a in secondary[:10]],
              'bl_targets': len(bl), 'reloc_targets': len(rel), 'tail_targets': len(tail),
+             'code_refs': sorted(code_refs),
              'text_bytes_in_exact_functions': covered, 'named_by_symbols': sum(1 for r in rows if r['names'])}
     return rows, stats
 
@@ -174,7 +191,7 @@ def main(argv=None):
     rows, stats = analyse(img)
     print('module: %s  base 0x%x  text 0x%x size 0x%x' % (img.name, img.base, img.text_start, img.text_size))
     for k, v in stats.items():
-        print('%s: %s' % (k, v))
+        print('%s: %s' % (k, len(v) if k == 'code_refs' else v))
     print('functions: %d' % len(rows))
     if a.out:
         write_tsv(rows, a.out)

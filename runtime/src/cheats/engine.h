@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Copyright (c) 2026 Chaos192
 // The cheat engine host: loads the running title's Atmosphère cheat file, runs the cheat VM every 1/12 s on its own thread (as dmnt does),
 // and writes frozen addresses after every pass. It also holds the overlay's cheat table (address list) entries, whose freezes it drives.
+// The VM's writes into a module's code (ASM cheats) become live code patches and those into the padding after it code caves (vmcode.h);
+// turning such a cheat off puts the code back.
 // Off by default: nothing runs until enable(true) (the overlay or [cheats] enable = true).
 //
 // The file is <cheats dir>/<program id>/cheats/<build id>.txt (the console's layout) or a flat <cheats dir>/<build id>.txt. program id is
@@ -18,6 +21,7 @@
 #include <thread>
 
 #include "cheat_vm.h"
+#include "vmcode.h"
 
 namespace nxrt::cheats {
 
@@ -46,6 +50,7 @@ struct EngineStats {
     std::string last_stop;             // why the last pass stopped early, if it did
     size_t cheat_count = 0;
     size_t enabled_cheats = 0;
+    vmcode::Counters code;             // the VM's writes into code and caves (vmcode.h): all 0 while only data cheats run
 };
 
 class Engine {
@@ -91,6 +96,9 @@ public:
     std::string program_id_hex() const;
     std::string build_id_hex() const;
 
+    // The code and cave words the cheats changed and hold now (ASM cheats: live code patches, vmcode.h).
+    std::vector<vmcode::Held> code_held() const { return router_.held(); }
+
 private:
     Engine() = default;
     void thread_main();
@@ -112,6 +120,7 @@ private:
     std::function<void(bool)> pause_fn_;
     mutable EngineStats stats_;
     std::unique_ptr<VmHost> host_;
+    vmcode::Router router_{vmcode::live_sink()};   // the VM's writes into code become live code patches
 };
 
 }  // namespace nxrt::cheats

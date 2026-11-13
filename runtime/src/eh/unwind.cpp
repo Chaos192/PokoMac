@@ -571,6 +571,23 @@ Stats stats() {
     return s;
 }
 
+namespace detail {
+bool cfa_at(const ::Ctx* c, uint64_t pc, uint64_t* cfa) {
+    const FrameInfo fi = find_frame(pc);
+    if (!fi.fde) return false;
+    const NxEh* eh = fi.mod->eh;
+    const NxCfiRow* row = nullptr;
+    for (uint32_t i = 0; i < fi.fde->row_count; i++) {
+        const NxCfiRow* q = &eh->rows[fi.fde->row_first + i];
+        if (q->pc <= pc) row = q;
+        else break;
+    }
+    if (!row || row->cfa_reg > 31) return false;
+    *cfa = c->x[row->cfa_reg] + static_cast<uint64_t>(static_cast<int64_t>(row->cfa_off));   // x[31] is SP
+    return true;
+}
+}  // namespace detail
+
 void stats_reset() {
     g_stats.raised = g_stats.resumed = g_stats.caught = g_stats.cleanups = g_stats.uncaught = g_stats.frames = g_stats.catch_landings = g_stats.resume_landings = 0;
 }

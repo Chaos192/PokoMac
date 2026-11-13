@@ -52,6 +52,7 @@ RegResult nxmodule_register(Module* image, const NxModule* nx, uint32_t abi_vers
 const NxModule* nxmodule_by_index(uint32_t index);
 const NxModule* nxmodule_by_name(const char* name);
 const NxModule* nxmodule_at(uint64_t addr);        // the registered module whose [base, text_end) contains addr, or null
+bool nxmodule_live_patch(const NxModule* nx);      // lifted with --live-patch (ABI 5): its function entries check Ctx.ov (ctx.h NX_OV)
 std::vector<const NxModule*> nxmodules();          // registration order
 void nxmodules_clear();                            // tests (also done by modules_unload_all)
 

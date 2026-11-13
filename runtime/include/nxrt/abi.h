@@ -8,13 +8,17 @@
 
 #include <nxrecomp/ctx.h>
 
-static_assert(NXRECOMP_ABI_VERSION == 3,
-              "nxrt was written against nxrecomp ABI version 3: review src/core/abi_glue.cpp, nxmodule.cpp, hooks.cpp, eh/ and diag/ before bumping");
+static_assert(NXRECOMP_ABI_VERSION == 4,
+              "nxrt was written against nxrecomp ABI version 4: review src/core/abi_glue.cpp, nxmodule.cpp, missed.cpp, hooks.cpp, eh/ and diag/ before bumping");
 
 namespace nxrt {
 
-// The ABI version this runtime implements. A lifted module built against another version is refused (nxmodule.h).
-constexpr uint32_t kAbiVersion = 3;
+// The ABI version this runtime implements. A lifted module built against another version is refused (nxmodule.h), except ABI 3:
+// version 4 only added the mid-function entry table at the end of NxModule (and nx_no_entry), so an ABI 3 module is taken without it.
+// ABI 5 (NXRECOMP_ABI_LIVE) is ABI 4 lifted with --live-patch: its functions check Ctx.ov at their entry (ctx.h NX_OV), which the
+// cheats overlay's live code patches use to reach direct callers (src/cheats/codepatch.cpp).
+constexpr uint32_t kAbiVersion = NXRECOMP_ABI_LIVE;
+constexpr uint32_t kAbiVersionOldest = 3;
 
 using GuestFn = void (*)(::Ctx*);   // a lifted function (or an HLE handler): guest registers in, guest registers out
 using HleFn = GuestFn;

@@ -8,17 +8,18 @@
 #include "nxrt/dispatch.h"
 #include "nxrt/eh.h"
 
-extern "C" void nx_catch_call(Ctx* c, void (*body)(Ctx*, uint64_t)) {
+namespace {
+void catch_loop(Ctx* c, void (*body)(Ctx*, uint64_t), uint64_t cfa, uint64_t first) {
     using namespace nxrt::eh::detail;
     CatchRec rec;
-    rec.cfa = c->x[31];
+    rec.cfa = cfa;
     catch_stack().push_back(&rec);
     // State that dispatch_call / host_import set up and restore on the way out; a longjmp skips that, so put it back by hand.
     const char* const saved_hle = nxrt::hle_current_name();
     const char* const saved_in_import = c->in_import;
     const uint64_t saved_import_from = c->import_from;
     const uint32_t saved_cb_flags = nxrt::host_callback_flags();   // a host bit set inside a guest callback the exception left
-    volatile uint64_t pad = 0;
+    volatile uint64_t pad = first;
     for (;;) {
         if (setjmp(rec.jb) == 0) {
             body(c, pad);
@@ -33,4 +34,16 @@ extern "C" void nx_catch_call(Ctx* c, void (*body)(Ctx*, uint64_t)) {
     auto& st = catch_stack();
     for (size_t i = st.size(); i-- > 0;)
         if (st[i] == &rec) { st.resize(i); break; }
+}
+}  // namespace
+
+extern "C" void nx_catch_call(Ctx* c, void (*body)(Ctx*, uint64_t)) { catch_loop(c, body, c->x[31], 0); }
+
+// A mid-function entry into such a function (core/missed.cpp): the frame is the function's CFA as the CFI row at pc gives it (the
+// prologue has already moved SP), and the first run of the body enters at pc. Without a row for pc the frame is keyed by SP: a catch
+// clause of this function then finds no frame and the exception goes on to the caller's.
+void nx_catch_call_at(Ctx* c, void (*body)(Ctx*, uint64_t), uint64_t pc) {
+    uint64_t cfa = c->x[31];
+    nxrt::eh::detail::cfa_at(c, pc, &cfa);
+    catch_loop(c, body, cfa, pc);
 }

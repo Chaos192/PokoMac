@@ -22,6 +22,10 @@ target_include_directories(nxrt_cheat_engine_test PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../../include"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../recomp/include")
 
+# The VM's write router (vmcode.cpp, ASM cheats as live code patches) over a fake game; includes cheat_vm.cpp and vmcode.cpp directly.
+add_executable(nxrt_vmcode_test vmcode_test.cpp)
+target_include_directories(nxrt_vmcode_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cheats")
+
 add_executable(nxrt_export_test export_test.cpp)
 target_include_directories(nxrt_export_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cheats")
 
@@ -51,6 +55,7 @@ add_test(NAME cheat_vm COMMAND nxrt_cheat_vm_test)
 add_test(NAME scanner COMMAND nxrt_scanner_test)
 add_test(NAME aob COMMAND nxrt_aob_test)
 add_test(NAME cheat_engine COMMAND nxrt_cheat_engine_test)
+add_test(NAME vmcode COMMAND nxrt_vmcode_test)
 add_test(NAME cheat_export COMMAND nxrt_export_test)
 add_test(NAME pointerscan COMMAND nxrt_pointerscan_test)
 add_test(NAME disasm COMMAND nxrt_disasm_test)

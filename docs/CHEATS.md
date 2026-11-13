@@ -6,10 +6,11 @@ PokoMac as they are. The in-game cheat tools are our own C++ in `runtime/src/che
 `docs/reference/cheats.md` (no Atmosphere GPL code). Everything is per build id, kept **outside the repository**, and **defaults off** until
 the player turns it on (Settings > Cheats > Enable cheats).
 
-**In this PokoMac build:** memory cheats work as in AnySwitch (scans, the address list, freezes, hotkeys, pointer scans, the memory viewer,
-Atmosphere cheat files that write data, AOB scripts and Lua scripts that write data, pause, frame advance and the speed hack). **Live code
-patches** (patching an instruction, code injection, breakpoints) need the live-patch build of the game, which PokoMac does not have yet: the
-overlay says so and writes nothing. The sections below that describe them are AnySwitch's.
+**In PokoMac:** everything AnySwitch's overlay has works, live code patches included: Set up lifts the game with the live-patch checks
+(every function entry and loop head checks `Ctx.ov`: recomp `ctx.h` NX_OV / NX_OVL; `pkp_build.py --no-live-patch` leaves them out to
+measure their cost), and a patch, an injection or a breakpoint makes the patched function again on demand (`runtime/src/core/missed.cpp`
+runs `pkp_build.py --ondemand`, the bundled lifter and Zig, from `<game folder>/build/missed/manifest.tsv`; the first patch of a function
+takes a few seconds, later ones come from `build/missed/cache`). It reaches every caller while the game runs, also on Apple silicon.
 
 ## Config contract (pkp.ini, read by the runtime)
 
@@ -37,6 +38,7 @@ The launcher writes these; the runtime reads them. All default to off/empty so a
 The defaults and ranges of the look keys (theme, accent, style, opacity, blur, tint, scale, animations, hud_opacity, the dock) have one
 source, `runtime/assets/cheats/look.json`: the runtime compiles it in and the launcher imports it, so the two never disagree (a key out of
 its range is clamped).
+| `[cheats]` | `test_live` | bool | `false` | Test only: lines appended to the `test` file while the game runs become more steps (a live session beside the test runner's `[test] live` script). |
 | `[cheats]` | `test` | path | empty (off) | Test only: a step file the overlay runs at the frame boundaries (scans, freezes, find what writes, code patches, pointer scans, exports, game control), each step logged as `cheats: test N: ...` (`cheats_ui_test.cpp` lists the steps). With the test runner's scripted input and screenshots it is the headless check of the tools. |
 | `[fs]` | `romfs_mod` | path | empty (off) | A romfs-shaped folder layered **over** the game's RomFS (its files win). Already implemented (`fs.cpp`, `fs_romfs.cpp`). |
 | `[fs]` | `exefs_patches` | path | empty (off) | A folder of IPS / IPS32 code patches named by build id (`<build id>.ips` / `.ips32`), applied to the module before the lift. Build-time (pkp_build.py `--patches`), not a runtime read. |
@@ -226,6 +228,21 @@ only) runs the glass blur on the GPU against the reference and times it.
   running loop too; nxnative, which runs the guest's own instructions, gets the same by writing main's text through a second, writable
   mapping and invalidating the instruction cache (`dm/host/hle_cheats.c` `main_write_pages`). Such a module declares ABI 5
   (`NXRECOMP_ABI_LIVE`); one lifted without `--live-patch` stays ABI 4, never reads `Ctx.ov`, and still plays. The cost: see "Evidence".
+- **ASM cheats** (Atmosphère cheats that write code: `vmcode.cpp`, the engine's write router). A console's dmnt writes main's code through
+  the kernel's debug write and the next instruction fetch runs it; most code cheats put a branch over one instruction into a code cave in
+  the padding after the module's last instruction (Pokopia 2.0.1's 4 ASM cheats, 59 of Z-A 2.0.2's 60). The VM's writes are split by
+  where they land: data (anything but a lifted function's code or a cave) is written at once, exactly as before; a word of a lifted
+  function is held until the pass ends and then, when it changed, becomes a one-word live code patch (`cp::apply_words`: each function it
+  touches lifted again once, swapped in at the next frame boundary, through the entry and loop-head checks of a `--live-patch` build);
+  cave bytes (from the module's text end to the end of its last 4 KiB code page, as Inject's cave) are written first and made a code
+  region the dispatcher lifts from its bytes (`missed::code_region_add`; rewritten bytes drop the units made from the old ones). Each
+  held word remembers the cheats whose last write is what it holds (a "Restore Code" cheat writing the original before another cheat's
+  patch owns nothing). Turning a cheat off puts back the words no other enabled cheat holds: code at once (`cp::revert_words`), its cave
+  once every function reverted with it has swapped (`cp::settled`), so no thread can still branch into a cave being cleared; a cheat
+  that writes the original bytes back reverts the same way, and a reload of the file puts everything back. A console never reverts (the
+  code stays until the game restarts): here a cheat switched off puts the game back. These patches are the cheat's, never written to
+  an IPS (`by_cheat`). With data cheats only, a write costs one range test more and the pass ends with nothing to do: the engine's
+  `code` counters stay 0 (`nxrt_vmcode_test`, `nxrt_cheat_engine_test`; the scripted test's `codewords` step logs them and the words held).
 - **Breakpoints** use the same unit with an inline site (`nx_site_inline`, hooks.h) before the instruction, and before every other
   instruction of the function when a breakpoint there stops, so a held thread can step. A held thread waits in the site's hook; on the
   presenting thread the pause service keeps the overlay running meanwhile.
@@ -498,6 +515,8 @@ plus `labels` `[{address, name}]` and `lua` `[{name, run, source}]`. Frozen entr
 come back at the next start. The overlay saves on hide and every few seconds after a change.
 
 **Atmosphère.** The engine runs the title's own cheat file as a console does (`<cheats dir>/<program id>/cheats/<build id>.txt` or a flat
-`<build id>.txt`, `toggles.txt` beside it, the full cheat VM, 12 passes a second). Cheat files: Import appends another file's cheats to the
+`<build id>.txt`, `toggles.txt` beside it, the full cheat VM, 12 passes a second; with no `toggles.txt` every cheat starts on, as on a
+console, so a file that should start off ships with one that says `false` for each). Code cheats become live code patches ("ASM
+cheats" above). Cheat files: Import appends another file's cheats to the
 title's file; Export writes every value entry in main or the heap (opcode 0: a static write) and every pointer path rooted in main
 (opcodes 5, 4, A: load through the path, store) to it, so the same cheats run on a console, Ryujinx or a yuzu fork.

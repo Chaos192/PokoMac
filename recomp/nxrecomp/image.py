@@ -194,6 +194,36 @@ class Image:
         return img
 
     @classmethod
+    def from_nro(cls, data, base, name='nro'):
+        """An NRO: a module a game loads while it runs (nn::ro, the jit service's plugin; runtime src/services/jit.cpp). It is not
+        compressed and its file is its memory image: .text, .rodata and .data at their offsets, word 1 the MOD0 offset, the header at
+        0x10 ('NRO0', file size, the three segments as (offset, size), the .bss size at 0x38, the build id at 0x40)."""
+        if bytes(data[0x10:0x14]) != b'NRO0':
+            raise ValueError('not an NRO (no NRO0 at 0x10)')
+        (tv, ts), (rv, rs), (dv, ds) = [struct.unpack_from('<II', data, 0x20 + 8 * i) for i in range(3)]
+        mem = bytes(data[:dv + ds]).ljust(dv + ds, b'\0')
+        img = cls(name, base, mem, (tv, ts), bss=(dv + ds, struct.unpack_from('<I', data, 0x38)[0]))
+        img.segments = [(tv, ts, 5), (rv, rs, 4), (dv, ds, 6)]
+        img.mod0 = struct.unpack_from('<I', mem, 4)[0]
+        if bytes(mem[img.mod0:img.mod0 + 4]) != b'MOD0':
+            raise ValueError('no MOD0 header')
+        dyn_off, bss_s, bss_e, eh_off = struct.unpack_from('<iiii', mem, img.mod0 + 4)
+        img.bss = (img.mod0 + bss_s, bss_e - bss_s)
+        dyn = img.mod0 + dyn_off
+        n = 0
+        while True:
+            t, v = struct.unpack_from('<qQ', mem, dyn + n * 16)
+            n += 1
+            if t == 0:
+                break
+            img.dt.setdefault(t, v)
+        img.sym_off, img.str_off = img.dt[6], img.dt[5]
+        img.nsym = struct.unpack_from('<I', mem, img.dt[4] + 4)[0] if 4 in img.dt else (img.str_off - img.sym_off) // 24
+        img.eh_hdr = img.mod0 + eh_off
+        img.meta = {'build_id': bytes(data[0x40:0x60]).hex(), 'dynamic': dyn, 'dynstr_size': img.dt.get(10, 0)}
+        return img
+
+    @classmethod
     def from_nx_elf(cls, path, base, name=None):
         d = open(path, 'rb').read()
         off = NX_ELF_OFF

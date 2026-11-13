@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Copyright (c) 2026 Chaos192
 // Code patches, code injection and breakpoints for the cheats overlay (phase 6), native: never an interpreter.
 //
 // Guest code runs as compiled host code, so changing an instruction's bytes in guest memory changes nothing by itself. A patch therefore:
@@ -18,6 +19,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace nxrt::cheats::cp {
@@ -40,6 +42,7 @@ struct Patch {
     State state = State::Compiling;
     std::string note;              // why not live, or how long the unit took
     bool by_game = false;          // the game wrote this code itself (guest_code_written): live like a patch, never reverted or exported
+    bool by_cheat = false;         // an Atmosphère cheat wrote it (apply_words, vmcode.h): reverted when the cheat goes off, never exported
 };
 
 // Patches the code at addr (a multiple of 4; up to 64 bytes). Returns at once; the unit is made on a worker thread and the patch goes live
@@ -48,6 +51,15 @@ bool apply(uint64_t addr, const std::vector<uint8_t>& bytes, std::string* err);
 // Puts the original bytes back (the function is lifted again without this patch, or returns to its compiled code when none is left).
 bool revert(uint64_t addr, std::string* err);
 std::vector<Patch> patches();
+
+// The cheat VM's code writes of one pass (vmcode.h): one-word patches (by_cheat), recorded as apply records them, every function they touch
+// lifted again once (not once per word). errs[i]: why word i was refused, empty when it was patched. Returns how many were patched.
+size_t apply_words(const std::vector<std::pair<uint64_t, uint32_t>>& words, std::vector<std::string>* errs);
+// Puts the original bytes of those one-word patches back, each function lifted again (or back to its compiled code) once. Returns how many.
+size_t revert_words(const std::vector<uint64_t>& addrs);
+// True when the function holding addr runs what its last rebuild made (no swap still on the way, none failed): code a reverted patch
+// branched from no longer runs, so the cave it entered may go back.
+bool settled(uint64_t addr);
 
 // The game rewrote its own code in [addr, addr + len) (a skyline-style mod: svcSetProcessMemoryPermission makes a text page writable, a
 // branch is written, the page goes back to executable): every lifted function holding those words is lifted again from the bytes now in

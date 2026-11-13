@@ -19,9 +19,17 @@
 #ifndef NXRECOMP_CTX_H
 #define NXRECOMP_CTX_H
 
-#define NXRECOMP_ABI_VERSION 3   /* 2: host_import takes a globally unique import id; NxModule.index
+#define NXRECOMP_ABI_VERSION 4   /* 2: host_import takes a globally unique import id; NxModule.index
                                   * 3: DynSym.value is always a guest address; NxEh.types are final addresses and NxEh.type_syms /
-                                  *    NxEh.specs are new; every module also defines `const uint32_t nxmod_<name>_abi` */
+                                  *    NxEh.specs are new; every module also defines `const uint32_t nxmod_<name>_abi`
+                                  * 4: mid-function entries: NxModule.entries / nentries (NxEntryFn) at the end of the struct, and the
+                                  *    runtime-provided nx_no_entry (the default case of every u_<entry> switch). A runtime that knows
+                                  *    ABI 4 also takes ABI 3 modules (they have no entry table).
+                                  * NXRECOMP_ABI_LIVE (5): a module lifted with --live-patch: ABI 4 plus the NX_OV check at every function
+                                  *    entry, which reads Ctx.ov (the last field of Ctx). pkp_build lifts every game so since 2026-11-10
+                                  *    (code patches work in the one normal build); a module lifted without it stays ABI 4, never reads
+                                  *    Ctx.ov, and still plays (the runtime takes 4 and 5). */
+#define NXRECOMP_ABI_LIVE 5
 
 #include <stdint.h>
 #include <stddef.h>
@@ -56,6 +64,9 @@ typedef struct Ctx {
     uint64_t fn;                 /* entry address of the lifted function entered most recently (crash reports) */
     const char *in_import;       /* name of the host import currently executing on this context, or NULL */
     uint64_t import_from;        /* guest return address of that import call */
+    const void *ov;              /* live code patches (modules lifted with --live-patch, NX_OV): NULL while none is live, else the
+                                  * runtime's table of per-module bitmaps (indexed by NxModule.index; one bit per 4-byte word of the
+                                  * module's code, from its base), whose set bits are the functions it overrides through nx_hook_entry */
 } Ctx;
 
 /* ======================================================================================================== */
@@ -89,6 +100,21 @@ void guest_msr(Ctx *c, uint32_t sysreg, uint64_t value);
 void nx_site_inline(Ctx *c, uint64_t addr);
 int nx_site_midhook(Ctx *c, uint64_t addr);
 int nx_hook_entry(Ctx *c, uint64_t addr);
+/* The check a module lifted with --live-patch puts at every function entry: nothing but a load of c->ov and a branch while no live patch
+ * exists; when one does, the function's bit (module index mi, byte kb, mask km of the module's bitmap) sends the call to its entry hook,
+ * where the runtime runs the function recompiled from the patched bytes. Inlined copies of the function carry the check too. */
+#define NX_OV(c, mi, kb, km, addr) do { \
+        const uint8_t *const *ov_ = (const uint8_t *const *)(c)->ov; \
+        if (__builtin_expect(ov_ != 0, 0)) { \
+            const uint8_t *m_ = ov_[(mi)]; \
+            if (m_ && (m_[(kb)] & (km)) && nx_hook_entry((c), (addr))) return; \
+        } \
+    } while (0)
+/* The same check at a loop head of such a function (a target of a backward branch), so a patch reaches a loop that is already running (a
+ * thread's main loop that never returns): with the function's bit set, nx_hook_resume runs the function recompiled from the patched bytes
+ * from guest address `pc` with the registers as they are, and the old code returns. 0 from it (no such entry): the old code goes on. */
+int nx_hook_resume(Ctx *c, uint64_t entry, uint64_t pc);
+#define NX_OVL(c, mi, kb, km, entry, pc) do {         const uint8_t *const *ov_ = (const uint8_t *const *)(c)->ov;         if (__builtin_expect(ov_ != 0, 0)) {             const uint8_t *m_ = ov_[(mi)];             if (m_ && (m_[(kb)] & (km)) && nx_hook_resume((c), (entry), (pc))) return;         }     } while (0)
 /* Diagnostics of a failed STXR (bits < 0: the monitor was not open on that address). May be a no-op. */
 void stx_diag(Ctx *c, uint64_t a, uint64_t expected, uint64_t seen, uint64_t v, int bits);
 
@@ -101,6 +127,17 @@ typedef struct { uint64_t addr; void (*fn)(Ctx *); } FnEntry;
 typedef struct { const char *name; uint64_t value; int defined; } DynSym;
 /* A C++ landing pad: resuming the lifted function `fn` at guest address `pad` is fn(c, pad). */
 typedef struct { uint64_t pad; void (*fn)(Ctx *, uint64_t); } NxResume;
+/* Mid-function entries (ABI 4; nxrecomp/entries.py). A lifted function whose code may be entered somewhere other than its start (a
+ * landing pad, an address taken in code or data, a jump-table target, any instruction when the entry level says so) is written as
+ * u_<entry>(c, rp) with `if (rp) switch (rp) { case <addr>: goto L_<addr>; ... default: nx_no_entry(c, rp); return; }` at its top, and
+ * listed here with its guest range [start, end): entering it at `addr` is fn(c, addr). The switch is the exact list; the table has one
+ * row per function, so an entry costs only its case label. flags: NX_ENTRY_CATCHER, the function holds a catch clause (it is entered
+ * through nx_catch_call, so a mid-function entry needs a catch frame too). Sorted by start. */
+#define NX_ENTRY_CATCHER 1u
+typedef struct { uint64_t start, end; void (*fn)(Ctx *, uint64_t); uint32_t flags; } NxEntryFn;
+/* The default case of an entry switch: `addr` is not an entry of the function. The runtime's dispatcher probes a function this way
+ * (and then looks further: recompile on demand); any other caller is a guest trap. Returns to the u_ function, which returns. */
+void nx_no_entry(Ctx *c, uint64_t addr);
 /* C++ exception support. A lifted function that contains a catch clause whose handler can return is entered as
  * nx_catch_call(c, u_<entry>): the runtime runs body(c, 0) under a host frame it can unwind back to, and on an exception
  * that this function catches, calls body(c, landing pad) there instead. (ssbu-recomp's nro_catch_call.) */
@@ -148,6 +185,7 @@ typedef struct NxModule {
     const DynSym *syms; int nsyms;
     const NxResume *resume; int nresume;     /* sorted by pad */
     const NxEh *eh;              /* NULL when the module has no unwind data lifted */
+    const NxEntryFn *entries; int nentries;  /* ABI 4: functions with mid-function entries, sorted by start (absent in ABI 3) */
 } NxModule;
 
 /* ======================================================================================================== */

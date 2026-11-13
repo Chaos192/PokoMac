@@ -15,6 +15,9 @@ namespace nxrt {
 // ---- lifted functions ----------------------------------------------------------------------------------------------
 // Registration may happen at any time (module load); lookups are lock free and safe against concurrent registration.
 void fn_register(uint64_t guest_addr, GuestFn fn);
+// Forgets the function at guest_addr (its slot keeps the address with no function, so lookups miss; a later fn_register fills it again).
+// For code the game rewrote while it runs (missed.h code regions): its old unit must not run for the new bytes.
+void fn_unregister(uint64_t guest_addr);
 GuestFn fn_lookup(uint64_t guest_addr);
 size_t fn_count();
 void fn_clear();                                  // tests only: no thread may be inside a lookup

@@ -18,6 +18,7 @@
 #include "nxrt/dispatch.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
+#include "nxrt/missed.h"
 #include "nxrt/module.h"
 
 namespace nxrt {
@@ -28,6 +29,7 @@ constexpr uint32_t kMaxModules = 1u << (32 - 20);   // NX_IMPORT_ID keeps the mo
 struct Entry {
     const NxModule* nx = nullptr;
     Module* image = nullptr;
+    uint32_t abi = 0;                                 // the module's ABI version: 3 has no NxModule.entries (they are past its struct)
     std::unique_ptr<std::atomic<uint64_t>[]> cache;   // per DynSym: resolved target, 0 = not resolved yet
     size_t ncache = 0;
 };
@@ -100,6 +102,19 @@ const char* validate(const NxModule* nx) {
     return nullptr;
 }
 
+// The ABI 4 mid-function entry table (missed.h): rows sorted by start, ranges inside the module, functions present.
+const char* validate_entries(const NxModule* nx) {
+    if (nx->nentries < 0 || (nx->nentries && !nx->entries)) return "bad mid-function entry table";
+    for (int i = 0; i < nx->nentries; i++) {
+        const NxEntryFn& e = nx->entries[i];
+        if (!e.fn) return "null function in the mid-function entry table";
+        if (e.start - nx->base >= nx->text_end - nx->base || e.end <= e.start || e.end - nx->base > nx->text_end - nx->base)
+            return "mid-function entry range outside [base, text_end)";
+        if (i && nx->entries[i - 1].start > e.start) return "mid-function entry table not sorted by start";
+    }
+    return nullptr;
+}
+
 uint64_t find_export(const char* name, const NxModule* except) {
     for (size_t k = 0, n = g_count.load(std::memory_order_acquire); k < n; k++) {
         Entry* e = g_list[k].load(std::memory_order_acquire);
@@ -116,9 +131,12 @@ uint64_t find_export(const char* name, const NxModule* except) {
 
 RegResult nxmodule_register(Module* image, const NxModule* nx, uint32_t abi_version) {
     if (!nx) return refuse(RegStatus::Invalid, nx, "null descriptor");
-    if (abi_version != kAbiVersion)
-        return refuse(RegStatus::AbiMismatch, nx, "lifted against ABI version %u, this runtime implements version %u (re-lift the module)", abi_version, kAbiVersion);
+    if (abi_version < kAbiVersionOldest || abi_version > kAbiVersion)
+        return refuse(RegStatus::AbiMismatch, nx, "lifted against ABI version %u, this runtime implements versions %u to %u (re-lift the module)", abi_version,
+                      kAbiVersionOldest, kAbiVersion);
     if (const char* why = validate(nx)) return refuse(RegStatus::Invalid, nx, "%s", why);
+    if (abi_version >= 4)
+        if (const char* why = validate_entries(nx)) return refuse(RegStatus::Invalid, nx, "%s", why);
 
     std::lock_guard<std::mutex> lk(g_lock);
     if (by_index(nx->index)) return refuse(RegStatus::DuplicateIndex, nx, "module index %u is already registered (%s)", nx->index, g_by_index[nx->index].load()->nx->name);
@@ -142,6 +160,7 @@ RegResult nxmodule_register(Module* image, const NxModule* nx, uint32_t abi_vers
     auto e = std::make_unique<Entry>();
     e->nx = nx;
     e->image = image;
+    e->abi = abi_version;
     e->ncache = static_cast<size_t>(nx->nsyms);
     e->cache = std::make_unique<std::atomic<uint64_t>[]>(e->ncache ? e->ncache : 1);
     g_by_index[nx->index].store(e.get(), std::memory_order_release);
@@ -150,16 +169,29 @@ RegResult nxmodule_register(Module* image, const NxModule* nx, uint32_t abi_vers
     g_owned[n] = std::move(e);
     g_count.store(n + 1, std::memory_order_release);
     invalidate_caches_locked();
-    NXLOG_I("loader", "registered lifted module %s (index %u): %zu of %d functions, %d dynamic symbols, %d resume pads, unwind tables %s", nx->name, nx->index,
-            r.functions, nx->nfns, nx->nsyms, nx->nresume, nx->eh ? "yes" : "no");
+    NXLOG_I("loader", "registered lifted module %s (index %u, ABI %u): %zu of %d functions, %d dynamic symbols, %d resume pads, %d functions with mid-function entries, unwind tables %s",
+            nx->name, nx->index, abi_version, r.functions, nx->nfns, nx->nsyms, nx->nresume, abi_version >= 4 ? nx->nentries : 0, nx->eh ? "yes" : "no");
     return r;
 }
 
-size_t module_register_nxmodule(Module* m, const NxModule* nx) { return nxmodule_register(m, nx, kAbiVersion).functions; }
+size_t module_register_nxmodule(Module* m, const NxModule* nx) { return nxmodule_register(m, nx, NXRECOMP_ABI_VERSION).functions; }
 
 const NxModule* nxmodule_by_index(uint32_t index) {
     Entry* e = by_index(index);
     return e ? e->nx : nullptr;
+}
+
+bool nxmodule_live_patch(const NxModule* nx) {
+    Entry* e = nx ? by_index(nx->index) : nullptr;
+    return e && e->nx == nx && e->abi >= NXRECOMP_ABI_LIVE;
+}
+
+const NxEntryFn* nxmodule_entry_table(const NxModule* nx, int* n) {
+    *n = 0;
+    Entry* e = nx ? by_index(nx->index) : nullptr;
+    if (!e || e->nx != nx || e->abi < 4 || nx->nentries <= 0) return nullptr;
+    *n = nx->nentries;
+    return nx->entries;
 }
 
 const NxModule* nxmodule_by_name(const char* name) {

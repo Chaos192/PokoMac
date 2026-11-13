@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // Atmosphère's cheat format and cheat VM, written from the behaviour nxnative's docs/reference/cheats.md describes (read there from
 // Atmosphère 1.12.1's dmnt; MIT notes). Our own code: no line of Atmosphère (GPL-2) is used.
 //
@@ -84,6 +85,9 @@ public:
     void set_static_reg(size_t i, uint64_t v) { if (i < 0x100) static_[i] = v; }
     // The entry whose words hold program word `ip` (for reports).
     int entry_at(size_t ip) const;
+    // The cheat file's entry index (0 = the master) of the instruction whose write the host is doing now (VmHost::write asks it: the
+    // engine's code router keeps, per code word, which cheats wrote it). -1 outside a write.
+    int writing_entry() const;
     size_t program_words() const { return prog_.size(); }
     bool loaded() const { return loaded_; }
     // Called for each successful VM write (the engine keeps frozen values in step with it, as dmnt does).
@@ -106,7 +110,7 @@ public:
 
 private:
     uint64_t mem_read(VmHost& host, uint64_t addr, unsigned width, PassReport& rep);   // zero-extended; 0 on failure
-    bool mem_write(VmHost& host, uint64_t addr, uint64_t value, unsigned width, PassReport& rep);
+    bool mem_write(VmHost& host, uint64_t addr, uint64_t value, unsigned width, PassReport& rep, size_t at);
     uint64_t c0_operand(VmHost& host, const Ins& in, PassReport& rep);                 // the comparand of opcode C0
     size_t ins_index_of_word(size_t word) const;   // instruction starting at that word, or ins_.size()
     size_t skip_conditional(size_t from, bool& entered_else) const;                    // an unmet conditional: resume index
@@ -118,6 +122,8 @@ private:
     std::string invalid_why_;                     // why decoding stopped at valid_ (empty: the program ended cleanly)
     std::vector<std::pair<size_t, int>> spans_;   // (first word, entry index)
     std::vector<std::string> names_;              // entry names by index
+    std::vector<int> file_entries_;               // the cheat file's entry index of each names_ index
+    size_t writing_at_ = SIZE_MAX;                // first word of the instruction whose write is in progress (SIZE_MAX: none)
     bool loaded_ = false;
     uint64_t reg_[16] = {};
     uint64_t saved_[16] = {};

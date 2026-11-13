@@ -13,5 +13,7 @@ EXPORTS
     nx_site_inline
     nx_site_midhook
     nx_hook_entry
+    nx_hook_resume
     stx_diag
     nx_catch_call
+    nx_no_entry

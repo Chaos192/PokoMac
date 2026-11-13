@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
 // Atmosphère cheat format and VM (cheat_vm.h). Written from nxnative docs/reference/cheats.md; our own code.
 #include "cheat_vm.h"
 
@@ -222,6 +223,7 @@ bool Vm::load(const CheatFile& f) {
     prog_.clear();
     spans_.clear();
     names_.clear();
+    file_entries_.clear();
     ins_.clear();
     valid_ = 0;
     invalid_why_.clear();
@@ -229,7 +231,7 @@ bool Vm::load(const CheatFile& f) {
     auto add = [&](const CheatEntry& e, int idx) {
         spans_.emplace_back(prog_.size(), static_cast<int>(names_.size()));
         names_.push_back(e.name);
-        (void)idx;
+        file_entries_.push_back(idx);
         prog_.insert(prog_.end(), e.words.begin(), e.words.end());
     };
     if (f.entries[0].used && f.entries[0].enabled) add(f.entries[0], 0);
@@ -467,6 +469,12 @@ int Vm::entry_at(size_t ip) const {
     return idx;
 }
 
+int Vm::writing_entry() const {
+    if (writing_at_ == SIZE_MAX) return -1;
+    const int k = entry_at(writing_at_);
+    return k >= 0 && static_cast<size_t>(k) < file_entries_.size() ? file_entries_[static_cast<size_t>(k)] : -1;
+}
+
 void Vm::reset_static() {
     for (uint64_t& v : static_) v = 0;
 }
@@ -506,9 +514,12 @@ uint64_t Vm::mem_read(VmHost& host, uint64_t addr, unsigned width, PassReport& r
     return v & m;
 }
 
-bool Vm::mem_write(VmHost& host, uint64_t addr, uint64_t value, unsigned width, PassReport& rep) {
+bool Vm::mem_write(VmHost& host, uint64_t addr, uint64_t value, unsigned width, PassReport& rep, size_t at) {
     if (mask_of(width) == 0) return true;   // width not 1/2/4/8: no-op
-    if (!host.write(addr, &value, width)) {
+    writing_at_ = at;
+    const bool ok = host.write(addr, &value, width);
+    writing_at_ = SIZE_MAX;
+    if (!ok) {
         rep.failed_writes++;
         return false;
     }
@@ -601,7 +612,7 @@ PassReport Vm::run(VmHost& host) {
 
         switch (in.kind) {
             case 0x0:
-                mem_write(host, host.base(in.a) + in.imm + reg_[in.b], in.val, in.w, rep);
+                mem_write(host, host.base(in.a) + in.imm + reg_[in.b], in.val, in.w, rep, in.at);
                 break;
             case 0x1: {
                 uint64_t addr = host.base(in.a) + in.imm;
@@ -653,7 +664,7 @@ PassReport Vm::run(VmHost& host) {
                 break;
             }
             case 0x6:
-                mem_write(host, reg_[in.b] + (in.d != 0 ? reg_[in.e] : 0), in.val, in.w, rep);
+                mem_write(host, reg_[in.b] + (in.d != 0 ? reg_[in.e] : 0), in.val, in.w, rep, in.at);
                 if (in.c != 0 && mask_of(in.w)) reg_[in.b] += in.w;
                 break;
             case 0x7: {
@@ -724,7 +735,7 @@ PassReport Vm::run(VmHost& host) {
                     case 5: addr = host.base(in.a) + reg_[in.b] + in.imm; break;
                     default: addr = reg_[in.b]; break;
                 }
-                mem_write(host, addr, reg_[in.d], in.w, rep);
+                mem_write(host, addr, reg_[in.d], in.w, rep, in.at);
                 if (in.c != 0 && mask_of(in.w)) reg_[in.b] += in.w;
                 break;
             }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Copyright (c) 2026 Chaos192
 // The cheat engine host (engine.h).
 #define _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING 1
 #include "engine.h"
@@ -46,12 +47,20 @@ std::string read_text(const std::string& path) {
     return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 }
 
-// A VmHost over guest memory and the live controller buttons.
+// A VmHost over guest memory and the live controller buttons. Writes into code or a cave go through the router (vmcode.h); the rest go
+// straight to memory as they always did.
 class LiveHost : public VmHost {
 public:
     std::function<void(bool)>* pause = nullptr;
-    bool read(uint64_t addr, void* dst, size_t n) override { return gmem::read(addr, dst, n); }
-    bool write(uint64_t addr, const void* src, size_t n) override { return gmem::write(addr, src, n); }
+    const Vm* vm = nullptr;
+    vmcode::Router* router = nullptr;
+    bool read(uint64_t addr, void* dst, size_t n) override {
+        return router && router->pending() ? router->read(addr, dst, n) : gmem::read(addr, dst, n);
+    }
+    bool write(uint64_t addr, const void* src, size_t n) override {
+        if (router && router->maybe_code(addr, n)) return router->write(addr, src, n, vm ? vm->writing_entry() : -1);
+        return gmem::write(addr, src, n);
+    }
     uint64_t base(unsigned t) override { return gmem::region_base(t); }
     uint64_t keys_held() override { return hid::sampled_buttons(); }
     void debug_log(uint32_t id, uint64_t value) override {
@@ -159,6 +168,7 @@ std::string Engine::file_path_for(const std::string& pid, const std::string& bid
 }
 
 Engine::LoadResult Engine::reload() {
+    router_.reset();   // the code the old file's cheats changed goes back: the new file's entries may be other cheats
     LoadResult res;
     const std::string pid = program_id_hex();
     const std::string bid = build_id_hex();
@@ -227,21 +237,26 @@ std::vector<Engine::CheatRow> Engine::cheats() const {
 }
 
 void Engine::set_cheat_enabled(int entry, bool on) {
-    std::lock_guard<std::mutex> lk(mu_);
-    if (entry < 0 || entry >= static_cast<int>(kMaxEntries)) return;
-    if (entry == 0) return;   // the master cannot be toggled
-    CheatEntry& e = file_.entries[entry];
-    if (!e.used) return;
-    e.enabled = on;
-    program_dirty_ = true;
-    // persist toggles.txt beside the file
-    const std::string path = stats_.file_path;
-    if (!path.empty()) {
-        const fs::path tog = fs::u8path(path).parent_path() / "toggles.txt";
-        std::error_code ec;
-        fs::create_directories(tog.parent_path(), ec);   // only mods' cheats were loaded: the title's own folder may not be there yet
-        std::ofstream(tog, std::ios::binary) << WriteToggles(file_);
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (entry < 0 || entry >= static_cast<int>(kMaxEntries)) return;
+        if (entry == 0) return;   // the master cannot be toggled
+        CheatEntry& e = file_.entries[entry];
+        if (!e.used) return;
+        e.enabled = on;
+        program_dirty_ = true;
+        // persist toggles.txt beside the file
+        const std::string path = stats_.file_path;
+        if (!path.empty()) {
+            const fs::path tog = fs::u8path(path).parent_path() / "toggles.txt";
+            std::error_code ec;
+            fs::create_directories(tog.parent_path(), ec);   // only mods' cheats were loaded: the title's own folder may not be there yet
+            std::ofstream(tog, std::ios::binary) << WriteToggles(file_);
+        }
     }
+    // an ASM cheat turned off: the code it changed goes back (the words no other enabled cheat wrote)
+    if (on) router_.entry_on(entry);
+    else router_.entry_off(entry);
 }
 
 uint64_t Engine::freeze_add(uint64_t addr, unsigned width, uint64_t value, FreezeMode mode, bool is_float) {
@@ -335,6 +350,8 @@ PassReport Engine::step_once() {
     if (!host_) {
         auto lh = std::make_unique<LiveHost>();
         lh->pause = &pause_fn_;
+        lh->vm = &vm_;
+        lh->router = &router_;
         host_ = std::move(lh);
     }
     PassReport rep;
@@ -346,7 +363,9 @@ PassReport Engine::step_once() {
             program_dirty_ = false;
         }
     }
+    if (vm_.loaded() && vm_.program_words()) router_.begin_pass();
     rep = vm_.run(*host_);
+    router_.end_pass();   // the pass's code and cave writes settle (nothing to do when it wrote none)
     write_frozen();
     aw::rearm();   // re-arm "find what writes/reads" pages unprotected by the last access
     {
@@ -359,6 +378,7 @@ PassReport Engine::step_once() {
         size_t en = 0;
         for (size_t i = 0; i < kMaxEntries; ++i) if (file_.entries[i].used && file_.entries[i].enabled) ++en;
         stats_.enabled_cheats = en;
+        stats_.code = router_.counters();
     }
     return rep;
 }
@@ -381,6 +401,8 @@ void Engine::enable(bool on) {
             std::lock_guard<std::mutex> lk(mu_);
             auto lh = std::make_unique<LiveHost>();
             lh->pause = &pause_fn_;
+            lh->vm = &vm_;
+            lh->router = &router_;
             host_ = std::move(lh);
         }
         stop_.store(false);

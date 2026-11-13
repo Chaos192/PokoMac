@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Copyright (c) 2026 Chaos192
 // Standalone test of the cheat engine host (runtime/src/cheats/engine.*): loads an Atmosphère file from a temp folder, runs a pass, and
 // checks the write reached guest memory; then checks the freeze modes (normal, never-decrease, never-increase). The few runtime symbols
 // the engine calls (gmem, hid, config, log) are stubbed here, so no runtime is needed.
@@ -52,7 +53,44 @@ std::string config_get_path(const char* s, const char* k, const char* d) { retur
 void logf(LogLevel, const char*, const char*, ...) {}
 bool log_enabled(LogLevel) { return false; } }
 
+// The router's sink (vmcode_live.cpp in the runtime): main's code is [main, main+0x800) in functions of 0x100 bytes, its cave up to
+// main+0x1000; memory is g_mem; the patcher records what it is asked and writes the word.
+static std::vector<std::string> g_cp_calls;
+static std::map<uint64_t, uint32_t> g_cp_orig;
+namespace nxrt::cheats::vmcode {
+struct TestSink : Sink {
+    static constexpr uint64_t B = 0x7100000000ull, TEXT_END = B + 0x800, CAVE_END = B + 0x1000;
+    bool maybe_code(uint64_t a, size_t n) override { return a + n > B && a < CAVE_END; }
+    Place place(uint64_t a) override {
+        if (a < B || a >= CAVE_END) return {};
+        if (a >= TEXT_END) return {Kind::Cave, TEXT_END, CAVE_END};
+        return {Kind::Code, a & ~0xFFull, (a & ~0xFFull) + 0x100};
+    }
+    bool read(uint64_t a, void* d, size_t n) override { return gmem::read(a, d, n); }
+    bool write(uint64_t a, const void* s, size_t n) override { return gmem::write(a, s, n); }
+    void patch(const std::vector<std::pair<uint64_t, uint32_t>>& words, std::vector<std::string>* errs) override {
+        errs->assign(words.size(), std::string());
+        for (auto& [w, v] : words) {
+            uint32_t cur = 0;
+            gmem::read(w, &cur, 4);
+            if (!g_cp_orig.count(w)) g_cp_orig[w] = cur;
+            gmem::write(w, &v, 4);
+            g_cp_calls.push_back("patch");
+        }
+    }
+    void unpatch(const std::vector<uint64_t>& words) override {
+        for (uint64_t w : words) {
+            if (auto it = g_cp_orig.find(w); it != g_cp_orig.end()) { gmem::write(w, &it->second, 4); g_cp_orig.erase(it); }
+            g_cp_calls.push_back("unpatch");
+        }
+    }
+    void cave_written(uint64_t, uint64_t, uint64_t, uint64_t) override { g_cp_calls.push_back("cave"); }
+};
+Sink& live_sink() { static TestSink s; return s; }
+}  // namespace nxrt::cheats::vmcode
+
 #include "cheat_vm.cpp"
+#include "vmcode.cpp"
 #include "engine.cpp"
 
 using namespace nxrt::cheats;
@@ -109,6 +147,12 @@ int main() {
 
     // toggles.txt was written
     CHECK(fs::exists(dir / "toggles.txt"));
+    // data cheats only: the router did nothing (vmcode.h's counters stay 0)
+    {
+        const auto c = e.stats().code;
+        CHECK(c.code_writes == 0 && c.cave_writes == 0 && c.passes_with_code == 0 && c.words_patched == 0);
+        CHECK(g_cp_calls.empty());
+    }
 
     // --- [cheats] mod_files (docs/MODS.md): the enabled mods' cheat files, after the title's own, toggles by name still apply ---
     {
@@ -163,6 +207,41 @@ int main() {
     e.step_once();
     CHECK(get32(A) == 80);  // raise refused
     e.freeze_remove(fid3);
+
+    // --- an ASM cheat (a branch at main+0x104 into a cave at main+0x900): a live patch while on, the code and cave back when off ---
+    {
+        const uint64_t B = 0x7100000000ull;
+        put32(B + 0x104, 0xAA000041);
+        for (uint64_t a = B + 0x800; a < B + 0x1000; a += 4) put32(a, 0);
+        std::ofstream(dir / (bid + ".txt"), std::ios::binary) << "[Coins 999]\n04000000 00001000 000003E7\n"
+                                                                  "[Hook]\n04000000 00000104 AA000041\n04000000 00000104 140001FF\n"
+                                                                  "08000000 00000900 17FFFE01 52800148\n";
+        fs::remove(dir / "toggles.txt");
+        auto r = e.reload();
+        CHECK(r.ok && r.cheats == 2);
+        g_cp_calls.clear();
+        e.set_cheat_enabled(2, true);
+        e.step_once();
+        CHECK(get32(B + 0x104) == 0x140001FF);
+        CHECK(get32(B + 0x900) == 0x52800148 && get32(B + 0x904) == 0x17FFFE01);
+        CHECK(g_cp_calls.size() == 2 && g_cp_calls[0] == "cave" && g_cp_calls[1] == "patch");
+        e.step_once();
+        CHECK(g_cp_calls.size() == 2);                 // nothing new while it stays on
+        const auto c = e.stats().code;
+        CHECK(c.code_writes == 4 && c.cave_writes == 2 && c.words_patched == 1 && c.cave_words_written == 2);
+        CHECK(e.code_held().size() == 3);
+        e.set_cheat_enabled(2, false);
+        CHECK(get32(B + 0x104) == 0xAA000041);
+        CHECK(get32(B + 0x900) == 0 && get32(B + 0x904) == 0);
+        CHECK(e.code_held().empty());
+        // a reload puts held code back too
+        e.set_cheat_enabled(2, true);
+        e.step_once();
+        CHECK(get32(B + 0x104) == 0x140001FF);
+        e.reload();
+        CHECK(get32(B + 0x104) == 0xAA000041);
+        CHECK(e.code_held().empty());
+    }
 
     fs::remove_all(tmp);
     if (g_fail == 0) std::printf("ALL ENGINE TESTS PASSED\n");

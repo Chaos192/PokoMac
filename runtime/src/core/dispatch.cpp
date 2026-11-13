@@ -18,6 +18,7 @@
 #include "nxrt/config.h"
 #include "nxrt/log.h"
 #include "nxrt/memory.h"
+#include "nxrt/missed.h"
 
 namespace nxrt {
 namespace {
@@ -143,6 +144,21 @@ void fn_register(uint64_t guest_addr, GuestFn fn) {
     t->slots[h].addr.store(guest_addr, std::memory_order_release);
     t->used++;
     g_fn_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+void fn_unregister(uint64_t guest_addr) {
+    std::lock_guard<std::mutex> lk(g_write);
+    Table* t = g_table.load(std::memory_order_relaxed);
+    if (!t) return;
+    for (size_t h = hash_addr(guest_addr) & t->mask;; h = (h + 1) & t->mask) {
+        const uint64_t a = t->slots[h].addr.load(std::memory_order_relaxed);
+        if (!a) return;
+        if (a == guest_addr) {
+            t->slots[h].fn.store(nullptr, std::memory_order_release);   // the address stays: the probe chains through it are unchanged
+            g_fn_epoch.fetch_add(1, std::memory_order_release);        // every thread drops its cache of found functions
+            return;
+        }
+    }
 }
 
 GuestFn fn_lookup(uint64_t guest_addr) {
@@ -362,7 +378,9 @@ void dispatch_call(::Ctx* c, uint64_t addr) {
         t_hle_name = saved;
         return;
     }
-    trap("indirect call to an address that is not a known function", addr);
+    // Not a function start: a mid-function entry, code recompiled on demand, else recorded for the next build (missed.cpp)
+    if (!in_hle_range && missed::enter(c, addr)) return;
+    trap(missed::explain(addr).c_str(), addr);
 }
 
 }  // namespace nxrt
