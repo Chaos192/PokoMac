@@ -10,7 +10,7 @@
 //! size and SHA-256. The two Windows programs, the shader translator and pkp.exe, run through `runner`: Steam's Proton inside
 //! the Steam Linux Runtime, as Steam starts a game (PKP_PROTON picks another Proton folder), else umu-run, else Wine. There
 //! the Linux root is drive Z:, so paths handed to them go through `win_path`.
-//! Steam's Proton is found as tinfoil-chewer/pokopia-recomp-linux (GPL-3.0) linux/pkp_linux.py `find_proton` finds it.
+//! Steam's Proton is looked up in Steam's own library list (libraryfolders.vdf): the newest one installed, Experimental first.
 //!
 //! macOS (Apple silicon) is a native port, not Wine: the runtime is `libpkp_rt.dylib`, pkp_build.py links the game as the arm64
 //! program `pkp`, and the shader translator is a self-contained osx-arm64 .NET publish, so nothing runs through a runner and paths
@@ -84,37 +84,46 @@ pub fn runtime_source(tools_dir: &Path) -> Option<PathBuf> {
     Some(if cfg!(target_os = "macos") { install.join("runtime") } else { install.to_path_buf() })
 }
 
-/// A command for a program of this system (Python, tar, Proton, xdg-open). In an AppImage, whose runtime points
-/// variables such as GTK_PATH, GIO_EXTRA_MODULES or XDG_DATA_DIRS into the AppImage for the launcher's own libraries, the
-/// program gets the environment without those entries (and without APPDIR, APPIMAGE, ARGV0, OWD); elsewhere nothing
-/// changes. After tinfoil-chewer/pokopia-recomp-linux (GPL-3.0) launcher/src-tauri/src/linux.rs `host_env`.
+/// A command for `program` (Python, Zig, the shader translator, Proton, Wine) with the launcher's environment, minus what an AppImage's
+/// runtime added for the launcher itself: its own variables (APPDIR, APPIMAGE, ARGV0, OWD) and every path into the mounted image
+/// (library and data search paths), so a program started from the AppImage sees the system's environment, as when started from a
+/// shell. Without APPDIR nothing changes.
 pub fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
     let mut cmd = Command::new(program);
     let appdir = std::env::var("APPDIR").unwrap_or_default();
     let vars = std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)));
-    for (k, v) in appimage_env_fixes(&appdir, vars) {
-        match v {
-            Some(v) => cmd.env(k, v),
-            None => cmd.env_remove(k),
-        };
+    for (name, value) in appimage_env_fixes(&appdir, vars) {
+        match value {
+            Some(v) => {
+                cmd.env(name, v);
+            }
+            None => {
+                cmd.env_remove(name);
+            }
+        }
     }
     cmd
 }
 
-/// What `command` changes for `appdir` (empty: not an AppImage, nothing): (variable, Some(new value) or None = removed).
+/// The changes `command` makes for an AppImage mounted at `appdir` (trailing '/' ignored; empty: none), in the order of `vars`: the
+/// runtime's own variables are removed; a value naming the image anywhere loses its pieces into it when it is a ':' list with other
+/// pieces left (empty pieces go too), and is removed otherwise. Other variables are not listed (unchanged).
 fn appimage_env_fixes(appdir: &str, vars: impl Iterator<Item = (String, String)>) -> Vec<(String, Option<String>)> {
     let appdir = appdir.trim_end_matches('/');
     if appdir.is_empty() {
         return Vec::new();
     }
     let mut out = Vec::new();
-    for (k, v) in vars {
-        if matches!(k.as_str(), "APPDIR" | "APPIMAGE" | "ARGV0" | "OWD") {
-            out.push((k, None));
-        } else if v.contains(appdir) {
-            // a list keeps its other entries; a single path into the AppImage goes
-            let kept: Vec<&str> = v.split(':').filter(|e| !e.is_empty() && !e.contains(appdir)).collect();
-            out.push((k, (v.contains(':') && !kept.is_empty()).then(|| kept.join(":"))));
+    for (name, value) in vars {
+        if matches!(name.as_str(), "APPDIR" | "APPIMAGE" | "ARGV0" | "OWD") {
+            out.push((name, None));
+        } else if value.contains(appdir) {
+            let kept: Vec<&str> = value.split(':').filter(|p| !p.is_empty() && !p.contains(appdir)).collect();
+            if value.contains(':') && !kept.is_empty() {
+                out.push((name, Some(kept.join(":"))));
+            } else {
+                out.push((name, None));
+            }
         }
     }
     out
@@ -310,26 +319,32 @@ fn find_runner() -> Result<Runner, String> {
     Err("Nothing to run the game's Windows programs with was found. Install Steam and its Proton (in Steam: Library, Tools, Proton Experimental), umu-launcher, or Wine.".into())
 }
 
-/// The values of `"key" "value"` lines in a Valve KeyValues file (libraryfolders.vdf, toolmanifest.vdf, appmanifest_*.acf).
+/// Valve KeyValues text (libraryfolders.vdf, toolmanifest.vdf, appmanifest_*.acf), read line by line: the value of every line that
+/// starts with `"<key>"` (at any depth), in file order. Only doubled backslashes are decoded.
 #[cfg(not(any(windows, target_os = "macos")))]
 fn vdf_values(text: &str, key: &str) -> Vec<String> {
     let quoted = format!("\"{}\"", key);
-    text.lines()
-        .filter_map(|l| l.trim().strip_prefix(quoted.as_str()))
-        .filter_map(|rest| rest.trim().strip_prefix('"').and_then(|v| v.strip_suffix('"')))
-        .map(|v| v.replace("\\\\", "\\"))
-        .collect()
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Some(rest) = line.trim().strip_prefix(quoted.as_str()) else { continue };
+        let Some(inner) = rest.trim().strip_prefix('"') else { continue };
+        let Some(value) = inner.strip_suffix('"') else { continue };
+        out.push(value.replace("\\\\", "\\"));
+    }
+    out
 }
 
-/// (Steam root, its library folders) from libraryfolders.vdf. None without Steam.
+/// Steam's root (the first of its usual places, the Flatpak's last, whose steamapps/libraryfolders.vdf reads) and its game libraries:
+/// the root, then every library the file lists, each canonical, with a steamapps folder, once.
 #[cfg(not(any(windows, target_os = "macos")))]
 fn steam_libraries() -> Option<(PathBuf, Vec<PathBuf>)> {
-    for r in [".local/share/Steam", ".steam/steam", ".steam/root", ".var/app/com.valvesoftware.Steam/.local/share/Steam"] {
-        let Ok(root) = std::fs::canonicalize(home().join(r)) else { continue };
+    let home = home();
+    for rel in [".local/share/Steam", ".steam/steam", ".steam/root", ".var/app/com.valvesoftware.Steam/.local/share/Steam"] {
+        let Ok(root) = home.join(rel).canonicalize() else { continue };
         let Ok(text) = std::fs::read_to_string(root.join("steamapps").join("libraryfolders.vdf")) else { continue };
         let mut libs: Vec<PathBuf> = Vec::new();
         for lib in std::iter::once(root.clone()).chain(vdf_values(&text, "path").into_iter().map(PathBuf::from)) {
-            let Ok(lib) = std::fs::canonicalize(lib) else { continue };
+            let Ok(lib) = lib.canonicalize() else { continue };
             if lib.join("steamapps").is_dir() && !libs.contains(&lib) {
                 libs.push(lib);
             }
@@ -339,46 +354,51 @@ fn steam_libraries() -> Option<(PathBuf, Vec<PathBuf>)> {
     None
 }
 
-/// PKP_PROTON (a folder with `proton`), else Proton Experimental, else the newest "Proton N.N" Steam installed.
+/// The Proton folder to use: PKP_PROTON when set (if it holds a `proton` script; no search then), else the newest Proton installed in
+/// the libraries' steamapps/common: Experimental first, then by the numbers in its name; on a tie, the one found last.
 #[cfg(not(any(windows, target_os = "macos")))]
 fn pick_proton(libs: &[PathBuf]) -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("PKP_PROTON").map(PathBuf::from) {
-        return p.join("proton").is_file().then_some(p);
+    if let Some(dir) = std::env::var_os("PKP_PROTON") {
+        let dir = PathBuf::from(dir);
+        return if dir.join("proton").is_file() { Some(dir) } else { None };
     }
     let rank = |name: &str| -> (u8, Vec<u32>) {
         if name.contains("Experimental") {
-            return (2, vec![]);
+            return (2, Vec::new());
         }
-        let nums: Vec<u32> = name.split(|c: char| !c.is_ascii_digit()).filter_map(|x| x.parse().ok()).collect();
-        (if nums.is_empty() { 0 } else { 1 }, nums)
+        let numbers: Vec<u32> = name.split(|c: char| !c.is_ascii_digit()).filter(|s| !s.is_empty()).filter_map(|s| s.parse().ok()).collect();
+        (if numbers.is_empty() { 0 } else { 1 }, numbers)
     };
-    let mut found: Vec<(String, PathBuf)> = Vec::new();
+    let mut found: Vec<(PathBuf, (u8, Vec<u32>))> = Vec::new();
     for lib in libs {
-        let Ok(rd) = std::fs::read_dir(lib.join("steamapps").join("common")) else { continue };
-        for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            if name.starts_with("Proton") && e.path().join("proton").is_file() {
-                found.push((name, e.path()));
+        let common = lib.join("steamapps").join("common");
+        let Ok(entries) = std::fs::read_dir(&common) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("Proton") && entry.path().join("proton").is_file() {
+                let r = rank(&name);
+                found.push((common.join(&name), r));
             }
         }
     }
-    found.into_iter().max_by_key(|(n, _)| rank(n)).map(|(_, p)| p)
+    found.into_iter().max_by_key(|(_, r)| r.clone()).map(|(dir, _)| dir)
 }
 
-/// Steam's Proton, inside the Steam Linux Runtime container its toolmanifest.vdf asks for when that is installed (as Steam
-/// starts a game). Its prefix is `data_dir()/proton` (STEAM_COMPAT_DATA_PATH).
+/// Steam's Proton as the runner, inside the Steam Linux Runtime its toolmanifest.vdf asks for when that is installed, as Steam starts
+/// a game: `proton waitforexitandrun` with its own prefix (data_dir/proton) and Steam's root for the client files.
 #[cfg(not(any(windows, target_os = "macos")))]
 fn steam_proton() -> Option<Runner> {
     let (root, libs) = steam_libraries()?;
     let pdir = pick_proton(&libs)?;
-    let mut argv: Vec<OsString> = vec![pdir.join("proton").into(), "waitforexitandrun".into()];
-    let mut label = pdir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Proton".into());
+    let mut argv: Vec<OsString> = vec![pdir.join("proton").into_os_string(), "waitforexitandrun".into()];
+    let mut label = pdir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Proton".to_string());
     let manifest = std::fs::read_to_string(pdir.join("toolmanifest.vdf")).unwrap_or_default();
-    if let Some(appid) = vdf_values(&manifest, "require_tool_appid").first() {
+    if let Some(appid) = vdf_values(&manifest, "require_tool_appid").into_iter().next() {
         for lib in &libs {
-            let acf = std::fs::read_to_string(lib.join("steamapps").join(format!("appmanifest_{}.acf", appid))).unwrap_or_default();
+            let steamapps = lib.join("steamapps");
+            let acf = std::fs::read_to_string(steamapps.join(format!("appmanifest_{}.acf", appid))).unwrap_or_default();
             let Some(dir) = vdf_values(&acf, "installdir").into_iter().next() else { continue };
-            let entry = lib.join("steamapps").join("common").join(&dir).join("_v2-entry-point");
+            let entry = steamapps.join("common").join(&dir).join("_v2-entry-point");
             if entry.is_file() {
                 argv.splice(0..0, [entry.into_os_string(), "--verb=waitforexitandrun".into(), "--".into()]);
                 label = format!("{} in {}", label, dir);
@@ -386,9 +406,13 @@ fn steam_proton() -> Option<Runner> {
             }
         }
     }
-    let data = data_dir().join("proton");
-    let _ = std::fs::create_dir_all(&data);
-    Some(Runner { argv, env: vec![("STEAM_COMPAT_DATA_PATH", data.into()), ("STEAM_COMPAT_CLIENT_INSTALL_PATH", root.into())], label })
+    let prefix = data_dir().join("proton");
+    let _ = std::fs::create_dir_all(&prefix);
+    Some(Runner {
+        argv,
+        env: vec![("STEAM_COMPAT_DATA_PATH", prefix.into_os_string()), ("STEAM_COMPAT_CLIENT_INSTALL_PATH", root.into_os_string())],
+        label,
+    })
 }
 
 /// One download of `prepare_tools`, checked against the size and SHA-256 its publisher lists for it.
@@ -729,5 +753,63 @@ mod mac_tests {
         let me = String::from_utf8_lossy(&buf[..n as usize]).to_string();
         assert!(process_running(&me), "{me}");
         assert!(!process_running("no-such-process-pkp-test"));
+    }
+}
+
+#[cfg(test)]
+mod appimage_and_steam_tests {
+    use super::appimage_env_fixes;
+
+    fn fixes(appdir: &str, vars: &[(&str, &str)]) -> Vec<(String, Option<String>)> {
+        appimage_env_fixes(appdir, vars.iter().map(|(k, v)| (k.to_string(), v.to_string())))
+    }
+
+    #[test]
+    fn appimage_environment() {
+        assert!(fixes("", &[("APPIMAGE", "/x")]).is_empty());
+        assert!(fixes("/", &[("APPIMAGE", "/x")]).is_empty());
+        let got = fixes(
+            "/tmp/.mount_Ab12/",
+            &[
+                ("GTK_PATH", "/tmp/.mount_Ab12/usr/lib/gtk-3.0"),
+                ("XDG_DATA_DIRS", "/tmp/.mount_Ab12/usr/share:/usr/local/share:/usr/share"),
+                ("LD_LIBRARY_PATH", "/tmp/.mount_Ab12/usr/lib:"),
+                ("FOO", "x:/tmp/.mount_Ab12/a::y"),
+                ("BAR", "prefix/tmp/.mount_Ab12suffix"),
+                ("PATH", "/usr/bin:/bin"),
+                ("APPIMAGE", "/home/u/PokoMac.AppImage"),
+                ("OWD", "/home/u"),
+                ("ARGV0", "./PokoMac"),
+                ("APPDIR", "/tmp/.mount_Ab12"),
+            ],
+        );
+        let s = |v: &str| Some(v.to_string());
+        let want: Vec<(String, Option<String>)> = vec![
+            ("GTK_PATH".into(), None),
+            ("XDG_DATA_DIRS".into(), s("/usr/local/share:/usr/share")),
+            ("LD_LIBRARY_PATH".into(), None),
+            ("FOO".into(), s("x:y")),
+            ("BAR".into(), None),
+            ("APPIMAGE".into(), None),
+            ("OWD".into(), None),
+            ("ARGV0".into(), None),
+            ("APPDIR".into(), None),
+        ];
+        assert_eq!(got, want);
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    #[test]
+    fn steam_keyvalues() {
+        use super::vdf_values;
+        let v = |t: &str| vdf_values(t, "path");
+        assert_eq!(v("\t\t\"path\"\t\t\"/mnt/sd/SteamLibrary\""), ["/mnt/sd/SteamLibrary"]);
+        assert_eq!(v(r#""path" "C:\\Games\\Steam""#), [r"C:\Games\Steam"]);
+        assert_eq!(v("\"path\"\"/x\""), ["/x"]);
+        assert!(v("\"pathx\" \"/y\"").is_empty());
+        assert!(v("\"path\" \"/z\" // note").is_empty());
+        assert!(v("\"PATH\" \"/w\"").is_empty());
+        assert_eq!(v("\"path\" \"\""), [""]);
+        assert_eq!(v("\"path\" \"/a\"\n\"path\" \"/b\""), ["/a", "/b"]);
     }
 }
