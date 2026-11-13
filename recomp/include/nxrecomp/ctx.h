@@ -1,4 +1,5 @@
-/* SPDX-License-Identifier: GPL-3.0-or-later
+/* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ * Portions Copyright (c) 2026 Chaos192
  * Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
  *
  * nxrecomp: the ABI between lifted code and the runtime.
@@ -198,6 +199,15 @@ void nx_catch_call(Ctx *c, void (*body)(Ctx *, uint64_t));
 void nx_longjmp(Ctx *c, uint64_t target);
 void nx_frame_call(Ctx *c, void (*body)(Ctx *, uint64_t), uint64_t rp);
 void nx_stack_unwind(Ctx *c, uint64_t resume, void (*body)(Ctx *, uint64_t));
+
+/* ---- inlining ---------------------------------------------------------------------------------------------------------------- */
+/* Every helper from here on (and neon.h's, and fpexact.h's arithmetic, declared below) stands for one guest instruction on the
+ * lifted code's hot path, so it is inlined at every call. Left to its cost model, clang at the game build's -O1 keeps some out of
+ * line in blocks it judges cold (a lifted function has thousands of blocks), and then a flag-setting compare is a call that passes
+ * the flags through memory (Pokopia's game build, 2026-11-13: adds32 / adds64 and the FP arithmetic out of line). */
+#if defined(__clang__)
+#pragma clang attribute push(__attribute__((always_inline)), apply_to = function)
+#endif
 
 /* ---- plain memory accesses --------------------------------------------------------------------------------------------------- */
 /* LDR / STR: any alignment (a memcpy), one host access of that width each, freely optimised like any non-volatile access. */
@@ -557,7 +567,53 @@ static inline void nx_spin_hint(int kind) {
 static inline void nx_spin_hint(int unused) { (void)unused; }
 #endif
 
+#if defined(__clang__)
+#pragma clang attribute pop
+#endif
+
+/* fpexact.h's arithmetic, inlined like the helpers above. Left to clang: its cold paths (fp_nan_result*, the software FMA, the FMA3
+ * test, the estimate tables) and fp_maxmin* / fp_fma* / nx_fma*, whose results for denormal inputs under FZ change with the code
+ * around them when forced inline (the host's flush-to-zero meets the optimiser); out of line they keep the behaviour the
+ * differential pins. */
+#if defined(__clang__) || defined(__GNUC__)
+#define NX_ALWAYS_INLINE_ __attribute__((always_inline))
+#else
+#define NX_ALWAYS_INLINE_
+#endif
+static inline float fp_add32(float a, float b) NX_ALWAYS_INLINE_;
+static inline float fp_sub32(float a, float b) NX_ALWAYS_INLINE_;
+static inline float fp_mul32(float a, float b) NX_ALWAYS_INLINE_;
+static inline float fp_div32(float a, float b) NX_ALWAYS_INLINE_;
+static inline double fp_add64(double a, double b) NX_ALWAYS_INLINE_;
+static inline double fp_sub64(double a, double b) NX_ALWAYS_INLINE_;
+static inline double fp_mul64(double a, double b) NX_ALWAYS_INLINE_;
+static inline double fp_div64(double a, double b) NX_ALWAYS_INLINE_;
+static inline float fp_sqrt32(float a) NX_ALWAYS_INLINE_;
+static inline double fp_sqrt64(double a) NX_ALWAYS_INLINE_;
+static inline float fp_neg32(float a) NX_ALWAYS_INLINE_;
+static inline float fp_abs32(float a) NX_ALWAYS_INLINE_;
+static inline double fp_neg64(double a) NX_ALWAYS_INLINE_;
+static inline double fp_abs64(double a) NX_ALWAYS_INLINE_;
+static inline float fp_recps32(float a, float b) NX_ALWAYS_INLINE_;
+static inline double fp_recps64(double a, double b) NX_ALWAYS_INLINE_;
+static inline float fp_rsqrts32(float a, float b) NX_ALWAYS_INLINE_;
+static inline double fp_rsqrts64(double a, double b) NX_ALWAYS_INLINE_;
+static inline float fp_d2s(double x) NX_ALWAYS_INLINE_;
+static inline double fp_s2d(float x) NX_ALWAYS_INLINE_;
+static inline float fp_rne32(float x) NX_ALWAYS_INLINE_;
+static inline double fp_rne64(double x) NX_ALWAYS_INLINE_;
+static inline float fp_frint32(float x, int mode) NX_ALWAYS_INLINE_;
+static inline double fp_frint64(double x, int mode) NX_ALWAYS_INLINE_;
+#undef NX_ALWAYS_INLINE_
+
 #include "fpexact.h"
+
+#if defined(__clang__)
+#pragma clang attribute push(__attribute__((always_inline)), apply_to = function)
+#endif
 #include "neon.h"
+#if defined(__clang__)
+#pragma clang attribute pop
+#endif
 
 #endif /* NXRECOMP_CTX_H */
