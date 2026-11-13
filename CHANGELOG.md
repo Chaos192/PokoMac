@@ -30,7 +30,8 @@ local wireless come from it, and PokoMac's services were replaced with AnySwitch
   - Search memory, keep a cheat table, freeze values, browse memory, run Lua and AOB scripts, pause and step frames
   - Code cheats (ASM cheats that patch the game's code) now work while the game runs, on the Mac too: turning one on recompiles the
     patched code on the side and swaps it in; turning it off puts the game back. Neither the game nor the cheats menu waits for that
-    compile
+    compile. A code cheat whose code cannot be compiled is not applied: it turns itself off and the list says why
+  - Every cheat in a cheat file starts off until you turn it on (`[cheats] enabled_by_default = true` in `pkp.ini` for Atmosphère's way)
   - **Find cheats online** (Settings > Cheats > Cheat file) fetches the public cheat file for your game version on your computer, with
     its author named, every cheat off until you turn it on. No cheat file is bundled
 - Added **mods** (the **Mods** page in the sidebar)
