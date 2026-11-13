@@ -43,7 +43,7 @@
 
 namespace nxrt::services {
 
-extern const unsigned char kDefaultAvatarJpeg[];   // acc_avatar.cpp
+extern const unsigned char kDefaultAvatarJpeg[];   // the built-in picture (defined in acc_avatar.cpp)
 extern const size_t kDefaultAvatarJpegSize;
 
 namespace {
@@ -65,16 +65,22 @@ constexpr uint64_t kNoTokenBytes = 0x100;             // the id token cache with
 struct Uid {
     uint64_t hi = 0, lo = 0;
     bool null() const { return hi == 0 && lo == 0; }
-    bool operator==(const Uid& o) const { return hi == o.hi && lo == o.lo; }
+    bool operator==(const Uid& other) const { return lo == other.lo && hi == other.hi; }
 };
 static_assert(sizeof(Uid) == 16, "nn::account::Uid");
 
 Uid local_uid() {
-    const TitleProfile& p = profile();
-    return Uid{p.user_uid_hi, p.user_uid_lo};
+    const TitleProfile& prof = profile();
+    Uid me;
+    me.hi = prof.user_uid_hi;
+    me.lo = prof.user_uid_lo;
+    return me;
 }
 Uid uid_arg(const ipc::Request& req) { return Uid{req.arg<uint64_t>(0), req.arg<uint64_t>(8)}; }
-bool user_exists(const Uid& u) { return !u.null() && u == local_uid(); }
+bool user_exists(const Uid& u) {
+    if (u.null()) return false;   // the null uid is never a user
+    return u == local_uid();
+}
 std::string uid_text(const Uid& u) {
     char b[40];
     std::snprintf(b, sizeof b, "%016llx_%016llx", static_cast<unsigned long long>(u.hi), static_cast<unsigned long long>(u.lo));
@@ -167,7 +173,7 @@ uint64_t configured_account_id() {
             ok = false;
             break;
         }
-        v = v << 4 | static_cast<uint64_t>(d);
+        v = v * 16 + static_cast<uint64_t>(d);   // one hex digit more: 16 of them fill the 64 bits
     }
     if (!ok || v == 0) {
         NXLOG_W("acc", "[account] network_account_id \"%s\" is not 16 hex digits of a non-zero id: ignored", raw.c_str());
@@ -181,10 +187,11 @@ std::string machine_guid() {
 #if defined(_WIN32)
     char buf[128] = {};
     DWORD n = sizeof buf;
-    if (RegGetValueA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Cryptography", "MachineGuid", RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, nullptr,
-                     buf, &n) == ERROR_SUCCESS) {
-        buf[sizeof buf - 1] = 0;
-        return std::string(buf, strnlen(buf, sizeof buf));
+    const DWORD want = RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY;   // a string, from the 64-bit view
+    const LSTATUS rc = RegGetValueA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Cryptography", "MachineGuid", want, nullptr, buf, &n);
+    if (rc == ERROR_SUCCESS) {
+        buf[sizeof buf - 1] = 0;   // terminated even when the value filled the buffer
+        return std::string(buf);
     }
 #endif
     return {};
@@ -233,24 +240,28 @@ uint64_t network_account_id(const Uid& u) {
     return id;
 }
 
+// The first line of [net] account_token_file (its first kTokenFileRead bytes), "" when it is unset or cannot be read.
+std::string token_file_line() {
+    const std::string token_path = config_get_str("net", "account_token_file", "");
+    if (token_path.empty()) return {};
+    FILE* fp = std::fopen(token_path.c_str(), "rb");
+    if (fp == nullptr) {
+        if (first_time("token_file")) NXLOG_W("acc", "[net] account_token_file %s cannot be read: no id token", token_path.c_str());
+        return {};
+    }
+    std::vector<char> chunk(kTokenFileRead);
+    const size_t got = std::fread(chunk.data(), 1, chunk.size(), fp);
+    std::fclose(fp);
+    std::string line(chunk.data(), got);
+    const size_t eol = line.find_first_of("\r\n");
+    if (eol != std::string::npos) line.resize(eol);
+    return line;
+}
+
 // The id token: [net] account_token, else the first line of [net] account_token_file; blanks at either end dropped, at most 0xC00 bytes.
 std::string account_token() {
-    std::string t = config_get_str("net", "account_token", "");
-    if (t.empty()) {
-        const std::string file = config_get_str("net", "account_token_file", "");
-        if (!file.empty()) {
-            if (FILE* f = std::fopen(file.c_str(), "rb")) {
-                std::vector<char> b(kTokenFileRead);
-                const size_t n = std::fread(b.data(), 1, b.size(), f);
-                std::fclose(f);
-                t.assign(b.data(), n);
-                const size_t eol = t.find_first_of("\r\n");
-                if (eol != std::string::npos) t.resize(eol);
-            } else if (first_time("token_file")) {
-                NXLOG_W("acc", "[net] account_token_file %s cannot be read: no id token", file.c_str());
-            }
-        }
-    }
+    std::string t = config_get_str("net", "account_token", "");   // [net] account_token wins over the file
+    if (t.empty()) t = token_file_line();
     t = trim_blanks(t);
     if (t.size() > kTokenMax) {
         if (first_time("token_long")) NXLOG_W("acc", "the account token has %zu bytes: only the first %zu are used", t.size(), kTokenMax);
@@ -305,7 +316,8 @@ std::shared_ptr<ipc::Service> make_manager(Uid u) {
         s.add_cmd(3, "LoadIdTokenCacheDeprecated", [u](ipc::Request& req, ipc::Response& rsp) -> uint32_t { return load_id_token(req, rsp, u, 3); });
         s.add_cmd(4, "LoadIdTokenCache", [u](ipc::Request& req, ipc::Response& rsp) -> uint32_t { return load_id_token(req, rsp, u, 4); });
         s.add_cmd(170, "LoadNetworkServiceLicenseKindAsync", [u](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-            const bool licensed = !account_token().empty() && redirect::active();
+            const bool has_token = !account_token().empty();
+            const bool licensed = has_token && redirect::active();   // the redirect is asked only with a token
             if (first_time("mgr170"))
                 NXLOG_I("acc", "IManagerForApplication cmd 170 LoadNetworkServiceLicenseKindAsync for %s (first use): %s", uid_text(u).c_str(),
                         licensed ? "licensed (account token and [net] redirect)" : "no licence");
@@ -319,22 +331,23 @@ std::shared_ptr<ipc::Service> make_manager(Uid u) {
 // The picture: [account] avatar when it is a JPEG (first 1 MiB), else the stand-in. Chosen once per process.
 const std::vector<uint8_t>& avatar() {
     static const std::vector<uint8_t> img = [] {
-        const std::string path = config_get_str("account", "avatar", "");
-        if (!path.empty()) {
+        const std::string picture_path = config_get_str("account", "avatar", "");
+        if (!picture_path.empty()) {
             std::vector<uint8_t> v(kAvatarMax);
             size_t n = 0;
-            if (FILE* f = std::fopen(path.c_str(), "rb")) {
-                n = std::fread(v.data(), 1, v.size(), f);
-                std::fclose(f);
+            if (FILE* fp = std::fopen(picture_path.c_str(), "rb")) {
+                n = std::fread(v.data(), 1, v.size(), fp);
+                std::fclose(fp);
             }
             if (n > 4 && v[0] == 0xFF && v[1] == 0xD8) {
                 v.resize(n);
-                NXLOG_I("acc", "profile picture: %s (%zu bytes)", path.c_str(), n);
+                NXLOG_I("acc", "profile picture: %s (%zu bytes)", picture_path.c_str(), n);
                 return v;
             }
-            NXLOG_W("acc", "[account] avatar %s is not a readable JPEG: the built-in picture is used", path.c_str());
+            NXLOG_W("acc", "[account] avatar %s is not a readable JPEG: the built-in picture is used", picture_path.c_str());
         }
-        return std::vector<uint8_t>(kDefaultAvatarJpeg, kDefaultAvatarJpeg + kDefaultAvatarJpegSize);
+        const unsigned char* const builtin = kDefaultAvatarJpeg;
+        return std::vector<uint8_t>(builtin, builtin + kDefaultAvatarJpegSize);
     }();
     return img;
 }
@@ -345,8 +358,8 @@ std::array<uint8_t, 0x38> profile_base(const Uid& u) {
     std::memcpy(b.data(), &u, 16);
     const uint64_t t = kProfileCreated;
     std::memcpy(b.data() + 0x10, &t, 8);
-    const std::string& nick = profile().user_nickname;
-    std::memcpy(b.data() + 0x18, nick.data(), std::min<size_t>(nick.size(), 0x20));
+    const std::string& user_name = profile().user_nickname;
+    std::memcpy(b.data() + 0x18, user_name.data(), std::min<size_t>(user_name.size(), 0x20));
     return b;
 }
 
@@ -476,9 +489,9 @@ std::shared_ptr<ipc::Service> make_system_service() {
 
 namespace accapi {
 void user_uid(uint64_t* hi, uint64_t* lo) {
-    const TitleProfile& p = profile();
-    if (hi) *hi = p.user_uid_hi;
-    if (lo) *lo = p.user_uid_lo;
+    const Uid me = local_uid();
+    if (hi != nullptr) *hi = me.hi;
+    if (lo != nullptr) *lo = me.lo;
 }
 }  // namespace accapi
 

@@ -83,7 +83,7 @@ std::mutex g_requirement_mu;
 std::set<uint32_t> g_presets_seen;
 std::set<std::string> g_requirements_seen;
 
-bool online_test() { return config_get_bool("net", "online_test", false); }
+bool online_test() { const bool on = config_get_bool("net", "online_test", /*def=*/false); return on; }
 
 // Printable text of a guest string: up to `max` bytes, ending at a 0 byte; "?" when a byte is not printable ASCII.
 std::string printable(const uint8_t* p, size_t avail, size_t max) {

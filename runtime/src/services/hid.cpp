@@ -78,10 +78,11 @@ void wr32(uint8_t* p, uint32_t v) { std::memcpy(p, &v, 4); }
 
 // NpadIdType -> shared memory entry index (-1: not an npad id); entry index -> the input slot of input_source.h.
 int entry_of_id(uint32_t id) {
-    if (id < 8) return static_cast<int>(id);
-    if (id == 0x20) return 8;
-    if (id == 0x10) return 9;
-    return -1;
+    switch (id) {
+        case 0x20: return 8;   // Handheld
+        case 0x10: return 9;   // Other
+        default: return id < 8 ? static_cast<int>(id) : -1;   // No1..No8 are entries 0..7
+    }
 }
 uint32_t slot_of_entry(int e) {
     if (e == 8) return nxrt::hid::kNpadSlotHandheld;
@@ -185,6 +186,12 @@ std::atomic<bool> g_jc2_listed{false};
 std::atomic<bool> g_jc2_active{false};
 std::atomic<uint64_t> g_jc2_space{0};            // w << 32 | h, 0: the pointer range
 
+// The Joy-Con 2 mouse is not listed any more (so not on its surface either).
+void jc2_unlist() {
+    g_jc2_listed = false;
+    g_jc2_active = false;
+}
+
 bool feed_live() {
     Feed& f = feed();
     std::lock_guard<std::mutex> lk(f.mu);
@@ -205,7 +212,10 @@ struct HidState {
     uint32_t supported_styles = 0x1F;
     uint32_t supported_index_mask = 0x1FF;
     bool npad_active = false;
-    bool debug_pad_active = false, touch_active = false, mouse_active = false, keyboard_active = false;
+    bool debug_pad_active = false;
+    bool touch_active = false;
+    bool mouse_active = false;
+    bool keyboard_active = false;
     bool sixaxis_fusion = false;
     hidgesture::Recognizer gesture;
     int32_t basic_gesture_id = -1;
@@ -418,7 +428,10 @@ uint32_t device_type_of(uint32_t tag) {
 }
 uint64_t system_properties_of(uint32_t tag) {
     constexpr uint64_t kPowered = 0x38;                                      // JoyDual, JoyLeft and JoyRight powered (bits 3-5)
-    constexpr uint64_t kAbxy = 1ull << 11, kSlSr = 1ull << 12, kPlus = 1ull << 13, kMinus = 1ull << 14;
+    constexpr uint64_t kAbxy = 1ull << 11;
+    constexpr uint64_t kSlSr = 1ull << 12;
+    constexpr uint64_t kPlus = 1ull << 13;
+    constexpr uint64_t kMinus = 1ull << 14;
     switch (tag) {
         case hs::kTagJoyLeft: return kPowered | kSlSr | kMinus;
         case hs::kTagJoyRight: return kPowered | kSlSr | kPlus;
@@ -449,19 +462,19 @@ void write_style(uint8_t* base, uint32_t tag, const NpadInput& in) {
 void sample_npad(HidState& s, uint8_t* m, int e, const NpadInput& in, bool docked) {
     uint8_t* base = entry_base(m, e);
     const uint32_t wanted = tag_of(in.style);
-    const bool on = in.connected && wanted != 0 && (s.supported_styles & wanted) != 0 && ((s.supported_index_mask >> e) & 1u) != 0 &&
-                    !(e == 8 && docked);
-    const uint32_t tag = on ? wanted : 0;
+    const bool shown = in.connected && wanted != 0 && (s.supported_styles & wanted) != 0 && ((s.supported_index_mask >> e) & 1u) != 0 &&
+                       !(e == 8 && docked);   // docked: no handheld entry
+    const uint32_t tag = shown ? wanted : 0;
     if (tag != s.last_tag[e]) {
         write_style(base, tag, in);
         s.last_tag[e] = tag;
         s.style_event[e].signal();
     }
-    s.connected[e] = on;
+    s.connected[e] = shown;
 
     hs::NpadCommonState common{};
     hs::SixAxisState six{};
-    if (on) {
+    if (shown) {
         common.buttons = with_stick_bits(in.buttons, in.left, in.right);
         common.lx = in.left.x;
         common.ly = in.left.y;
@@ -483,7 +496,7 @@ void sample_npad(HidState& s, uint8_t* m, int e, const NpadInput& in, bool docke
                    {hs::kJoyLeftLifo, hs::kTagJoyLeft}, {hs::kJoyRightLifo, hs::kTagJoyRight}, {hs::kPalmaLifo, 0},
                    {hs::kSystemExtLifo, 0}};
     for (const auto& c : commons) {
-        const bool mine = on && (c.tag == tag || c.off == hs::kSystemExtLifo);
+        const bool mine = shown && (c.tag == tag || c.off == hs::kSystemExtLifo);
         ring_push(base + c.off, mine ? common : idle);
     }
     const hs::SixAxisState still{};
@@ -493,7 +506,7 @@ void sample_npad(HidState& s, uint8_t* m, int e, const NpadInput& in, bool docke
     } sixes[] = {{hs::kFullKeySixAxisLifo, hs::kTagFullKey},   {hs::kHandheldSixAxisLifo, hs::kTagHandheld},
                  {hs::kJoyDualLeftSixAxisLifo, hs::kTagJoyDual}, {hs::kJoyDualRightSixAxisLifo, hs::kTagJoyDual},
                  {hs::kJoyLeftSixAxisLifo, hs::kTagJoyLeft},   {hs::kJoyRightSixAxisLifo, hs::kTagJoyRight}};
-    for (const auto& c : sixes) ring_push(base + c.off, (on && c.tag == tag) ? six : still);
+    for (const auto& c : sixes) ring_push(base + c.off, (shown && c.tag == tag) ? six : still);
 }
 
 // ======================================================================================================================================
@@ -551,7 +564,7 @@ void sample_devices(HidState& s, uint8_t* m, const InputSnapshot& snap) {
 nxrt::hid::Jc2MouseMode mode_now() { return nxrt::hid::jc2_mouse_mode(); }
 
 void sample_nmouse(HidState& s) {
-    if (!s.nm_addr || !g_jc2_listed.load()) return;
+    if (s.nm_addr == 0 || !g_jc2_listed.load()) return;   // no mouse memory, or no mouse listed in it
     const bool active = nxrt::hid::jc2_mouse_active();
     nxrt::hid::HostMouse fm;
     float wx = 0, wy = 0;
@@ -561,7 +574,10 @@ void sample_nmouse(HidState& s) {
         fm = f.m;
         wx = f.wheel_x;
         wy = f.wheel_y;
-        if (active) f.wheel_x = f.wheel_y = 0;
+        if (active) {   // the game takes the wheel movement: it counts from 0 again
+            f.wheel_x = 0;
+            f.wheel_y = 0;
+        }
     }
     NmouseState ns{};
     if (active) {
@@ -577,12 +593,12 @@ void sample_nmouse(HidState& s) {
         ns.wheel_y = static_cast<int32_t>(std::lround(wy * 120.0f));
         ns.buttons = fm.buttons;
         ns.attributes = 2;
-    } else {
-        ns.x = std::max(0, s.nm_x);
-        ns.y = std::max(0, s.nm_y);
+    } else {   // lifted: where it was last (0, 0 before the first position)
+        ns.x = s.nm_x < 0 ? 0 : s.nm_x;
+        ns.y = s.nm_y < 0 ? 0 : s.nm_y;
     }
-    ns.range_w = s.nm_w;
-    ns.range_h = s.nm_h;
+    ns.range_w = s.nm_w;   // the pointer range the game set: width ...
+    ns.range_h = s.nm_h;   // ... and height
     uint8_t* b = host_ptr(s.nm_addr);
     ring_push(b + kNmRings + 0 * kNmRingStride, ns);
     ring_push(b + kNmRings + 1 * kNmRingStride, ns);
@@ -593,7 +609,7 @@ void sample_nmouse(HidState& s) {
 }
 
 void sample_jcms(HidState& s) {
-    if (!s.jcms_addr) return;
+    if (s.jcms_addr == 0) return;   // InitializeJcms gave no memory
     nxrt::sw2::Manager* mgr = nxrt::sw2::manager();
     if (mgr) mgr->set_mouse_wanted(true);
     uint8_t* b = host_ptr(s.jcms_addr);
@@ -620,17 +636,17 @@ uint64_t lent_block(const ipc::Request& req, uint64_t asked, uint64_t need, cons
     *size = 0;
     const uint32_t h = req.in_copy.empty() ? 0 : req.in_copy[0];
     const std::shared_ptr<kernel::KTransferMemory> tm = h ? kernel::handle_as<kernel::KTransferMemory>(h) : nullptr;
-    if (!tm || !tm->addr) {
+    if (tm == nullptr || tm->addr == 0) {
         NXLOG_W(kTag, "%s: no transfer memory came with the request", what);
         return 0;
     }
-    const uint64_t n = std::min(asked, tm->size);
-    if (n < need || !mem::is_mapped(tm->addr, need)) {
+    const uint64_t lent = std::min(asked, tm->size);
+    if (lent < need || !mem::is_mapped(tm->addr, need)) {
         NXLOG_W(kTag, "%s: the transfer memory at 0x%llx (%llu bytes) cannot hold the 0x%llx-byte block", what,
-                static_cast<unsigned long long>(tm->addr), static_cast<unsigned long long>(n), static_cast<unsigned long long>(need));
+                static_cast<unsigned long long>(tm->addr), static_cast<unsigned long long>(lent), static_cast<unsigned long long>(need));
         return 0;
     }
-    *size = n;
+    *size = lent;
     return tm->addr;
 }
 
@@ -651,13 +667,13 @@ void nmouse_setup(HidState& s, uint64_t addr) {
         info[0x4] = 1;
         wr32(info + 0x8, 0);   // player 1
         info[0xC] = devices[k].npad_valid;
-        info[0x10] = 1;        // pointer enabled
+        info[0x10] = 1;        // the pointer is on
         uint8_t* slot = b + kNmTable + k * kNmTableStride;
         wr64(slot, devices[k].handle);
         std::atomic_thread_fence(std::memory_order_release);
         slot[0x8] = 1;
     }
-    g_jc2_listed.store(true);
+    g_jc2_listed = true;   // sample_nmouse writes the mouse from now on
     NXLOG_I(kTag, "Joy-Con 2 mouse: a merged mouse and a Joy-Con 2 (R) mouse of player 1 listed (mode %s)",
             nxrt::hid::jc2_mouse_mode_name(mode_now()));
 }
@@ -728,15 +744,22 @@ void sampler_start() {
 void sampler_stop() {
     HidState& s = st();
     std::lock_guard<std::mutex> lk(s.thread_mu);
-    s.stop.store(true);
-    if (s.sampler.joinable()) s.sampler.join();
-    s.stop.store(false);
+    s.stop = true;   // sampler_loop returns at its next check
+    if (s.sampler.joinable()) s.sampler.join();   // (a sampler that never started is not waited for)
+    s.stop = false;
 }
 
 // ======================================================================================================================================
 // The interfaces
 // ======================================================================================================================================
-class AppletResource : public ipc::Service {
+// `handle` as the reply's copy handle; 0 (no handle could be made) fails with kOutOfHandles.
+uint32_t reply_copy_handle(ipc::Response& rsp, uint32_t handle) {
+    if (handle == 0) return kernel::kOutOfHandles;
+    rsp.out_copy.push_back(handle);
+    return 0;
+}
+
+class AppletResource final : public ipc::Service {
 public:
     AppletResource() : ipc::Service("nn::hid::IAppletResource") {
         st().resources.fetch_add(1);
@@ -745,10 +768,7 @@ public:
             HidState& s = st();
             std::lock_guard<std::mutex> lk(s.mu);
             if (!shm_get(s)) return kernel::kOutOfMemory;
-            const uint32_t h = s.shm->new_handle();
-            if (!h) return kernel::kOutOfHandles;
-            rsp.out_copy.push_back(h);
-            return 0;
+            return reply_copy_handle(rsp, s.shm->new_handle());
         });
     }
     ~AppletResource() override {
@@ -776,7 +796,7 @@ void ignore(ipc::Service& s, uint32_t id, const char* name, size_t zeros = 0) {
 void zero_handle(ipc::Service& s, uint32_t id, const char* name) {
     s.add_cmd(id, name, [name](ipc::Request&, ipc::Response& rsp) -> uint32_t {
         NXLOG_D(kTag, "%s: no object, handle 0", name);
-        rsp.out_copy.push_back(0);
+        rsp.out_copy.push_back(uint32_t{0});   // the null handle
         return 0;
     });
 }
@@ -907,8 +927,8 @@ void add_npad(ipc::Service& s) {
         uint32_t ids[kEntries] = {};
         buf_read(b, ids, n * 4ull);
         uint32_t mask = 0;
-        for (uint32_t i = 0; i < n; ++i) {
-            const int e = entry_of_id(ids[i]);
+        for (uint32_t k = 0; k < n; ++k) {   // ids that are no npad id add nothing
+            const int e = entry_of_id(ids[k]);
             if (e >= 0) mask |= 1u << e;
         }
         uint32_t was = 0;
@@ -938,9 +958,7 @@ void add_npad(ipc::Service& s) {
             h = hs_.style_event[e].new_handle();
             if (h) hs_.style_event[e].signal();
         });
-        if (!h) return kernel::kOutOfHandles;
-        rsp.out_copy.push_back(h);
-        return 0;
+        return reply_copy_handle(rsp, h);
     });
     s.add_cmd(107, "DisconnectNpad", [](ipc::Request& req, ipc::Response&) -> uint32_t {
         NXLOG_I(kTag, "DisconnectNpad(0x%x): the controller stays connected", req.arg<uint32_t>(0));
@@ -1182,8 +1200,7 @@ void add_mouse(ipc::Service& s) {
     s.add_cmd(3131, "FinalizeNmouse", [](ipc::Request&, ipc::Response&) -> uint32_t {
         with_state([](HidState& h) {
             h.nm_addr = h.nm_size = 0;
-            g_jc2_listed.store(false);
-            g_jc2_active.store(false);
+            jc2_unlist();
         });
         NXLOG_I(kTag, "FinalizeNmouse");
         return 0;
@@ -1310,17 +1327,19 @@ void hid_supported_sets(uint32_t* styles, uint32_t* index_mask) {
 
 void hid_signal_style_event(uint32_t index) {
     if (index >= kEntries) return;
-    HidState& s = st();
-    std::lock_guard<std::mutex> lk(s.mu);
-    s.style_event[index].signal();
+    HidState& hs = st();
+    std::lock_guard<std::mutex> lk(hs.mu);
+    hs.style_event[index].signal();
 }
 
 bool hid_sampler_live() {
-    const HidState& s = st();
-    return s.background.load() && s.resources.load() > 0;
+    const HidState& hs = st();
+    return hs.background.load() && hs.resources.load() > 0;   // sampling on, and an applet resource open
 }
 
-void hid_mode_changed() { hid_sample_once(); }
+void hid_mode_changed() {
+    hid_sample_once();   // the style events of the npads the new mode moved are signalled now
+}
 
 void register_hid() {
     add("hid", [] { return make_hid_server(); });
@@ -1332,9 +1351,8 @@ void hid_reset() {
     HidState& s = st();
     std::lock_guard<std::mutex> lk(s.mu);
     s.clear_locked();
-    g_jc2_listed.store(false);
-    g_jc2_active.store(false);
-    s.background.store(true);
+    jc2_unlist();
+    s.background = true;   // background sampling on again (the tests turn it off)
     if (uint8_t* m = shm_usable(s)) shm_init(m);
     else s.shm.reset();
 }
@@ -1355,15 +1373,16 @@ uint32_t supported_player_mask() {
 }
 
 Jc2MouseMode jc2_mouse_mode() {
-    int m = svc::g_jc2_mode.load();
-    if (m < 0) {
-        std::string v = config_get_str("input", "jc2_mouse", "auto");
-        for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        m = static_cast<int>(v == "off" ? Jc2MouseMode::Off : v == "on" ? Jc2MouseMode::On : Jc2MouseMode::Auto);
-        if (v != "off" && v != "on" && v != "auto") NXLOG_W("hid", "[input] jc2_mouse = %s: not auto, on or off; auto is used", v.c_str());
-        svc::g_jc2_mode.store(m);
+    int mode = svc::g_jc2_mode.load();
+    if (mode < 0) {   // the first call reads [input] jc2_mouse (any case)
+        std::string word = config_get_str("input", "jc2_mouse", "auto");
+        std::transform(word.begin(), word.end(), word.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        mode = static_cast<int>(word == "off" ? Jc2MouseMode::Off : word == "on" ? Jc2MouseMode::On : Jc2MouseMode::Auto);
+        if (word != "off" && word != "on" && word != "auto")
+            NXLOG_W("hid", "[input] jc2_mouse = %s: not auto, on or off; auto is used", word.c_str());
+        svc::g_jc2_mode.store(mode);
     }
-    return static_cast<Jc2MouseMode>(m);
+    return static_cast<Jc2MouseMode>(mode);
 }
 
 void jc2_mouse_set_mode(Jc2MouseMode m) { svc::g_jc2_mode.store(static_cast<int>(m)); }
@@ -1374,12 +1393,12 @@ const char* jc2_mouse_mode_name(Jc2MouseMode m) {
     return "auto";
 }
 
-void jc2_mouse_feed(const HostMouse& m) {
+void jc2_mouse_feed(const HostMouse& mouse) {
     svc::Feed& f = svc::feed();
     std::lock_guard<std::mutex> lk(f.mu);
-    f.m = m;
-    f.wheel_x += m.wheel_x;
-    f.wheel_y += m.wheel_y;
+    f.m = mouse;
+    f.wheel_x += mouse.wheel_x;   // the wheel adds up until a sample takes it
+    f.wheel_y += mouse.wheel_y;
     f.last_ns = svc::steady_ns();
 }
 

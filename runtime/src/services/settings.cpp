@@ -140,8 +140,8 @@ uint32_t write_nickname(const ipc::Request& req) {
     const uint64_t m = std::min<uint64_t>(b.size, kNicknameBytes);
     if (m == 0) return 0;
     std::vector<uint8_t> out(m, 0);
-    const std::string& nick = profile().device_nickname;
-    std::memcpy(out.data(), nick.data(), std::min<uint64_t>(nick.size(), m - 1));
+    const std::string& device_name = profile().device_nickname;
+    std::memcpy(out.data(), device_name.data(), std::min<uint64_t>(device_name.size(), m - 1));
     buf_write(b, out.data(), m);
     return 0;
 }
@@ -207,8 +207,8 @@ std::shared_ptr<ipc::Service> make_set() {
             return 0;
         });
         s.add_cmd(4, "GetRegionCode", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-            const int r = profile().region;
-            rsp.push<int32_t>(r >= 0 && r <= 5 ? r : 1);   // out of range: Usa
+            const int region_code = profile().region;
+            rsp.push<int32_t>(region_code >= 0 && region_code <= 5 ? region_code : 1);   // out of range: Usa
             return 0;
         });
         s.add_cmd(5, "GetAvailableLanguageCodes2", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {

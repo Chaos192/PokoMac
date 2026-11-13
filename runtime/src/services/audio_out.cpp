@@ -18,10 +18,12 @@
 #include <condition_variable>
 #include <cstring>
 #include <deque>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "audio_device.h"
@@ -38,7 +40,7 @@ namespace nxrt::services {
 
 namespace {
 
-using Clock = std::chrono::steady_clock;
+using MonoClock = std::chrono::steady_clock;   // release pacing and the host position estimate
 
 const uint32_t kNotFound = res(153, 1);
 const uint32_t kOperationFailed = res(153, 2);
@@ -69,7 +71,8 @@ int16_t sat16(float v) {   // saturate, then truncate toward zero
 struct HostSink {
     std::mutex mu;
     std::shared_ptr<audio::AudioSink> sink;
-    uint32_t rate = 0, channels = 0;
+    uint32_t rate = 0;
+    uint32_t channels = 0;
     bool ok = false;
     uint64_t opens = 0, written = 0, generation = 0;
 };
@@ -78,17 +81,17 @@ HostSink& host() {
     return h;
 }
 // Opens the sink for (rate, channels) unless it is already open so (caller holds host().mu).
-void open_if_needed(HostSink& h, uint32_t rate, uint32_t channels) {
+void open_if_needed(HostSink& hs, uint32_t rate, uint32_t channels) {
     std::shared_ptr<audio::AudioSink> s = audio::sink();
-    if (s && s == h.sink && rate == h.rate && channels == h.channels && s->opens() == h.opens) return;
-    h.sink = s;
-    h.rate = rate;
-    h.channels = channels;
-    h.ok = s && s->open_counted(rate, channels);
-    h.opens = s ? s->opens() : 0;
-    h.written = 0;
-    ++h.generation;
-    if (h.ok) NXLOG_I("audout", "host sink %s opened: %u Hz, %u channels", s->name(), rate, channels);
+    if (s && s == hs.sink && rate == hs.rate && channels == hs.channels && s->opens() == hs.opens) return;
+    hs.sink = s;
+    hs.rate = rate;
+    hs.channels = channels;
+    hs.ok = s && s->open_counted(rate, channels);
+    hs.opens = s ? s->opens() : 0;
+    hs.written = 0;
+    ++hs.generation;
+    if (hs.ok) NXLOG_I("audout", "host sink %s opened: %u Hz, %u channels", s->name(), rate, channels);
     else NXLOG_W("audout", "host sink refused %u Hz, %u channels: playing without sound", rate, channels);
 }
 struct DeviceMark {
@@ -100,7 +103,8 @@ DeviceMark host_write(const int16_t* pcm, uint32_t frames, uint32_t rate, uint32
     std::lock_guard<std::mutex> lk(h.mu);
     open_if_needed(h, rate, channels);
     if (!h.ok) return {};
-    h.written += h.sink->write(pcm, frames);
+    const uint64_t accepted = h.sink->write(pcm, frames);   // what the sink took of the frames
+    h.written += accepted;
     return DeviceMark{h.sink->has_device_clock(), h.generation, h.written};
 }
 // The frames the device has played of the current opening, when `generation` is still that opening and the sink has a device clock.
@@ -110,8 +114,8 @@ bool device_position(uint64_t generation, uint64_t* pos) {
     if (!h.ok || !h.sink || h.sink != audio::sink() || h.generation != generation || h.sink->opens() != h.opens ||
         !h.sink->has_device_clock())
         return false;
-    const uint64_t q = h.sink->queued_frames();
-    *pos = h.written > q ? h.written - q : 0;
+    const uint64_t pending = h.sink->queued_frames();   // written, not played yet
+    *pos = pending < h.written ? h.written - pending : 0;
     return true;
 }
 
@@ -167,10 +171,7 @@ public:
         release_all();
     }
     bool flush() {
-        {
-            std::lock_guard<std::mutex> l(mu_);
-            if (!started_) return false;
-        }
+        if (!started()) return false;   // a stopped stream has nothing to flush
         release_all();
         return true;
     }
@@ -191,10 +192,9 @@ public:
         std::vector<uint8_t> out(bytes, 0);
         uint32_t n = 0;
         std::lock_guard<std::mutex> l(mu_);
-        while (n < bytes / 8 && !released_.empty()) {
+        for (; n < bytes / 8 && !released_.empty(); ++n) {
             std::memcpy(out.data() + 8 * n, &released_.front(), 8);
-            released_.pop_front();
-            ++n;
+            released_.erase(released_.begin());
         }
         g_released.sub(n);
         buf_write(b, out.data(), bytes);
@@ -203,13 +203,13 @@ public:
     }
     bool contains(uint64_t tag) {
         std::lock_guard<std::mutex> l(mu_);
-        for (const Entry& e : queue_)
-            if (e.tag == tag) return true;
-        return std::find(released_.begin(), released_.end(), tag) != released_.end();
+        const bool in_queue = std::any_of(queue_.begin(), queue_.end(), [tag](const Entry& e) { return e.tag == tag; });
+        return in_queue || std::find(released_.begin(), released_.end(), tag) != released_.end();
     }
     uint32_t queued() {
         std::lock_guard<std::mutex> l(mu_);
-        return static_cast<uint32_t>(queue_.size());
+        const size_t waiting = queue_.size();
+        return static_cast<uint32_t>(waiting);
     }
     uint64_t played() {
         std::lock_guard<std::mutex> l(mu_);
@@ -237,7 +237,7 @@ private:
     bool halt() {
         {
             std::lock_guard<std::mutex> l(mu_);
-            if (!started_) return false;
+            if (!started_) return false;   // not running: nothing to join
             stop_ = true;
             cv_.notify_all();
         }
@@ -259,7 +259,7 @@ private:
     void release_all() {
         std::lock_guard<std::mutex> l(mu_);
         const size_t n = queue_.size();
-        for (const Entry& e : queue_) released_.push_back(e.tag);
+        std::transform(queue_.begin(), queue_.end(), std::back_inserter(released_), [](const Entry& e) { return e.tag; });
         queue_.clear();
         g_queued.sub(static_cast<int64_t>(n));
         g_released.add(static_cast<int64_t>(n));
@@ -272,7 +272,7 @@ private:
     }
     void release_front() {   // caller holds mu_
         const Entry e = queue_.front();
-        queue_.pop_front();
+        queue_.erase(queue_.begin());
         released_.push_back(e.tag);
         played_ += e.frames;
         g_queued.sub(1);
@@ -311,8 +311,8 @@ private:
         }
         std::vector<int16_t> out;
         if (rate_ == audio::mixbus::kRate) {
-            out.resize(st.size());
-            for (size_t i = 0; i < st.size(); ++i) out[i] = sat16(st[i]);
+            out.reserve(st.size());
+            for (const float x : st) out.push_back(sat16(x));
             return out;
         }
         if (frames == 0) return out;
@@ -325,8 +325,8 @@ private:
         double p = phase_;
         for (; p < static_cast<double>(frames); p += step) {
             const uint64_t i = static_cast<uint64_t>(std::floor(p));
-            const float t = static_cast<float>(p - static_cast<double>(i));
-            for (int ch = 0; ch < 2; ++ch) out.push_back(sat16(c(i, ch) * (1.0f - t) + c(i + 1, ch) * t));
+            const float frac = static_cast<float>(p - static_cast<double>(i));   // the position between frame i and i + 1
+            for (int ch = 0; ch < 2; ++ch) out.push_back(sat16(c(i, ch) * (1.0f - frac) + c(i + 1, ch) * frac));
         }
         phase_ = p - static_cast<double>(frames);
         last_[0] = st[2 * (frames - 1)];
@@ -345,8 +345,7 @@ private:
             if (e.frames > 0) {
                 if (out_) {
                     const std::vector<int16_t> pcm = samples(e);
-                    if (!logged_first_) {
-                        logged_first_ = true;
+                    if (!std::exchange(logged_first_, true)) {
                         NXLOG_I(tag(), "first buffer: %llu frames (%.1f ms), release margin %d ms", static_cast<unsigned long long>(e.frames),
                                 1000.0 * static_cast<double>(e.frames) / rate_, latency_ms());
                     }
@@ -366,7 +365,7 @@ private:
             }
             if (restart_host_) {
                 host_pos_ = static_cast<double>(submitted_);
-                host_time_ = Clock::now();
+                host_time_ = MonoClock::now();
                 restart_host_ = false;
             }
             e.submitted = true;
@@ -382,7 +381,7 @@ private:
             if (device_position(e.mark.generation, &pos)) {
                 const uint64_t margin = static_cast<uint64_t>(rate_) * static_cast<uint64_t>(latency_ms()) / 1000;
                 if (pos + margin >= e.mark.end) return true;
-                const auto now = Clock::now();
+                const auto now = MonoClock::now();
                 if (pos != dev_last_pos_) {
                     dev_last_pos_ = pos;
                     dev_last_move_ = now;
@@ -396,10 +395,10 @@ private:
         audren::BoostAudioThread();
         audren::TimerResolutionScope::Acquire();
         std::unique_lock<std::mutex> l(mu_);
-        dev_last_move_ = Clock::now();
+        dev_last_move_ = MonoClock::now();
         while (!stop_) {
             const bool room = submit_pending();
-            const auto now = Clock::now();
+            const auto now = MonoClock::now();
             host_pos_ = std::min(host_pos_ + std::chrono::duration<double>(now - host_time_).count() * rate_, static_cast<double>(submitted_));
             host_time_ = now;
             while (!queue_.empty() && queue_.front().submitted && due(queue_.front())) release_front();
@@ -422,9 +421,9 @@ private:
     bool started_ = false, stop_ = false, restart_host_ = true, logged_first_ = false;
     uint64_t played_ = 0, submitted_ = 0;
     double host_pos_ = 0.0;
-    Clock::time_point host_time_ = Clock::now();
+    MonoClock::time_point host_time_ = MonoClock::now();
     uint64_t dev_last_pos_ = 0;
-    Clock::time_point dev_last_move_ = Clock::now();
+    MonoClock::time_point dev_last_move_ = MonoClock::now();
     float volume_ = 1.0f;
     uint32_t voice_ = 0;
     double phase_ = 0.0;
@@ -461,7 +460,7 @@ bool read_descriptor(const ipc::Buffer& b, uint32_t channels, Entry* e) {
     return true;
 }
 
-class StreamService : public ipc::Service {
+class StreamService final : public ipc::Service {
 public:
     StreamService(std::shared_ptr<Stream> s) : ipc::Service(s->out() ? "IAudioOut" : "IAudioIn"), st_(std::move(s)) {
         const bool out = st_->out();
@@ -539,7 +538,9 @@ public:
         }
     }
     ~StreamService() override { st_->shutdown(); }
-    void on_close() override { st_->shutdown(); }
+    void on_close() override {   // the session ended: the stream stops and gives its buffers back
+        st_->shutdown();
+    }
 
 private:
     std::shared_ptr<Stream> st_;
@@ -628,9 +629,11 @@ void audio_out_reset() {
     {
         Registry& r = registry();
         std::lock_guard<std::mutex> lk(r.mu);
-        for (const auto& w : r.streams)
-            if (auto s = w.lock()) live.push_back(std::move(s));
-        r.streams.clear();
+        const std::vector<std::weak_ptr<Stream>> refs = std::exchange(r.streams, {});   // the registry ends up empty
+        for (const std::weak_ptr<Stream>& ref : refs) {
+            std::shared_ptr<Stream> alive = ref.lock();
+            if (alive) live.push_back(std::move(alive));
+        }
     }
     for (const auto& s : live) s->shutdown();
     HostSink& h = host();

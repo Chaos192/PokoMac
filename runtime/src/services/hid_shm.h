@@ -50,7 +50,7 @@ struct Ring {
 };
 
 // ---- states ---------------------------------------------------------------------------------------------------------------------
-struct NpadCommonState {
+struct NpadCommonState {     // 0x28 bytes: the state each npad style's lifo holds
     uint64_t sampling;
     uint64_t buttons;          // nn::hid::NpadButton
     int32_t lx, ly, rx, ry;    // analog sticks L then R
@@ -58,18 +58,18 @@ struct NpadCommonState {
     uint32_t reserved;
 };
 
-struct SixAxisState {
-    uint64_t delta_time;       // ns since the previous sample
+struct SixAxisState {        // 0x60 bytes (the SDK's SixAxisSensorState)
+    uint64_t delta_time;       // nanoseconds from the sample before
     uint64_t sampling;
     float accel[3];
     float gyro[3];             // angular velocity
     float angle[3];
     float direction[9];        // 3x3 rotation
-    uint32_t attributes;       // bit 0 connected, bit 1 interpolated
+    uint32_t attributes;       // connected = bit 0, interpolated = bit 1
     uint32_t reserved;
 };
 
-struct TouchState {
+struct TouchState {          // 0x28 bytes: one finger
     uint64_t delta_time;
     uint32_t attributes;       // bit 0 start, bit 1 end
     uint32_t finger;
@@ -79,41 +79,41 @@ struct TouchState {
     uint32_t reserved;
 };
 
-struct TouchScreenState {
+struct TouchScreenState {    // 0x290 bytes: up to 16 fingers
     uint64_t sampling;
     int32_t count;
     int32_t reserved;
     TouchState touches[16];
 };
 
-struct MouseState {
+struct MouseState {          // 0x28 bytes
     uint64_t sampling;
     int32_t x, y;
     int32_t dx, dy;
     int32_t wheel_dx, wheel_dy;
     uint32_t buttons;
-    uint32_t attributes;       // bit 1 connected
+    uint32_t attributes;       // connected = bit 1
 };
 
-struct KeyboardState {
+struct KeyboardState {       // 0x30 bytes
     uint64_t sampling;
     uint32_t modifiers;        // nn::hid::KeyboardModifier
-    uint32_t attributes;       // nn::hid::KeyboardAttribute: bit 0 connected
+    uint32_t attributes;       // nn::hid::KeyboardAttribute (connected = bit 0)
     uint64_t keys[4];          // bit n = HID usage n
 };
 
-struct GesturePoint {
+struct GesturePoint {        // 8 bytes: x, y in touch screen pixels
     int32_t x, y;
 };
 
-struct GestureState {
+struct GestureState {        // 0x60 bytes
     uint64_t sampling;
     int64_t detection_count;
     uint32_t type;             // GestureType (hid_gesture.h)
     uint32_t direction;
     GesturePoint pos;          // the points' mid point
     GesturePoint delta;        // movement since the last state
-    float vel_x, vel_y;        // pixels per second
+    float vel_x, vel_y;        // velocity in px/s
     uint32_t attributes;
     float scale;
     float rotation_angle;
@@ -121,7 +121,7 @@ struct GestureState {
     GesturePoint points[4];
 };
 
-struct DebugPadState {
+struct DebugPadState {       // 0x20 bytes
     uint64_t sampling;
     uint32_t attributes;
     uint32_t buttons;

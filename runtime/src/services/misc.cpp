@@ -74,7 +74,8 @@ H answer(T v) {
     };
 }
 void zero_buffer(const ipc::Buffer& b) {
-    if (b.addr && b.size) std::memset(buf_mut(b), 0, static_cast<size_t>(b.size));
+    if (b.addr == 0 || b.size == 0) return;   // no buffer: nothing to clear
+    std::fill_n(buf_mut(b), static_cast<size_t>(b.size), uint8_t{0});
 }
 
 // The events no device here ever signals (misc_reset clears them).
@@ -98,7 +99,7 @@ H event_handle(ServiceEvent& e) {
     };
 }
 
-// ---- csrng ----------------------------------------------------------------------------------------------------------------------
+// ---- csrng: random bytes --------------------------------------------------------------------------------------------------------
 std::shared_ptr<ipc::Service> make_csrng() {
     return make_iface("csrng", [](ipc::Service& s) {
         s.add_cmd(0, "GenerateRandomBytes", [](ipc::Request& req, ipc::Response&) -> uint32_t {
@@ -211,15 +212,13 @@ uint32_t packet_samples(const uint8_t* pkt, uint32_t size, uint32_t rate) {
     const uint32_t toc = pkt[0], config = toc >> 3;
     static const uint32_t silk[4] = {4, 8, 16, 24}, hybrid[2] = {4, 8}, celt[4] = {1, 2, 4, 8};   // in 2.5 ms units
     const uint32_t len = config < 12 ? silk[config & 3] : config < 16 ? hybrid[config & 1] : celt[config & 3];
-    uint32_t frames;
-    switch (toc & 3) {
-        case 0: frames = 1; break;
-        case 1:
-        case 2: frames = 2; break;
-        default:
-            if (size < 2) return 0;
-            frames = pkt[1] & 0x3F;
-            break;
+    const uint32_t count_code = toc & 3;   // 0: one frame, 1 and 2: two frames, 3: the count is in the next byte
+    uint32_t frames = 2;
+    if (count_code == 0) {
+        frames = 1;
+    } else if (count_code == 3) {
+        if (size < 2) return 0;
+        frames = pkt[1] & 0x3F;
     }
     return frames * len * rate / 400;
 }
@@ -234,7 +233,7 @@ std::shared_ptr<ipc::Service> make_silent_decoder(uint32_t rate, uint32_t channe
                 if (in.addr && in.size >= 8) {
                     const uint8_t* p = buf_ptr(in);
                     const uint32_t size = be32(p);
-                    if (size <= in.size - 8) {
+                    if (static_cast<uint64_t>(size) + 8 <= in.size) {   // the packet fits after its header
                         consumed = 8 + size;
                         samples = packet_samples(p + 8, size, rate);
                     }
@@ -266,6 +265,18 @@ std::shared_ptr<ipc::Service> make_silent_decoder(uint32_t rate, uint32_t channe
 
 std::atomic<int> g_single_opens{0}, g_multi_opens{0};
 
+// What both open commands give libopus: the stream layout and room for 120 ms per packet.
+opus::Config decoder_config(opus::Kind kind, uint32_t rate, uint32_t channels, uint32_t streams, uint32_t coupled) {
+    opus::Config cfg;
+    cfg.kind = kind;
+    cfg.rate = rate;
+    cfg.channels = channels;
+    cfg.streams = streams;
+    cfg.coupled = coupled;
+    cfg.frame_samples = rate / 1000 * 120;
+    return cfg;
+}
+
 uint32_t open_single(ipc::Request& req, ipc::Response& rsp) {
     const uint32_t asked_rate = req.arg<uint32_t>(0), asked_channels = req.arg<uint32_t>(4);
     if (g_single_opens.fetch_add(1) < 4)
@@ -273,14 +284,7 @@ uint32_t open_single(ipc::Request& req, ipc::Response& rsp) {
     const uint32_t rate = asked_rate ? asked_rate : 48000;
     const uint32_t channels = asked_channels == 0 || asked_channels > 8 ? 2 : asked_channels;
     if (opus::available() && channels <= 2 && libopus_rate(rate)) {
-        opus::Config c;
-        c.kind = opus::Kind::Opus;
-        c.rate = rate;
-        c.channels = channels;
-        c.streams = 1;
-        c.coupled = 0;
-        c.frame_samples = rate / 1000 * 120;
-        rsp.push_object(opus::make_decoder_object(c));
+        rsp.push_object(opus::make_decoder_object(decoder_config(opus::Kind::Opus, rate, channels, 1, 0)));
     } else {
         rsp.push_object(make_silent_decoder(rate, channels));
     }
@@ -306,16 +310,11 @@ uint32_t open_multistream(ipc::Request& req, ipc::Response& rsp, uint64_t need, 
     if (g_multi_opens.fetch_add(1) < 4)
         NXLOG_I("hwopus", "cmd %u: open a multistream decoder for %u Hz, %u channels, %u streams, %u stereo", req.cmd, rate, channels, streams,
                 coupled);
-    if (!opus::available()) return opus::kResUnimplemented;
-    opus::Config c;
-    c.kind = opus::Kind::Multistream;
-    c.rate = rate;
-    c.channels = channels;
-    c.streams = streams;
-    c.coupled = coupled;
-    c.frame_samples = rate / 1000 * 120;
-    std::memcpy(c.mapping.data(), p + mapping_at, c.mapping.size());
-    rsp.push_object(opus::make_decoder_object(c));
+    const bool have_libopus = opus::available();
+    if (!have_libopus) return opus::kResUnimplemented;
+    opus::Config cfg = decoder_config(opus::Kind::Multistream, rate, channels, streams, coupled);
+    std::memcpy(cfg.mapping.data(), p + mapping_at, cfg.mapping.size());
+    rsp.push_object(opus::make_decoder_object(cfg));
     return 0;
 }
 
@@ -348,7 +347,7 @@ uint64_t app_id() { return profile().application_id; }
 uint32_t list_add_ons(const ipc::Buffer& b, uint32_t offset, uint32_t count, bool this_title) {
     zero_buffer(b);
     const uint64_t room = b.addr ? b.size / 4 : 0;
-    const uint64_t want = std::min<uint64_t>(count, room);
+    const uint64_t want = count < room ? uint64_t{count} : room;   // the indices asked for that fit the buffer
     if (!this_title) return 0;
     const std::vector<AddOnContent>& list = add_on_contents();
     uint32_t n = 0;
@@ -651,7 +650,7 @@ std::shared_ptr<ipc::Service> make_nfc_user() {
 }
 
 std::shared_ptr<ipc::Service> make_nfp_user() {
-    auto state = std::make_shared<std::atomic<uint32_t>>(0);
+    const auto state = std::make_shared<std::atomic<uint32_t>>(0u);   // GetState: 1 once initialized, 0 after Finalize
     return make_iface("nn::nfp::detail::IUser", [state](ipc::Service& s) {
         const auto init = [state](ipc::Request& req, ipc::Response&) -> uint32_t {
             NXLOG_D("nfp", "cmd %u: initialized (no reader in use)", req.cmd);
@@ -701,6 +700,8 @@ std::shared_ptr<ipc::Service> make_mifare_user() {
     return make_iface("nn::nfc::mifare::detail::IUser", [](ipc::Service&) {});   // answered by ext_system.cpp
 }
 
+bool null_uid(const std::pair<uint64_t, uint64_t>& uid) { return (uid.first | uid.second) == 0; }
+
 // ---- olsc:u ---------------------------------------------------------------------------------------------------------------------
 std::shared_ptr<ipc::Service> make_olsc() {
     struct State {
@@ -720,7 +721,7 @@ std::shared_ptr<ipc::Service> make_olsc() {
             std::lock_guard<std::mutex> lk(st->mu);
             if (!st->initialized) return kOlscNotInitialized;
             const std::pair<uint64_t, uint64_t> uid{req.arg<uint64_t>(0), req.arg<uint64_t>(8)};
-            if (uid.first == 0 && uid.second == 0) return kOlscNullArgument;
+            if (null_uid(uid)) return kOlscNullArgument;
             const auto it = st->backup.find(uid);
             rsp.push<uint8_t>(it != st->backup.end() && it->second ? 1 : 2);   // 1 enabled, 2 not
             return 0;
@@ -729,7 +730,7 @@ std::shared_ptr<ipc::Service> make_olsc() {
             std::lock_guard<std::mutex> lk(st->mu);
             if (!st->initialized) return kOlscNotInitialized;
             const std::pair<uint64_t, uint64_t> uid{req.arg<uint64_t>(8), req.arg<uint64_t>(16)};
-            if (uid.first == 0 && uid.second == 0) return kOlscNullArgument;
+            if (null_uid(uid)) return kOlscNullArgument;
             st->backup[uid] = req.arg<uint64_t>(0) != 0;
             return 0;
         });
@@ -742,7 +743,7 @@ public:
     Banana() : ipc::StubService("banana") {}
     uint32_t handle(ipc::Request& req, ipc::Response& rsp) override {
         NXLOG_W("banana", "command %u (msg type %u) asked of banana; answering StubService", req.cmd, req.msg_type);
-        return ipc::StubService::handle(req, rsp);
+        return StubService::handle(req, rsp);   // the base class answers
     }
 };
 
@@ -830,11 +831,11 @@ std::shared_ptr<ipc::Service> make_streamplay_user_service() {
             ServiceSharedMemory m(kStreamplayHidBytes, "streamplay.hid");   // no guest pad, every ring empty
             if (!m.ok() || !m.host()) return kNotSupported;
             std::memset(reinterpret_cast<void*>(static_cast<uintptr_t>(m.host())), 0, static_cast<size_t>(m.size()));
-            const uint32_t h = m.new_handle();
-            if (!h) return kNotSupported;
+            const uint32_t handle = m.new_handle();
+            if (handle == 0) return kNotSupported;
             rsp.push<uint64_t>(kStreamplayHidBytes);
             rsp.push<uint64_t>(0);
-            rsp.out_copy.push_back(h);
+            rsp.out_copy.push_back(handle);
             return 0;
         });
         s.add_cmd(502, "GetStreamPlayType", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
@@ -871,23 +872,28 @@ std::shared_ptr<ipc::Service> make_streamplay() {
     });
 }
 
+// The factory of the TMA manager `name`: every command `cmds` lists is refused.
+ipc::ServiceFactory tma_factory(const char* name, const std::vector<std::pair<uint32_t, const char*>>& (*cmds)()) {
+    return [name, cmds] { return make_tma(name, cmds()); };
+}
+
 }  // namespace
 
 void register_misc() {
-    add("stpl:u", [] { return make_streamplay(); });
-    add("csrng", [] { return make_csrng(); });
+    add("stpl:u", make_streamplay);
+    add("csrng", make_csrng);
     register_ro();
     register_bluetooth();
     register_npns();
     register_pm();
-    add("mm:u", [] { return make_mm(); });
-    add("hwopus", [] { return make_hwopus(); });
-    add("aoc:u", [] { return make_aoc(); });
-    add("caps:u", [] { return make_caps(); });
-    add("caps:su", [] { return make_screenshot_app(); });
-    add("mii:u", [] { return make_mii(); });
-    add("mii:e", [] { return make_mii(); });   // the same database (Mario Kart 8 Deluxe opens mii:e first)
-    add("irs", [] { return make_irs(); });
+    add("mm:u", make_mm);
+    add("hwopus", make_hwopus);
+    add("aoc:u", make_aoc);
+    add("caps:u", make_caps);
+    add("caps:su", make_screenshot_app);
+    add("mii:u", make_mii);
+    add("mii:e", make_mii);   // the same database (Mario Kart 8 Deluxe opens mii:e first)
+    add("irs", make_irs);
     add("nfc:user", [] { return make_user_manager<&make_nfc_user>("nn::nfc::detail::IUserManager"); });
     add("nfc:mf:u", [] { return make_user_manager<&make_mifare_user>("nn::nfc::mifare::detail::IUserManager"); });
     add("nfp:user", [] { return make_user_manager<&make_nfp_user>("nn::nfp::detail::IUserManager"); });
@@ -903,10 +909,10 @@ void register_misc() {
     });
     add("pcm", [] { return make_iface("pcm", [](ipc::Service&) {}); });
     add("banana", [] { return std::make_shared<Banana>(); });
-    add("htc", [] { return make_tma("nn::tma::IHtcManager", htc_cmds()); });
-    add("htc:tenv", [] { return make_tma("nn::htc::tenv::IServiceManager", tenv_cmds()); });
-    add("htcs", [] { return make_tma("nn::tma::IHtcsManager", htcs_cmds()); });
-    add("olsc:u", [] { return make_olsc(); });
+    add("htc", tma_factory("nn::tma::IHtcManager", htc_cmds));
+    add("htc:tenv", tma_factory("nn::htc::tenv::IServiceManager", tenv_cmds));
+    add("htcs", tma_factory("nn::tma::IHtcsManager", htcs_cmds));
+    add("olsc:u", make_olsc);
 }
 
 void misc_reset() {

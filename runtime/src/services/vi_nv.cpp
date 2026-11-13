@@ -206,7 +206,7 @@ void vsync_main(ServiceEvent ev) {
         const bool on_screen = kernel::time_scale() == 1.0 && have_screen && rate <= 1.02 * (1e9 / static_cast<double>(s.period));
         if (static_cast<int>(on_screen) != mode) {
             mode = on_screen ? 1 : 0;
-            ticks = vblank::Ticks{};
+            ticks = vblank::Ticks();   // the new mode counts its ticks from scratch
             if (on_screen)
                 NXLOG_I("vi", "vsync event: %.2f Hz on the %s screen refresh (%.2f Hz, %u refreshes a tick)", rate, vblank::source_name(),
                         1e9 / static_cast<double>(s.period), vblank::refreshes_per_tick(s, rate));
@@ -257,13 +257,17 @@ using H = ipc::Handler;
 
 uint32_t ok(ipc::Request&, ipc::Response&) { return 0; }
 
+// `handle` as the reply's copy handle; a handle that could not be made (0) fails the request.
+uint32_t reply_copy_handle(ipc::Response& rsp, uint32_t handle) {
+    if (handle == 0) return kViInvalidArgument;
+    rsp.out_copy.push_back(handle);
+    return 0;
+}
+
 // IManagerDisplayService's events: a new one per call, never signalled.
 uint32_t fresh_event(ipc::Request&, ipc::Response& rsp) {
     ServiceEvent e;
-    const uint32_t h = e.new_handle();
-    if (!h) return kViInvalidArgument;
-    rsp.out_copy.push_back(h);
-    return 0;
+    return reply_copy_handle(rsp, e.new_handle());
 }
 
 // ---- IHOSBinderDriver: the layer's IGraphicBufferProducer --------------------------------------------------------------------------
@@ -319,8 +323,8 @@ void buffer_history(int32_t want, std::vector<uint32_t>& w) {
     std::lock_guard<std::mutex> lk(h.mu);
     const size_t n = std::min<size_t>({static_cast<size_t>(want), h.last.size(), kKept});
     w = {kStatusOk, static_cast<uint32_t>(n)};
-    for (size_t i = 0; i < n; ++i) {
-        const Presented& f = h.last[h.last.size() - 1 - i];
+    for (size_t back = 0; back < n; ++back) {   // newest first
+        const Presented& f = h.last[h.last.size() - 1 - back];
         const uint64_t q = static_cast<uint64_t>(f.queue_ns), p = static_cast<uint64_t>(f.present_ns);
         const uint32_t rec[8] = {static_cast<uint32_t>(f.frame), static_cast<uint32_t>(f.frame >> 32), static_cast<uint32_t>(q),
                                  static_cast<uint32_t>(q >> 32), static_cast<uint32_t>(p), static_cast<uint32_t>(p >> 32), 2, 0};
@@ -335,8 +339,8 @@ uint32_t transact(ipc::Request& req, ipc::Response&) {
     if (!in.addr || in.size < 16) return kViInvalidArgument;
     Vi& v = vi();
     std::lock_guard<std::mutex> lk(v.mu);
-    LayerSlot* l = layer_of_binder(v, binder);
-    if (!l) return kViNotFound;
+    LayerSlot* layer = layer_of_binder(v, binder);
+    if (layer == nullptr) return kViNotFound;
     ParcelIn rd(in);
     rd.skip_token();
     std::vector<uint32_t> w;
@@ -347,21 +351,21 @@ uint32_t transact(ipc::Request& req, ipc::Response&) {
             if (n < 1) {
                 w = {kStatusBadValue};
             } else {
-                l->buffer_count = n;
+                layer->buffer_count = n;
                 w = {kStatusOk};
             }
             break;
         }
         case 3: w = {0xFFFFFFFFu, kStatusBusy}; break;                // DequeueBuffer: slot -1
         case 7: w = {kStatusNoInit}; break;                           // QueueBuffer
-        case 9: query(*l, rd.u32(), w); break;                        // Query
+        case 9: query(*layer, rd.u32(), w); break;                    // Query
         case 10:                                                      // Connect: width, height, NoVSyncCapability, no pending buffers
-            l->connected = true;
-            w = {l->width, l->height, 0x10, 0, kStatusOk};
+            layer->connected = true;
+            w = {layer->width, layer->height, 0x10, 0, kStatusOk};
             break;
         case 11:                                                      // Disconnect
-            w = {l->connected ? kStatusOk : kStatusNoInit};
-            l->connected = false;
+            w = {layer->connected ? kStatusOk : kStatusNoInit};
+            layer->connected = false;
             break;
         case 17: buffer_history(static_cast<int32_t>(rd.u32()), w); break;   // GetBufferHistory
         case 4: case 5: case 6: case 8: case 13: case 14:             // Detach / DetachNext / Attach / Cancel / Allocate / SetPreallocated
@@ -395,12 +399,9 @@ std::shared_ptr<ipc::Service> make_binder() {
         s.add_cmd(2, "GetNativeHandle", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
             Vi& v = vi();
             std::lock_guard<std::mutex> lk(v.mu);
-            LayerSlot* l = layer_of_binder(v, req.arg<int32_t>(0));
-            if (!l) return kViNotFound;
-            const uint32_t h = l->event.new_handle();
-            if (!h) return kViInvalidArgument;
-            rsp.out_copy.push_back(h);
-            return 0;
+            LayerSlot* layer = layer_of_binder(v, req.arg<int32_t>(0));
+            if (layer == nullptr) return kViNotFound;
+            return reply_copy_handle(rsp, layer->event.new_handle());
         });
         s.add_cmd(3, "TransactParcelAuto", transact);
     });
@@ -459,12 +460,7 @@ int64_t display_id(const ipc::Request& req) {
     return -1;
 }
 
-uint32_t vsync_event(ipc::Request&, ipc::Response& rsp) {
-    const uint32_t h = vsync_handle();
-    if (!h) return kViInvalidArgument;
-    rsp.out_copy.push_back(h);
-    return 0;
-}
+uint32_t vsync_event(ipc::Request&, ipc::Response& rsp) { return reply_copy_handle(rsp, vsync_handle()); }
 
 std::shared_ptr<ipc::Service> make_display_service() {
     return make_iface("nn::visrv::sf::IApplicationDisplayService", [](ipc::Service& s) {
@@ -597,14 +593,9 @@ constexpr uint32_t kNvNotInProduction = 0x30006;
 
 enum class Dev { NvMap, Ctrl, CtrlGpu, AsGpu, Channel, Other };
 const char* dev_name(Dev d) {
-    switch (d) {
-        case Dev::NvMap: return "nvmap";
-        case Dev::Ctrl: return "nvhost-ctrl";
-        case Dev::CtrlGpu: return "nvhost-ctrl-gpu";
-        case Dev::AsGpu: return "nvhost-as-gpu";
-        case Dev::Channel: return "nvhost-gpu";
-        default: return "other";
-    }
+    static const char* const kDevNames[] = {"nvmap", "nvhost-ctrl", "nvhost-ctrl-gpu", "nvhost-as-gpu", "nvhost-gpu"};   // Dev's order
+    const size_t at = static_cast<size_t>(d);
+    return at < sizeof kDevNames / sizeof kDevNames[0] ? kDevNames[at] : "other";
 }
 
 struct NvFile {
@@ -617,7 +608,11 @@ struct NvFile {
 };
 
 struct NvMapObject {
-    uint32_t size = 0, align = 0, heap = 0, flags = 0, kind = 0;
+    uint32_t size = 0;
+    uint32_t align = 0;
+    uint32_t heap = 0;
+    uint32_t flags = 0;
+    uint32_t kind = 0;
     uint64_t addr = 0;
     bool allocated = false;
     uint32_t refs = 1;
@@ -713,7 +708,7 @@ Answer nvmap_ioctl(Nv& n, uint32_t nr, Args& a) {
             if (!o) return done(kNvBadValue);
             uint32_t align = a.get<uint32_t>(0xC);
             if (align & (align - 1)) return done(kNvBadValue);
-            if (align < 0x1000) align = 0x1000;
+            align = std::max<uint32_t>(align, 0x1000);   // a page at least
             o->align = align;
             if (!o->allocated) {
                 o->heap = a.get<uint32_t>(4);
@@ -915,9 +910,7 @@ Answer as_gpu_ioctl(Nv& n, NvFile& f, uint32_t nr, Args& a) {
             return done();
         }
         case 0x03: {                // FREE_SPACE
-            auto it = f.ranges.find(a.get<uint64_t>(0));
-            if (it == f.ranges.end()) return done(kNvBadValue);
-            f.ranges.erase(it);
+            if (f.ranges.erase(a.get<uint64_t>(0)) == 0) return done(kNvBadValue);   // no range starts there
             return done();
         }
         case 0x05:                  // UNMAP_BUFFER
@@ -946,9 +939,9 @@ Answer as_gpu_ioctl(Nv& n, NvFile& f, uint32_t nr, Args& a) {
         case 0x08: {                // GET_VA_REGIONS
             const uint32_t entries = std::min<uint32_t>(a.get<uint32_t>(8) / 24, 2);
             const VaRegion* regions[2] = {&kSmallPages, &kBigPages};
-            for (uint32_t i = 0; i < entries; ++i) {
-                const VaRegion& g = *regions[i];
-                const size_t at = 0x10 + 24 * i;
+            for (uint32_t r = 0; r < entries; ++r) {
+                const VaRegion& g = *regions[r];
+                const size_t at = 0x10 + 24 * r;
                 a.put<uint64_t>(at, g.start);
                 a.put<uint32_t>(at + 8, static_cast<uint32_t>(g.page));
                 a.put<uint32_t>(at + 12, 0);
@@ -958,8 +951,8 @@ Answer as_gpu_ioctl(Nv& n, NvFile& f, uint32_t nr, Args& a) {
             return done();
         }
         case 0x09: {                // INITIALIZE_EX
-            const uint32_t big = a.get<uint32_t>(8);
-            f.big_page = big ? big : 0x20000;
+            f.big_page = a.get<uint32_t>(8);
+            if (f.big_page == 0) f.big_page = 0x20000;   // 0 keeps the 128 KiB default
             return done();
         }
         default: return kUntaken;
@@ -1219,19 +1212,19 @@ void register_vi_nv() {
 
 void vi_nv_reset() {
     Vi& v = vi();
-    std::thread t;
+    std::thread pacer;
     {
         std::lock_guard<std::mutex> lk(v.mu);
         if (v.vsync_started) {
             v.vsync_stop = true;
-            t = std::move(v.vsync_thread);
+            pacer = std::move(v.vsync_thread);
         }
     }
     {
         std::lock_guard<std::mutex> lk(v.wait_mu);
         v.wait_cv.notify_all();
     }
-    if (t.joinable()) t.join();
+    if (pacer.joinable()) pacer.join();   // it has seen vsync_stop
     {
         History& h = history();
         std::lock_guard<std::mutex> lk(h.mu);
@@ -1252,16 +1245,16 @@ void vi_nv_reset() {
         v.next_layer_id = kFirstLayerId;
         v.vsync = ServiceEvent();
     }
-    Nv& n = nv();
-    std::lock_guard<std::mutex> lk(n.mu);
-    n.initialized = false;
-    n.next_fd = 1;
-    n.next_handle = 1;
-    n.next_syncpoint = 1;
-    n.files.clear();
-    n.objects.clear();
-    n.warned.clear();
-    n.submit_warned = false;
+    Nv& drv = nv();
+    std::lock_guard<std::mutex> lk(drv.mu);
+    drv.initialized = false;
+    drv.next_fd = 1;
+    drv.next_handle = 1;
+    drv.next_syncpoint = 1;
+    drv.files.clear();
+    drv.objects.clear();
+    drv.warned.clear();
+    drv.submit_warned = false;
 }
 
 }  // namespace nxrt::services

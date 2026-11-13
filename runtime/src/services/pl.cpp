@@ -55,11 +55,12 @@ const char* const kDumpNames[kSlots] = {
 };
 
 // ---- the button face (survives pl_reset) ------------------------------------------------------------------------------------
+using FaceSource = ButtonFace (*)();   // shared_font_set_face_provider's function
 struct Face {
     std::mutex mu;
     ButtonFace face;
     bool set = false;
-    ButtonFace (*provider)() = nullptr;
+    FaceSource provider = nullptr;
 };
 Face& face_state() {
     static Face f;
@@ -67,13 +68,13 @@ Face& face_state() {
 }
 // The face font 5 is made with when it is built: the provider's, asked once, when no face was set before.
 ButtonFace start_face() {
-    Face& f = face_state();
-    std::lock_guard<std::mutex> lk(f.mu);
-    if (!f.set && f.provider) {
-        f.face = f.provider();
-        f.set = true;
+    Face& st = face_state();
+    std::lock_guard<std::mutex> lk(st.mu);
+    if (st.provider != nullptr && !st.set) {
+        st.face = (*st.provider)();
+        st.set = true;
     }
-    return f.face;
+    return st.face;
 }
 
 // ---- the font memory ----------------------------------------------------------------------------------------------------------
@@ -144,7 +145,7 @@ uint32_t rd32le(const uint8_t* p) { return uint32_t(p[0]) | uint32_t(p[1]) << 8 
 bool decode_bfttf(const std::vector<uint8_t>& in, std::vector<uint8_t>& out) {
     if (in.size() < 8 || (rd32le(in.data()) ^ kFileKey) != kHeaderMagic) return false;
     const size_t words = (in.size() - 8) / 4;
-    out.resize(words * 4);
+    out.resize(words * sizeof(uint32_t));
     for (size_t i = 0; i < words; ++i) {
         const uint32_t w = rd32le(in.data() + 8 + 4 * i) ^ kFileKey;
         std::memcpy(out.data() + 4 * i, &w, 4);
@@ -381,11 +382,11 @@ ButtonFace shared_font_face() {
 
 void shared_font_set_face(const ButtonFace& face) {
     {
-        Face& f = face_state();
-        std::lock_guard<std::mutex> lk(f.mu);
-        if (f.set && f.face == face) return;
-        f.face = face;
-        f.set = true;
+        Face& cur = face_state();
+        std::lock_guard<std::mutex> lk(cur.mu);
+        if (cur.set && cur.face == face) return;   // the same face again: nothing to rebuild
+        cur.face = face;
+        cur.set = true;
     }
     FontState& st = font_state();
     std::lock_guard<std::mutex> lk(st.mu);
