@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Chaos192
 // macOS: claims the guest's address space when the runtime image loads, before the process has made many allocations of its own.
 //
 // The guest space on macOS is [0x71_0000_0000, 0x80_0000_0000) (include/nxrt/memory.h): the module images at their lifted addresses, the

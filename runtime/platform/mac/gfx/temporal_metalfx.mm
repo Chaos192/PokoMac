@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Chaos192
 // macOS: Apple's MetalFX temporal scaler as a temporal upscaler (src/gfx/extras/temporal.h). The temporal pass (temporal.cpp) records its
 // input pass (colour and depth copies, motion vectors from depth and the camera) into the replay's command buffer as for FSR 3; MetalFX then
 // runs on a Metal command queue of its own, between two parts of that submission:

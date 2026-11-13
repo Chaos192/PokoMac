@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Chaos192
 // nxwin <psapi.h>: process memory counters from task_info.
 #pragma once
 #include "windows.h"

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Chaos192
 // macOS host audio sink: SDL3 audio streams on Core Audio (the role of src/services/audio_xaudio2.cpp on Windows).
 // [audio] device picks the output device (an exact device name, or a part of one; "default" or empty follows the system default, also when
 // it changes). write() queues into the stream and drops what goes beyond kMaxQueuedMs, so it never blocks; queued_frames() is what the

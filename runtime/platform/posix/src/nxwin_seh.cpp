@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Chaos192
 // nxwin: structured exceptions over POSIX signals (see nxwin/seh.h for the dispatch order).
 // The signal handler runs on the thread's alternate stack, reads only lock-free state (the handler snapshot, the thread's __try chain
 // in a pthread key) and allocates nothing, so it may interrupt any code.

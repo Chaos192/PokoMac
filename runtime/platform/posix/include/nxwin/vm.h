@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Chaos192
 // nxwin: virtual memory (VirtualAlloc family over mach_vm), pagefile-backed sections (Mach named memory entries) and their views.
 // Host pages are 16 KiB on Apple silicon: protection and commit changes cover whole host pages (a 4 KiB request widens to the
 // 16 KiB page that holds it). Reservations and views made without an address start on 64 KiB boundaries like on Windows.

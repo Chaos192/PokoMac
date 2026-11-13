@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Chaos192
 //! Report a problem: what a bug report needs, in one click. The game's logs and reports, the setup log and the settings go into a zip on
 //! the Desktop (`PokoMac-report-<date>-<time>.zip`; Downloads, then the game folder, when the Desktop cannot be written), Finder shows it,
 //! and a new GitHub issue opens with the system facts (`system.txt`) already in it, so the player only has to attach the zip.

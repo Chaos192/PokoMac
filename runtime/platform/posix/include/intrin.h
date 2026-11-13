@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Chaos192
 // nxwin <intrin.h>: the MSVC intrinsics the runtime uses that have a meaning on arm64.
 #pragma once
 #include <cstdint>

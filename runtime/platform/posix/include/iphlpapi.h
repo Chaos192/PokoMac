@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Chaos192
 // nxwin <iphlpapi.h>: GetAdaptersAddresses over getifaddrs (adapter name, operational state, loopback type, unicast addresses with
 // their prefix length). Only the fields below are filled.
 #pragma once

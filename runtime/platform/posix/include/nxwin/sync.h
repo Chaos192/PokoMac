@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Chaos192
 // nxwin: slim reader/writer locks, condition variables, critical sections, WaitOnAddress and the Interlocked family.
 // Like their Win32 counterparts they are plain data that is valid when zero-filled (SRWLOCK_INIT and CONDITION_VARIABLE_INIT are {}),
 // so structures that memset or value-initialise them work. Waiting goes through os_sync_wait_on_address (macOS 14.4+).

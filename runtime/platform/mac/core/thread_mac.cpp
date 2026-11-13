@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Chaos192
 // macOS: scheduling for the threads a frame waits on. On Apple silicon a thread's QoS decides whether it runs on the performance or the
 // efficiency cores, and a real-time (time-constraint) thread is scheduled ahead of every ordinary one, as Core Audio's and the display's
 // are. The NVN render thread (replay and present) gets both, so a frame's GPU work is never late because its thread sat on an efficiency

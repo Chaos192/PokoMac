@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Chaos192
 // nxwin: the MSVC CRT names the runtime uses (_wfopen, _putenv, localtime_s, ...). Force-included into every C++ file of the runtime on
 // macOS, as the MSVC CRT is visible everywhere on Windows; it defines no Win32 macros.
 #pragma once

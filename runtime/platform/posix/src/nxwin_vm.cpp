@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Chaos192
 // nxwin: virtual memory and sections over mach_vm.
 //
 // Reservations (VirtualAlloc MEM_RESERVE) are mach_vm allocations at the exact address (VM_FLAGS_FIXED fails instead of replacing what is

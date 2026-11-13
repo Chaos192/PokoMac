@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Chaos192
 // nxwin: Winsock helpers (startup, ioctls, select) and GetAdaptersAddresses over getifaddrs.
 #include "nxwin_internal.h"
 

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Chaos192
 // nxwin <avrt.h>: MMCSS task registration raises the calling thread to the user-interactive QoS class on macOS.
 #pragma once
 #include "windows.h"

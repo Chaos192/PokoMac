@@ -1,5 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Chaos192
 # macOS: builds libvpx 1.16.0 (the version the Windows build takes from vcpkg) as a static arm64 library with the VP8 / VP9 decoders only,
 # into ~/Library/Caches/nxrt/libvpx (or $1), where cmake/media_deps.cmake finds it. The runtime links it into libpkp_rt.dylib, so players
 # need nothing; without it the Switch 2 movies (WebM, VP9) are left out (NXRT_HAVE_LIBVPX=0).

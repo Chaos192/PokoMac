@@ -1,5 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 Chaos192
 # macOS and Linux twin of setup_ryujinx.ps1: stage the three Ryujinx projects the translator needs into tools/shaders/third_party/ryubing
 # (git-ignored). Source: a read-only checkout of the Ryubing fork (default refs/ryubing in the repository root; the release pins commit
 # a82350bb774f70fcbd41c9987bf67a3775409963, MIT). The build writes obj/bin next to the sources, so it builds from this copy and never

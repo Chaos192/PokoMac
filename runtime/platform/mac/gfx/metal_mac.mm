@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Chaos192
 // macOS: Metal's shader compiler, under the Vulkan driver. KosmicKrisp (and MoltenVK) turn every pipeline into MSL source and hand it to
 // Apple's compiler service, which by default runs only a couple of compilations at a time per device. The game's pipelines are built on
 // several threads at once (the prewarm workers, the async_whole threads, --prepare-pipelines), so the device is told to use as many

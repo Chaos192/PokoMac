@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Chaos192
 // macOS: finding Vulkan. There is no system Vulkan loader, so the game folder carries one, next to pkp:
 //   libvulkan.1.dylib                       the Khronos loader
 //   libvulkan_kosmickrisp.dylib             KosmicKrisp (LunarG's conformant Vulkan 1.4 driver on Metal), the default

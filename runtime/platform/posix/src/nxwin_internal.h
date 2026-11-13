@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Chaos192
 // nxwin internals: the kernel object model shared by the implementation files.
 //
 // Every HANDLE is an Object* with a reference count. A wait locks each object in turn, asks it whether the wait is satisfied now

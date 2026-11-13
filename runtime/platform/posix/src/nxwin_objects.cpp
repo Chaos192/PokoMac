@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 Chaos192
 // nxwin: kernel objects (threads, events, mutexes, waitable timers, processes, thread snapshots) and waits.
 #include "nxwin_internal.h"
 
