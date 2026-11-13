@@ -1,58 +1,61 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// A RomFS image synthesised from a host folder: the byte-addressed storage nn::fs::MountRom reads (fsp-srv OpenDataStorageByCurrentProcess
-// returns it as an IStorage; the SDK parses the RomFS tables itself). Nothing is copied: the metadata tables are built in memory and
-// file data is read from the host files on demand.
-//
-// Image layout (https://switchbrew.org/wiki/RomFS, libnx romfs_dev / yuzu fsmitm_romfsbuild): the 0x50-byte header at offset 0 (padded
-// to 0x200), the file data partition from 0x200 (each file starts at a multiple of 0x10 from the partition start, in the order of the
-// file table), then the directory hash table, directory table, file hash table and file table, each 4-byte aligned; the header holds
-// the offsets and sizes. Entries are sorted by name (byte order) within a directory.
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Copyright (c) 2026 Chaos192
+// A game's RomFS as one byte-addressed image, built in memory over its sources (fs_romfs.cpp): a host folder, a .nup package (nxrt/nup.h)
+// or a RomFS read in place from an .nsp / .xci (romfs_source.h), with the base game's files under an update, mod layers over both and
+// plain copies of a package's compressed files. fsp-srv serves the image (OpenDataStorageByCurrentProcess and its siblings); the game's
+// SDK parses it itself, so it is a standard RomFS: a 0x50-byte header, the file data from 0x200, then the directory hash table, the
+// directory table, the file hash table and the file table. The layout follows the public descriptions of the format (libnx
+// romfs_dev.h / romfs_dev.c, ISC: entry layouts, the name hash, buckets by modulo); file data is read from the sources when the game
+// reads it, never copied.
 #pragma once
 #include <cstdint>
 #include <memory>
 #include <string>
-#include <vector>
 
 namespace nxrt::services::fs {
 
 class RomfsImage {
 public:
+    struct Stats {
+        uint32_t files = 0;             // files in the image
+        uint32_t dirs = 0;              // folders, the root included
+        uint64_t data_bytes = 0;        // sum of the file sizes
+        uint64_t data_offset = 0;       // where file data starts in the image (0x200 once built)
+        uint32_t base_files = 0;        // files an overlay moved up from a lower layer (the base game under an update, ...)
+        uint32_t mod_files = 0;         // files that came from a mod layer
+        uint32_t mod_replaced = 0;      // times a mod file stood where the layer below it had a file
+        uint32_t mod_deleted = 0;       // 'delete' lines of a layer list that removed an entry
+        uint32_t mod_layers = 0;        // 1 for a mod folder, the 'layer' lines applied for a list, 0 without mods
+        uint32_t packed_files = 0;      // files stored zstd-compressed in a .nup
+        uint64_t packed_bytes = 0;      // their sizes
+        uint32_t unpacked_files = 0;    // of those, the files served from their plain copy in the unpacked folder
+        uint64_t unpacked_bytes = 0;    // their sizes
+        uint32_t unpacked_ignored = 0;  // files of the unpacked folder that stand in for nothing
+        std::string unpacked_error;     // why the unpacked folder was not used at all (empty: used, or none given)
+    };
+
     RomfsImage();
     ~RomfsImage();
-    // Scans `host_dir` (recursively; names are taken as UTF-8 from the host paths) and builds the tables. `host_dir` may also name a .nup
-    // package (nxrt/nup.h): its RomFS is served from the package file. False with *err set when the
-    // folder does not exist or an entry cannot be described. Replaces an earlier build.
-    // `base_dir` (optional, a folder or a .nup): a lower layer. Every file and folder of it that `host_dir` lacks is served too, as a
-    // console patch over its base game: the files of `host_dir` win. For an update dumped without the base game's files under it (an
-    // update only holds the files it changes; fork #128).
-    // `mod_dir` (optional, a romfs-shaped folder): the top layer. Its files win over both `host_dir` and `base_dir`, shared folders merge,
-    // and files found only in the mod are served too. A `mod_dir` ending in .txt is a mod layer list (the mod manager's, docs/MODS.md;
-    // ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch): "layer <folder>" and "delete <path>" lines, lowest priority
-    // first, applied over host_dir + base_dir.
-    bool build(const std::string& host_dir, std::string* err = nullptr, const std::string& base_dir = std::string(),
-               const std::string& mod_dir = std::string());
+
+    // Builds the image of `host_dir` (a folder, a .nup, `<package>#aoc=<id>` or a romfs.nxsrc source) with `base_dir` under it, the mod
+    // folder or layer list (`*.txt`) `mod_dir` over both and the plain copies in `unpacked_dir`. False with *err set when it cannot be
+    // built; the image is then unbuilt.
+    bool build(const std::string& host_dir, std::string* err = nullptr,
+               const std::string& base_dir = std::string(), const std::string& mod_dir = std::string(),
+               const std::string& unpacked_dir = std::string());
     bool built() const;
-    uint64_t size() const;                                  // total image size in bytes
-    // Copies [offset, offset + len) of the image into dst. False when the range is outside the image or a host file cannot be read
-    // (a file that shrank since build() reads as an error, not as zeros). Thread safe; any number of readers may call it at once.
+    uint64_t size() const;
+    // `len` bytes of the image at `offset` into dst (any number of threads at once). False when the range is outside the image or a
+    // source cannot be read.
     bool read(uint64_t offset, void* dst, uint64_t len) const;
-    struct Stats {
-        uint32_t files = 0, dirs = 0;                       // dirs counts the root
-        uint64_t data_bytes = 0;                            // sum of file sizes
-        uint64_t data_offset = 0;                           // header.file_partition_ofs
-        uint32_t base_files = 0;                            // files served from the base layer (build's base_dir)
-        uint32_t mod_files = 0;                             // files served from the mod layer (build's mod_dir)
-        uint32_t mod_replaced = 0;                          // of those, the files that replace a file of the update or base game
-        uint32_t mod_deleted = 0;                           // entries a mod layer list removed ("delete <path>": a mod's .stub)
-        uint32_t mod_layers = 0;                            // mod folders layered (1 for a folder, the "layer" lines of a list)
-    };
     Stats stats() const;
-    // Image offset and size of a file by its path inside the image ("/a/b.bin", case sensitive), for tests and logs. False when absent.
+    // Where the file at image path `path` ("/dir/name") lies in the image: its data offset and size. False for a folder or no such file.
     bool file_extent(const std::string& path, uint64_t* offset, uint64_t* size) const;
 
 private:
-    struct Impl;
-    std::unique_ptr<Impl> p_;
+    struct Image;                  // the built image (fs_romfs.cpp)
+    std::unique_ptr<Image> impl_;
 };
 
 }  // namespace nxrt::services::fs
