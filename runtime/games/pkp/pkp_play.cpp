@@ -936,10 +936,26 @@ int hook_cam_stick(::Ctx* c, uint64_t, void*) {
     return 0;
 }
 
+// The console's own resolution ([display] render_scale = console, the default): its scale of the game's 1920x1080. 1 (the present pass
+// scales the picture to the window), except on a handheld (nxrt/host_device.h) whose window is smaller, where it is the window's size
+// as auto is there.
+float console_scale(int window_w, int window_h, int gw, int gh) {
+    if (!host_is_handheld()) return 1.0f;
+    return std::min(1.0f, std::min(static_cast<float>(window_h) / gh, static_cast<float>(window_w) / gw));
+}
+
 // The 16:9 internal size: the base rule (play_display.h internal_size), kept at 16:9 (the game's cameras and UI are authored for it) and,
 // unless a smaller size was asked for explicitly, at least the console's 1920x1080. On a handheld (nxrt/host_device.h) auto is the
 // window's size: a Steam Deck held ~40-50 fps in the world at 1920x1080 and shows 1280x800 anyway (Game Mode: a 1280x720 window).
+// Console: the console's 1920x1080 (a handheld's smaller window: that size).
 void pick_size(const play::DisplaySettings& d, int window_w, int window_h, int* out_w, int* out_h) {
+    if (d.render_scale == play::kRenderScaleConsole && !(d.render_width > 0 && d.render_height > 0)) {
+        int h = static_cast<int>(std::lround(kTableH * console_scale(window_w, window_h, kTableW, kTableH)));
+        h = std::clamp(h / 18 * 18, 360, kTableH);
+        *out_w = h * 16 / 9;
+        *out_h = h;
+        return;
+    }
     int w = kTableW, h = kTableH;
     play::internal_size(d, window_w, window_h, &w, &h);
     const bool fixed = d.render_width > 0 && d.render_height > 0;
@@ -1073,6 +1089,7 @@ void play_install_render(uint64_t base, const play::DisplaySettings& d, int wind
         }
         float scale = 1.0f;
         if (fixed_size) scale = static_cast<float>(d.render_height) / gh;
+        else if (d.render_scale == play::kRenderScaleConsole) scale = console_scale(window_w, window_h, gw, gh);
         else if (d.render_scale <= 0) {
             scale = std::min(static_cast<float>(window_h) / gh, static_cast<float>(window_w) / gw);
             if (!host_is_handheld()) scale = std::max(1.0f, scale);   // see pick_size
@@ -1094,12 +1111,14 @@ void play_install_render(uint64_t base, const play::DisplaySettings& d, int wind
         // by the window's height (at least 1), a percentage of the console's 1920x1080
         float scale = 1.0f;
         if (d.render_width > 0 && d.render_height > 0) scale = static_cast<float>(d.render_height) / kTableH;
+        else if (d.render_scale == play::kRenderScaleConsole) scale = console_scale(window_w, window_h, kTableW, kTableH);
         else if (d.render_scale <= 0) scale = host_is_handheld() ? static_cast<float>(window_h) / kTableH : std::max(1.0f, static_cast<float>(window_h) / kTableH);
         else scale = static_cast<float>(std::clamp(d.render_scale, 25, 400)) / 100.0f;
         gfx::tuning().render_scale.store(scale);
         NXLOG_I(kTag, "aspect 16:9 (%s, window %dx%d): letterboxed on other window shapes", d.aspect > 0 ? "[display] aspect" : "auto", window_w, window_h);
         NXLOG_I(kTag, "render resolution: 1920x1080 targets at scale %.3f (window %dx%d, [display] render_scale %s), dynamic resolution %s", scale,
-                window_w, window_h, d.render_scale <= 0 ? "auto" : std::to_string(d.render_scale).c_str(), d.dynamic_resolution ? "on" : "off");
+                window_w, window_h, d.render_scale == play::kRenderScaleConsole ? "console" : d.render_scale <= 0 ? "auto" : std::to_string(d.render_scale).c_str(),
+                d.dynamic_resolution ? "on" : "off");
         s.render_installed = true;
         return;
     }
@@ -1108,8 +1127,10 @@ void play_install_render(uint64_t base, const play::DisplaySettings& d, int wind
     s.h.store(h);
     install_render_size_hooks(base);
     s.render_installed = true;
-    NXLOG_I(kTag, "render resolution %dx%d (window %dx%d, scale %d%%%s%s), dynamic resolution %s", w, h, window_w, window_h, d.render_scale,
-            d.render_width > 0 && d.render_height > 0 ? ", fixed size" : "", d.render_scale <= 0 && host_is_handheld() ? ", handheld: the window's size" : "",
+    NXLOG_I(kTag, "render resolution %dx%d (window %dx%d, scale %s%s%s), dynamic resolution %s", w, h, window_w, window_h,
+            d.render_scale == play::kRenderScaleConsole ? "console" : d.render_scale <= 0 ? "auto" : (std::to_string(d.render_scale) + "%").c_str(),
+            d.render_width > 0 && d.render_height > 0 ? ", fixed size" : "",
+            d.render_scale <= 0 && d.render_scale != play::kRenderScaleConsole && host_is_handheld() ? ", handheld: the window's size" : "",
             d.dynamic_resolution ? "on" : "off");
 }
 

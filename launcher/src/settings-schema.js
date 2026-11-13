@@ -480,13 +480,18 @@ export const SECTIONS = [
             ],
           },
           {
-            // 100 is 1920 x 1080: the percentages are the game's own size, see render_scale in play_types.h
-            id: 'render_scale', label: 'Render resolution', type: 'choice', at: AT_RENDER_SCALE, def: '100', quality: 'frame',
+            // 100 is 1920 x 1080: the percentages are the game's own size, see render_scale in play_types.h. Console (the default since
+            // 1.1.0, controls.ini defaults revision 6): the console's 1920 x 1080, scaled to the window
+            id: 'render_scale', label: 'Render resolution', type: 'choice', at: AT_RENDER_SCALE, def: 'console', quality: 'frame',
             custom: { min: 25, max: 400, suffix: '%', start: 100, label: 'Custom render resolution in percent' },
             options: [
-              { value: 'auto', label: 'Match window' }, { value: '67', label: '720p' }, { value: '100', label: '1080p' },
-              { value: '133', label: '1440p' }, { value: '200', label: '2160p' },
+              { value: 'console', label: 'Console (1080p)' }, { value: 'auto', label: 'Match window' }, { value: '67', label: '720p' },
+              { value: '100', label: '1080p' }, { value: '133', label: '1440p' }, { value: '200', label: '2160p' },
             ],
+          },
+          {
+            id: 'render_scale_note', type: 'note',
+            note: () => ({ text: "Console renders at the console's 1920 x 1080 and scales it to your window: 60 fps on most Macs and PCs. Match window or a higher resolution is sharper on a fast GPU." }),
           },
           { id: 'keep_aspect', label: 'Keep 16:9 picture', type: 'toggle', at: controls('display', 'keep_aspect'), def: '1' },
         ],

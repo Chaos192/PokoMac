@@ -487,6 +487,7 @@ bool apply_fixed(Sec sec, const std::string& k, const std::string& v, Settings* 
             if (k == "vram_cap") return set_bool(&s->display.vram_cap);
             if (k == "render_scale") {
                 if (lower(v) == "auto") { s->display.render_scale = 0; return true; }
+                if (lower(v) == "console") { s->display.render_scale = kRenderScaleConsole; return true; }
                 return set_int(25, 400, &s->display.render_scale);
             }
             if (k == "render_width") return set_size(&s->display.render_width);
@@ -1000,7 +1001,9 @@ std::string format_settings(const Settings& s) {
     kv("height", std::to_string(s.display.height));
     kv("keep_aspect", flag(s.display.keep_aspect));
     kv("vram_cap", flag(s.display.vram_cap));
-    kv("render_scale", s.display.render_scale <= 0 ? std::string("auto") : std::to_string(s.display.render_scale));
+    kv("render_scale", s.display.render_scale == kRenderScaleConsole ? std::string("console")
+                       : s.display.render_scale <= 0                   ? std::string("auto")
+                                                                       : std::to_string(s.display.render_scale));
     kv("render_width", std::to_string(s.display.render_width));
     kv("render_height", std::to_string(s.display.render_height));
     kv("aspect", s.display.aspect <= 0 ? std::string("auto") : num_exact(s.display.aspect));

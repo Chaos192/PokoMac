@@ -205,8 +205,9 @@ const Row kDisplay[] = {
     choice("Even Frame Pacing", "With VSync, run at an even divisor of the refresh rate (Steam Deck: 30 instead of 40).", kOffOn, 2,
            [](const S& s) { return static_cast<int>(s.display.fps_snap == "true" || (s.display.fps_snap == "auto" && nxrt::host_is_steam_deck())); },
            [](S& s, int v) { s.display.fps_snap = v ? "true" : "false"; }),
-    autonum("Render Scale", "The game's resolution; 100% is 1920 x 1080. Auto follows the window.", 76, "%.0f%%", 20, 5,
-            [](const S& s) { return s.display.render_scale <= 0 ? 0 : std::clamp((s.display.render_scale - 20) / 5, 1, 76); },
+    autonum("Render Scale", "The game's resolution; 100% is 1920 x 1080 (the console's, the default). Auto follows the window.", 76, "%.0f%%", 20, 5,
+            [](const S& s) { return s.display.render_scale == play::kRenderScaleConsole ? 16 : s.display.render_scale <= 0 ? 0
+                                    : std::clamp((s.display.render_scale - 20) / 5, 1, 76); },
             [](S& s, int v) { s.display.render_scale = v <= 0 ? 0 : 20 + v * 5; play::quality_preset_edited(s.display, play::QualityField::RenderScale); }, true),
 };
 

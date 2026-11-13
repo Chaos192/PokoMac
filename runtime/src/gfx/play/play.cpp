@@ -1526,7 +1526,7 @@ std::string settings_path() {
 static void cap_default_size(const DisplaySettings& d, gfx::Device* dev, int* ww, int* wh) {
     if (!d.vram_cap) return;
     if (d.render_width > 0 && d.render_height > 0) return;
-    if (d.render_scale > 0) return;
+    if (d.render_scale > 0 || d.render_scale == kRenderScaleConsole) return;   // a percentage, or the console's 1920x1080
     uint64_t vram = 0;
     const char* e = std::getenv("NXRT_VK_VRAM_MB");
     if (e && *e) {

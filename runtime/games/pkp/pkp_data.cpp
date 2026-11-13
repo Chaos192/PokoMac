@@ -14,10 +14,10 @@ namespace {
 // + main menu, - camera, D-pad follow/emote/swap move. Pads keep the console layout.
 constexpr const char* kSettingsText = R"INI(
 [meta]
-defaults_rev = 5
+defaults_rev = 6
 
 [display]
-render_scale = auto
+render_scale = console
 fps_limit = auto
 
 [bindings.all]
@@ -62,6 +62,8 @@ WheelDown = dpad_down
 // Revision 3: the frame limit follows the display's refresh rate (the game's own 60 Hz wait is off, pkp_play.cpp) unless the player changed it.
 // Revision 4: in the menus the right button is B (back) and the wheel moves the selection (pkp_menu.cpp: hover and click).
 // Revision 5: the middle mouse button is the Mouse mode key in play (the Joy-Con 2 mouse, pkp_play.cpp play_frame).
+// Revision 6: the render scale is the console's own 1920x1080 (scaled to the window), the PokoMac default since 1.1.0: 60 fps on lower-end
+// Macs and PCs; a player who picked Match window or a percentage keeps it.
 constexpr play::GameDefaultAddition kAdditions[] = {
     {5, play::Ctx::Play, "Mouse2", play::Act::MouseMode},
     {4, play::Ctx::Menu, "Mouse3", play::Act::BtnB},
@@ -72,13 +74,14 @@ constexpr play::GameDefaultAddition kAdditions[] = {
 constexpr play::GameDefaultChange kChanges[] = {
     {2, "display", "render_scale", "100", "auto"},
     {3, "display", "fps_limit", "60", "auto"},
+    {6, "display", "render_scale", "auto", "console"},
 };
 
 const play::GameDefaults& game_defaults() {
     static const play::GameDefaults d = [] {
         play::GameDefaults g;
         g.settings_text = kSettingsText;
-        g.defaults_rev = 5;
+        g.defaults_rev = 6;
         g.additions = kAdditions;
         g.addition_count = sizeof kAdditions / sizeof kAdditions[0];
         g.changes = kChanges;

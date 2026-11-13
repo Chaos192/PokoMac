@@ -1235,15 +1235,17 @@ void resolution_group(Page& p) {
     DisplaySettings& d = p.edit.display;
     card("Resolution");
     render_size_line();
-    bool autos = d.render_scale <= 0;
-    if (check("Automatic render scale", &autos)) {
-        d.render_scale = autos ? 0 : 100;
+    static const char* const kRenderModes[] = {"Console", "Match window", "Custom"};
+    int mode = d.render_scale == kRenderScaleConsole ? 0 : d.render_scale <= 0 ? 1 : 2;
+    if (segmented("Render resolution", kRenderModes, 3, &mode)) {
+        d.render_scale = mode == 0 ? kRenderScaleConsole : mode == 1 ? 0 : 100;
         quality_preset_edited(d, QualityField::RenderScale);
         mark(p);
     }
-    tip("Auto renders at the size of the window (never below the game's own 1080p). Turn it off to pick a percentage.");
+    tip("Console renders at the console's 1920 x 1080 and scales it to the window: 60 fps on most Macs and PCs (the default). Match window "
+        "renders at the window's size (sharper, for a fast GPU). Custom picks a percentage of 1920 x 1080.");
     restart_badge();
-    if (!autos) {
+    if (mode == 2) {
         if (slider_int("Render scale", &d.render_scale, 25, 400, "%d%%")) {
             quality_preset_edited(d, QualityField::RenderScale);
             mark(p);
@@ -1268,7 +1270,9 @@ std::string quality_preset_summary(const QualityPresetInfo& q, const GamePlay* g
     char buf[160];
     t += "\n";
     if (q.sets_frame) {
-        if (v.render_scale <= 0) {
+        if (v.render_scale == kRenderScaleConsole) {
+            t += "Render scale: the console's (1920 x 1080). ";
+        } else if (v.render_scale <= 0) {
             t += "Render scale: automatic (the window's size). ";
         } else {
             std::snprintf(buf, sizeof buf, "Render scale: %d%% (%d x %d). ", v.render_scale, 1920 * v.render_scale / 100, 1080 * v.render_scale / 100);

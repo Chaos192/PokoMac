@@ -167,6 +167,8 @@ struct TimingSettings {
     int double_ms = 300;           // the second press of a double tap must come within this of the first release
     int pulse_ms = 80;             // how long a tap / set A or B select (mpr: beam, visor) / wheel notch stays pressed on the Switch side
 };
+constexpr int kRenderScaleConsole = -1;   // DisplaySettings::render_scale: the console's own resolution ([display] render_scale = console)
+
 struct DisplaySettings {
     std::string window_mode = "windowed";   // "windowed" "borderless" "exclusive"
     bool vsync = false;            // false: no forced vsync (immediate / mailbox, VRR friendly) with the frame cap below
@@ -180,9 +182,11 @@ struct DisplaySettings {
     bool keep_aspect = true;       // letterbox instead of stretching
     bool vram_cap = true;          // [display] vram_cap: an unset render size is kept to 2560x1440 on a GPU with 4 GB of video memory or less
     // ---- S10 display options (play_display.h). The first four only apply at the next start: the game builds its render targets once.
-    // Internal resolution in percent (25..400), 0 = auto; ignored with a fixed size. What 100 means is the game's: the window's client size
-    // where the game module resizes the targets itself (auto = 100), the console's own size where the NVN back end scales the game's
-    // targets (Pokopia: 100 = 1920x1080, auto = the window height / 1080, at least 1).
+    // Internal resolution in percent (25..400), 0 = auto (match the window), kRenderScaleConsole = the console's own resolution; ignored
+    // with a fixed size. What 100 means is the game's: the window's client size where the game module resizes the targets itself
+    // (auto = 100), the console's own size where the NVN back end scales the game's targets (Pokopia: 100 = 1920x1080, auto = the window
+    // height / 1080, at least 1). Console ([display] render_scale = console, Pokopia's default) renders at the console's docked size and
+    // the present pass scales it to the window; on a handheld whose window is smaller, at the window's size.
     int render_scale = 100;
     int render_width = 0, render_height = 0;   // fixed internal resolution (both > 0 and both within 320..16384), 0 = follow the window
     double aspect = 0;             // 0 = the ratio of the internal resolution; otherwise the forced ratio of the 3D view and the HUD (1.0 .. 5.0)
