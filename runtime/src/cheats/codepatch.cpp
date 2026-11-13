@@ -695,8 +695,12 @@ bool fn_for_locked(uint64_t addr, uint64_t* fn_start, std::string* err) {
         f.start = start;
         f.end = std::min<uint64_t>(end, start + 0x40000);      // a unit of at most 256 KiB
         f.module = module;
-        f.orig = fn_lookup(start);
-        f.ej_room = f.orig && ej::has_room(reinterpret_cast<const void*>(f.orig));   // the build's room before the entry (entryjump.h)
+        // the build's compiled entry: from the module table, which never changes (the dispatcher may point at a unit already: a function
+        // that inlined a patched one gets its unit made before its record here; pokomac-port's PC run, 11-13, read the unit's entry, found
+        // no room before it and left that inliner on the old code)
+        uint64_t host = 0, host_end = 0;
+        f.orig = host_of(start, &host, &host_end) ? reinterpret_cast<GuestFn>(host) : fn_lookup(start);
+        f.ej_room =f.orig && ej::has_room(reinterpret_cast<const void*>(f.orig));   // the build's room before the entry (entryjump.h)
         // room for the jump: no other registered function's host code starts within it (judged before any unit replaces this one)
         if (f.orig && kJumpLen) {
             const uint64_t h = reinterpret_cast<uint64_t>(f.orig);

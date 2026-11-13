@@ -88,6 +88,11 @@ COMPILER = [ZIG, 'c++']                 # the compile command before the flags (
 ENTRY_ROOM = (['-Xclang', '-fpatchable-function-entry=4', '-Xclang', '-fpatchable-function-entry-offset=4'] if MACOS
               else ['-Xclang', '-fpatchable-function-entry=14', '-Xclang', '-fpatchable-function-entry-offset=14'])
 LIFTED_FLAGS = CXXFLAGS + ENTRY_ROOM    # the lifted game code (its translation units); not the on-demand units
+# zig's Mach-O linker drops what nothing references (dead stripping, on by default for a program): the room is code no symbol points at
+# (the nops before a function's symbol), so it went from every function of pkp (AnySwitch ff17c90c: 0 of 203,559 entries kept it, and a
+# code cheat could only reach indirect calls). Kept with --no-gc-sections; the functions themselves were all kept anyway (the module
+# tables name every one).
+ENTRY_LINK = ['-Wl,--no-gc-sections'] if MACOS else []
 CACHE_MB = 3072                         # default size cap of <game>/build/objcache
 CREATE_NO_WINDOW = 0x08000000
 BELOW_NORMAL = 0x00004000
@@ -145,7 +150,7 @@ def tool_stamp(live_patch=False):
     since 2026-11-13, code cheats redirect the patched function's entry instead (entry_room)."""
     stamp = {'lifter': tree_hash(RECOMP, LIFTER), 'sites': tree_hash(RECOMP, [SITES]), 'sdk': tree_hash(SDK, SDK_FILES),
              'runtime': sha256(os.path.join(SDK, RT_LIB)), 'cxxflags': CXXFLAGS, 'modules': [list(m) for m in MODULES],
-             'live_patch': bool(live_patch), 'entry_room': ENTRY_ROOM}
+             'live_patch': bool(live_patch), 'entry_room': ENTRY_ROOM + ENTRY_LINK}
     if MACOS:
         stamp['identity'] = IDENTITY
     return stamp
@@ -723,7 +728,7 @@ def link(runner, obj, game, env):
         # lifted code needs (the Windows exe's /STACK). zig's linker signs the arm64 image ad hoc, which macOS requires.
         cmd = [ZIG, 'c++'] + TARGET + ['-O1', '-fno-exceptions', '-fno-rtti', '-I', SDK, os.path.join(SDK, 'pkp_stub.cpp'),
                write_identity(os.path.join(obj, 'identity.cpp'), game)] + libs + [
-            os.path.join(SDK, RT_LIB), '-o', tmp, '-Wl,-rpath,@executable_path', '-Wl,-stack_size,0x8000000']
+            os.path.join(SDK, RT_LIB), '-o', tmp, '-Wl,-rpath,@executable_path', '-Wl,-stack_size,0x8000000'] + ENTRY_LINK
     else:
         cmd = [ZIG, 'c++'] + TARGET + ['-O1', '-fno-exceptions', '-fno-rtti', '-I', SDK,
                os.path.join(SDK, 'pkp_stub.cpp'), os.path.join(SDK, 'pkp.rc')] + libs + [os.path.join(SDK, RT_LIB),
