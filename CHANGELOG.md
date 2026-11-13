@@ -4,7 +4,62 @@ Parent project: [pokopia-native](https://github.com/xFractals/pokopia-native); e
 (last reviewed: pokopia-native 1.3.3, `035bd9c`). This fork builds on [the original Pokopia Recomp](https://github.com/drakolordx7/pokopia-recomp) 0.1.1. You still need your own copy
 of the game (version 2.0.1a): the download contains no game files.
 
-## Unreleased
+## 1.1.0
+
+**Update:** press **Update**, then **Set up again** once (the game is translated again with the new CPU core and the live code patch
+checks; your saves, settings and shaders are kept).
+
+PokoMac is now **built on [AnySwitch](https://github.com/Chaos192/AnySwitch) by Chaos192**: the in-game menus, cheats, mods and
+local wireless come from it, and PokoMac's services were replaced with AnySwitch's clean rewrites.
+
+### Highlights
+- A new **F1 menu**: every setting in one place, with pins you can keep over the game (F7 hides them)
+- A **cheats menu** (F3 when cheats are on): search, freeze and edit values, Atmosphère cheat files, and code cheats that apply while
+  you play
+- **Mods**: install game-file and code mods from a .zip or a folder on the new Mods page
+- **Render resolution: Console** is the new default: the console's own 1920 x 1080, scaled to your window, so lower-end Macs and PCs
+  hold 60 fps
+
+### Licence
+- PokoMac is now under the **PolyForm Noncommercial License 1.0.0** ([LICENSE](LICENSE)): use, change and share it for any
+  noncommercial purpose, keeping its Required Notices; no commercial use. The lifter that translates the game code stays
+  GPL-3.0-or-later, and third-party code keeps its own licence ([CREDITS.md](CREDITS.md))
+
+### Game
+- Added the **cheats menu** (Settings > Cheats > Enable cheats, then **F3** in the game)
+  - Search memory, keep a cheat table, freeze values, browse memory, run Lua and AOB scripts, pause and step frames
+  - Code cheats (ASM cheats that patch the game's code) now work while the game runs, on the Mac too: turning one on recompiles the
+    patched code on the side and swaps it in; turning it off puts the game back
+  - **Find cheats online** (Settings > Cheats > Cheat file) fetches the public cheat file for your game version on your computer, with
+    its author named, every cheat off until you turn it on. No cheat file is bundled
+- Added **mods** (the **Mods** page in the sidebar)
+  - Install from a .zip, .7z, .rar or a folder (Atmosphère, yuzu / Ryujinx and patch-set layouts), order them, switch them on or off
+  - Game file mods apply at the next start; code mods ask for **Build with mods**
+  - A mod for another game or version, or one PokoMac cannot use, is refused with the reason
+- Added more ways to play **local wireless** (`[net] protocol` in `pkp.ini`, docs/multiplayer): LAN with consoles running ldn_mitm,
+  and RyuLDN rooms on a server you name; and Link Play fixes (a host can host again right away; sessions keep going after a dropped
+  packet)
+  - Link Play's default (the native protocol) is unchanged, and PokoMac still never contacts Nintendo's servers
+
+### Graphics
+- Changed the default **Render resolution** to **Console (1080p)**
+  - Before: Match window rendered at your window's size, sharper on a big screen but slower
+  - Now: Console renders at 1920 x 1080 and scales it to the window. Settings > Graphics > Render resolution > Match window brings back
+    the old behaviour; a percentage you picked before stays
+
+### Audio
+- Several sound streams at once are mixed instead of taking turns, and the output volume the game sets is what you hear
+
+### Fixes from Recompia
+- Ten fixes taken from [Recompia](https://github.com/Dittobyte/Recompia) (CREDITS.md lists them with their authors): rumble sent at most
+  30 times a second, loading screens keep the frame limit, a failed pool import is retried, GPU choice skips an older driver's copy,
+  safer Set up after a power cut, and more
+
+### For developers
+- The lifter runs as a program of its own (`recomp/lifter_cli.py`); `pkp_build.py` no longer imports it
+- An IPC request recorder (`[ipc] record`) and an old-against-new service differential (`tools/services/ipc_diff`)
+
+## 1.0.0
 
 **Update:** press **Update**, then **Set up again** once (new game hooks for the crafting Search button; your saves and shaders are kept).
 
