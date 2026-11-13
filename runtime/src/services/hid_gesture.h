@@ -40,12 +40,12 @@ private:
     Frame cur_;
     Frame prev_;                          // the frame of the last update
     hidshm::GestureState last_ = {};      // the last state made
-    int64_t last_update_ns_ = 0;
-    int64_t last_tap_ns_ = 0;
-    float dt_ = 0.0f;                     // seconds since the last update (set_touch)
-    float last_pan_dt_ = 0.0f;            // dt of the last Pan / Pinch / Rotate
-    bool force_ = true;                   // the next sample makes a state whatever it holds
-    bool press_and_tap_ = false;          // the current touch may still become a Press or a Tap
+    int64_t updated_ns_ = 0;              // time of the last update
+    int64_t tap_ns_ = 0;                  // time of the last Tap
+    float since_s_ = 0.0f;                // seconds since the last update (set_touch)
+    float pan_s_ = 0.0f;                  // since_s_ of the last Pan / Pinch / Rotate
+    bool forced_ = true;                  // the next sample makes a state whatever it holds
+    bool may_tap_ = false;                // the current touch may still become a Press or a Tap
 };
 
 }  // namespace nxrt::services::hidgesture

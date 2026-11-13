@@ -85,6 +85,9 @@ uint32_t from_libopus(int err) {
 }
 #endif
 
+template <typename... T>
+void unused(const T&...) {}
+
 int64_t micros_since(std::chrono::steady_clock::time_point t0) {
     return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
 }
@@ -103,11 +106,17 @@ uint32_t work_buffer_size(uint32_t channels) {
 }
 
 uint32_t work_buffer_size_multistream(uint32_t streams, uint32_t coupled) {
-    if (streams < 1 || streams > 255 || coupled > streams) return 0;
-    return 24 + 272 + coupled * 27240 + (streams - coupled) * 18472;
+    const bool layout_ok = streams >= 1 && streams <= 255 && coupled <= streams;
+    return layout_ok ? 296 + coupled * 27240 + (streams - coupled) * 18472 : 0;   // 296 = 24 + 272
 }
 
-bool available() { return NXRT_HAVE_OPUS != 0; }
+bool available() {
+#if NXRT_HAVE_OPUS
+    return true;
+#else
+    return false;
+#endif
+}
 
 // ---- Decoder ----------------------------------------------------------------------------------------------------------------------
 
@@ -142,50 +151,59 @@ uint32_t Decoder::init(const Config& c) {
 #endif
 }
 
-uint32_t Decoder::decode(const uint8_t* framed, size_t framed_size, int16_t* out, size_t out_values, bool reset, uint32_t* samples,
-                         uint32_t* consumed) {
-    if (samples) *samples = 0;
-    if (consumed) *consumed = 0;
+uint32_t Decoder::decode(const uint8_t* framed, size_t framed_size,
+                         int16_t* out, size_t out_values, bool reset, uint32_t* samples, uint32_t* consumed) {
+    // Both outputs are written on every path: what was decoded on success, 0 / 0 otherwise.
+    uint32_t got = 0, used = 0;
+    auto finish = [&](uint32_t result) {
+        if (samples) *samples = result ? 0 : got;
+        if (consumed) *consumed = result ? 0 : used;
+        return result;
+    };
 #if NXRT_HAVE_OPUS
-    if (!ok()) return kResInvalidState;
-    if (reset) {
-        const int err = cfg_.kind == Kind::Multistream ? opus_multistream_decoder_ctl(static_cast<OpusMSDecoder*>(state_), OPUS_RESET_STATE)
+    if (state_ == nullptr) return finish(kResInvalidState);
+    if (reset) {   // before the input is looked at
+        const int ctl = cfg_.kind == Kind::Multistream ? opus_multistream_decoder_ctl(static_cast<OpusMSDecoder*>(state_), OPUS_RESET_STATE)
                                                        : opus_decoder_ctl(static_cast<OpusDecoder*>(state_), OPUS_RESET_STATE);
-        if (const uint32_t r = from_libopus(err)) return r;
+        const uint32_t mapped = from_libopus(ctl);
+        if (mapped != 0) return finish(mapped);
     }
 #else
-    (void)reset;
+    unused(reset);
 #endif
-    if (!framed || framed_size < 8) return kResInputTooSmall;
+    if (framed == nullptr || framed_size < 8) return finish(kResInputTooSmall);
     const uint32_t payload = load_be32(framed);   // the final range at +4 is not compared
-    if (payload == 0) return kResInvalidPacket;
-    if (payload > framed_size - 8) return kResBufferTooSmall;
-    uint32_t n = 0;
-    if (const uint32_t r = decode_raw(framed + 8, payload, out, out_values, &n)) return r;
-    if (samples) *samples = n;
-    if (consumed) *consumed = 8 + payload;
-    return 0;
+    if (payload == 0) return finish(kResInvalidPacket);
+    if (framed_size - 8 < payload) return finish(kResBufferTooSmall);
+    used = 8 + payload;
+    return finish(decode_raw(framed + 8, payload, out, out_values, &got));
 }
 
 uint32_t Decoder::decode_raw(const uint8_t* packet, size_t size, int16_t* out, size_t out_values, uint32_t* samples) {
-    if (samples) *samples = 0;
+    uint32_t decoded = 0, result = kResUnimplemented;
 #if NXRT_HAVE_OPUS
-    if (!ok()) return kResInvalidState;
-    const size_t per_channel = cfg_.channels ? out_values / cfg_.channels : 0;
-    const size_t frames = std::min<size_t>(cfg_.frame_samples, per_channel);
-    if (frames == 0) return kResBufferTooSmall;
-    const int n = cfg_.kind == Kind::Multistream
-                      ? opus_multistream_decode(static_cast<OpusMSDecoder*>(state_), packet, static_cast<opus_int32>(size), out,
-                                                static_cast<int>(frames), 0)
-                      : opus_decode(static_cast<OpusDecoder*>(state_), packet, static_cast<opus_int32>(size), out,
-                                    static_cast<int>(frames), 0);
-    if (n < 0) return from_libopus(n);
-    if (samples) *samples = static_cast<uint32_t>(n);
-    return 0;
+    if (state_ == nullptr) {
+        result = kResInvalidState;
+    } else {
+        // never more per channel than the configured frame, nor than the output holds
+        const size_t room = cfg_.channels == 0 ? 0 : out_values / cfg_.channels;
+        const int frames = static_cast<int>(std::min<size_t>(room, cfg_.frame_samples));
+        if (frames <= 0) {
+            result = kResBufferTooSmall;
+        } else {
+            const opus_int32 len = static_cast<opus_int32>(size);
+            const int got = cfg_.kind == Kind::Multistream
+                                ? opus_multistream_decode(static_cast<OpusMSDecoder*>(state_), packet, len, out, frames, 0)
+                                : opus_decode(static_cast<OpusDecoder*>(state_), packet, len, out, frames, 0);
+            result = from_libopus(got < 0 ? got : OPUS_OK);
+            if (got > 0) decoded = static_cast<uint32_t>(got);
+        }
+    }
 #else
-    (void)packet, (void)size, (void)out, (void)out_values;
-    return kResUnimplemented;
+    unused(packet, size, out, out_values);
 #endif
+    if (samples) *samples = decoded;
+    return result;
 }
 
 // ---- IHardwareOpusDecoder ---------------------------------------------------------------------------------------------------------
@@ -234,9 +252,9 @@ private:
         const ipc::Buffer in = req.in_buf(0), out = req.out_buf(0);
         const bool reset = has_reset && req.arg<uint8_t>(0) != 0;
         const auto t0 = std::chrono::steady_clock::now();
-        uint32_t samples = 0, consumed = 0;
+        uint32_t per_channel = 0, used_bytes = 0;
         const uint32_t r = dec_.decode(buf_ptr(in), static_cast<size_t>(in.size), reinterpret_cast<int16_t*>(buf_mut(out)),
-                                       static_cast<size_t>(out.size / 2), reset, &samples, &consumed);
+                                       static_cast<size_t>(out.size / 2), reset, &per_channel, &used_bytes);
         const int64_t us = micros_since(t0);
         ++calls_;
         const Config& c = dec_.config();
@@ -253,14 +271,14 @@ private:
             }
             return r;
         }
-        samples_ += samples;
-        if (samples > 0) {
+        samples_ += per_channel;
+        if (per_channel > 0) {
             const int16_t* pcm = reinterpret_cast<const int16_t*>(buf_ptr(out));
-            const size_t n = size_t{samples} * c.channels;
+            const size_t n = size_t{per_channel} * c.channels;
             if (std::all_of(pcm, pcm + n, [](int16_t v) { return v == 0; })) ++silent_;
         }
-        rsp.push<uint32_t>(consumed);
-        rsp.push<uint32_t>(samples);
+        rsp.push<uint32_t>(used_bytes);
+        rsp.push<uint32_t>(per_channel);
         if (perf) rsp.push<uint64_t>(static_cast<uint64_t>(us));
         if (calls_ % 4096 == 0) summary("so far");
         return 0;
@@ -302,10 +320,16 @@ uint32_t parse_parameters(const ipc::Buffer& b, Config* out) {
     std::memcpy(&coupled, p + 0x1C, 4);
     if (kind == 0) return kAudNotSupported;
     if (kind != 1 && kind != 2) return kAudInvalidArgument;
-    if (rate != 8000 && rate != 12000 && rate != 16000 && rate != 24000 && rate != 48000) return kResInvalidRate;
-    if (channels <= 0 || channels > (kind == 1 ? 2 : 255)) return kResInvalidChannels;
-    const int64_t micros = duration / 1000;
-    if (micros != 2500 && micros != 5000 && micros != 10000 && micros != 20000) return kAudInvalidArgument;
+    switch (rate) {   // the Opus rates
+    case 8000: case 12000: case 16000: case 24000: case 48000: break;
+    default: return kResInvalidRate;
+    }
+    const int32_t most_channels = kind == 1 ? 2 : 255;
+    if (channels < 1 || channels > most_channels) return kResInvalidChannels;
+    switch (duration / 1000) {   // in microseconds, truncated: 2.5, 5, 10 or 20 ms
+    case 2500: case 5000: case 10000: case 20000: break;
+    default: return kAudInvalidArgument;
+    }
     const uint64_t frame = (static_cast<uint64_t>(rate) * static_cast<uint64_t>(duration) + 999999999ull) / 1000000000ull;
     Config c;
     c.kind = static_cast<Kind>(kind);
@@ -367,15 +391,25 @@ void release_tag(uint16_t tag) {
 
 // The 0x60-byte layout OpenManager gets (24 u32).
 struct Layout {
-    uint32_t version, manager_size, manager_offset, instances_size, instances_offset, transfer_queue_size, transfer_queue_offset,
-        transfer_size, io_size, io_offset, completion_size, completion_offset, process_size, instance_stride, instance_count,
-        input_stride, output_stride, io_count;
-    uint32_t reserved[6];
+    uint32_t version;                                      // 0x00
+    uint32_t manager_size, manager_offset;                 // 0x04: in the transfer memory
+    uint32_t instances_size, instances_offset;             // 0x0C
+    uint32_t transfer_queue_size, transfer_queue_offset;   // 0x14
+    uint32_t transfer_size;                                // 0x1C
+    uint32_t io_size, io_offset;                           // 0x20: in the process memory
+    uint32_t completion_size, completion_offset;           // 0x28
+    uint32_t process_size;                                 // 0x30
+    uint32_t instance_stride, instance_count;              // 0x34
+    uint32_t input_stride, output_stride, io_count;        // 0x3C
+    uint32_t reserved[6];                                  // 0x48
 };
 static_assert(sizeof(Layout) == 0x60, "Layout is 0x60 bytes");
 
 // Two regions overlap when the one starting later starts inside the other (at equal offsets: when `as` is not 0).
-bool overlaps(uint64_t a, uint64_t as, uint64_t b, uint64_t bs) { return a <= b ? b - a < as : a - b < bs; }
+bool overlaps(uint64_t a, uint64_t as, uint64_t b, uint64_t bs) {
+    if (b >= a) return b - a < as;
+    return a - b < bs;
+}
 bool inside(uint64_t offset, uint64_t size, uint64_t total) { return offset <= total && size <= total - offset; }
 
 uint32_t check_layout(const Layout& l, uint64_t tsize, uint64_t paddr, uint64_t psize, uint64_t props) {
@@ -443,13 +477,13 @@ private:
         if (faulted_) return kAudOperationFailed;
         const uint32_t consumer = word(0x44).load(std::memory_order_acquire);
         const uint32_t producer = word(0x04).load(std::memory_order_acquire);
-        if (consumer >= capacity_ || producer != write_) return kAudInvalidArgument;
-        const uint32_t consumed = (consumer + capacity_ - reclaimed_) % capacity_;
-        if (consumed > outstanding_) return kAudInvalidArgument;
+        if (consumer >= capacity_ || producer != next_entry_) return kAudInvalidArgument;
+        const uint32_t consumed = (consumer + capacity_ - last_consumer_) % capacity_;
+        if (consumed > in_flight_) return kAudInvalidArgument;
         for (Lease& s : leases_)
-            if (s.held && (s.completion + capacity_ - reclaimed_) % capacity_ < consumed) s.held = false;
-        reclaimed_ = consumer;
-        outstanding_ -= consumed;
+            if (s.held && (s.completion + capacity_ - last_consumer_) % capacity_ < consumed) s.held = false;
+        in_flight_ -= consumed;
+        last_consumer_ = consumer;   // the next look counts from here
         return 0;
     }
 
@@ -464,15 +498,16 @@ private:
         if (const uint32_t r = instance_size(c, &need)) return r;
         if (need > l_.instance_stride) return kResBufferTooSmall;
         if (align_up(uint64_t{c.frame_samples} * c.channels * 2, 64) > l_.output_stride) return kResBufferTooSmall;
-        auto d = std::make_unique<Decoder>();
-        if (const uint32_t r = d->init(c)) return r;
-        decoders_[id] = std::move(d);
+        std::unique_ptr<Decoder> fresh(new Decoder);
+        const uint32_t err = fresh->init(c);
+        if (err != 0) return err;   // not stored: the id stays free
+        decoders_[id].swap(fresh);
         return 0;
     }
 
     uint32_t finalize(Request& req) {
         std::lock_guard<std::mutex> lk(mu_);
-        if (const uint32_t r = reclaim()) return r;
+        if (uint32_t err = reclaim(); err != 0) return err;
         const uint32_t id = req.arg<uint32_t>(0);
         if (id >= l_.instance_count || !decoders_[id]) return kAudInvalidArgument;
         for (const Lease& s : leases_)
@@ -491,60 +526,63 @@ private:
 
     uint32_t execute(Request& req) {
         std::lock_guard<std::mutex> lk(mu_);
-        if (const uint32_t r = reclaim()) return r;
+        const uint32_t freed = reclaim();
+        if (freed != 0) return freed;
         const ipc::Buffer b = req.in_buf(0);
         if (b.size % 16 != 0 || b.size / 16 > l_.io_count) return kAudInvalidArgument;
         const size_t count = static_cast<size_t>(b.size / 16);
         if (count && !b.addr) return kAudInvalidArgument;   // deviation: tasks at address 0 (the older file faulted on the read)
-        if (count > l_.io_count - outstanding_) return kAudBufferCountReached;
+        if (count > l_.io_count - in_flight_) return kAudBufferCountReached;
         std::vector<Task> tasks(count);
         if (count) std::memcpy(tasks.data(), buf_ptr(b), count * sizeof(Task));
         std::vector<bool> taken(l_.io_count, false);
-        for (const Task& t : tasks) {
-            if (t.tag != tag_ || t.instance >= l_.instance_count || !decoders_[t.instance] || t.io >= l_.io_count ||
-                t.input_bytes > l_.input_stride || t.reset > 1 || t.notify > 1 || t.reserved != 0)
+        for (size_t i = 0; i < count; ++i) {   // every task is checked before any runs
+            const Task& job = tasks[i];
+            if (job.tag != tag_ || job.instance >= l_.instance_count || !decoders_[job.instance] || job.io >= l_.io_count ||
+                job.input_bytes > l_.input_stride || job.reset > 1 || job.notify > 1 || job.reserved != 0)
                 return kAudInvalidArgument;
-            if (leases_[t.io].held || taken[t.io]) return kAudBufferCountReached;
-            taken[t.io] = true;
+            if (leases_[job.io].held || taken[job.io]) return kAudBufferCountReached;
+            taken[job.io] = true;
         }
         const uint64_t slot_stride = uint64_t{l_.input_stride} + l_.output_stride;
-        for (const Task& t : tasks) {
-            Decoder& dec = *decoders_[t.instance];
-            uint8_t* slot = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(process_ + l_.io_offset + t.io * slot_stride));
+        for (size_t i = 0; i < count; ++i) {
+            const Task& job = tasks[i];
+            Decoder& dec = *decoders_[job.instance];
+            uint8_t* slot = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(process_ + l_.io_offset + job.io * slot_stride));
             const auto t0 = std::chrono::steady_clock::now();
             uint32_t samples = 0;
-            const uint32_t r = dec.decode(slot, t.input_bytes, reinterpret_cast<int16_t*>(slot + l_.input_stride), l_.output_stride / 2,
-                                          t.reset != 0, &samples, nullptr);
+            const uint32_t r = dec.decode(slot, job.input_bytes, reinterpret_cast<int16_t*>(slot + l_.input_stride), l_.output_stride / 2,
+                                          job.reset != 0, &samples, nullptr);
             const int64_t ns = nanos_since(t0);
             uint8_t entry[0x40] = {};
-            std::memcpy(entry + 0x00, &t.tag, 2);
-            std::memcpy(entry + 0x02, &t.instance, 2);
-            std::memcpy(entry + 0x04, &t.io, 2);
-            std::memcpy(entry + 0x06, &t.sequence, 2);
+            std::memcpy(entry + 0x00, &job.tag, 2);
+            std::memcpy(entry + 0x02, &job.instance, 2);
+            std::memcpy(entry + 0x04, &job.io, 2);
+            std::memcpy(entry + 0x06, &job.sequence, 2);
             std::memcpy(entry + 0x08, &ns, 8);
             const uint32_t out_bytes = r ? 0 : samples * dec.config().channels * 2;
             std::memcpy(entry + 0x10, &out_bytes, 4);
             std::memcpy(entry + 0x14, &r, 4);
-            std::memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(ring_ + 0x80 + uint64_t{write_} * 0x40)), entry, sizeof entry);
-            uint32_t expect = write_;
-            if (!word(0x04).compare_exchange_strong(expect, (write_ + 1) % capacity_, std::memory_order_acq_rel)) {
+            std::memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(ring_ + 0x80 + uint64_t{next_entry_} * 0x40)), entry, sizeof entry);
+            uint32_t expect = next_entry_;
+            if (!word(0x04).compare_exchange_strong(expect, (next_entry_ + 1) % capacity_, std::memory_order_acq_rel)) {
                 faulted_ = true;
                 event_.signal();
                 NXLOG_E("hwacod", "manager %u: the game moved the producer index (%u, expected %u) while a batch ran: faulted", tag_,
-                        expect, write_);
+                        expect, next_entry_);
                 return kAudOperationFailed;
             }
-            leases_[t.io] = {true, write_, t.instance};
-            write_ = (write_ + 1) % capacity_;
-            ++outstanding_;
-            if (t.notify) event_.signal();
+            leases_[job.io] = {true, next_entry_, job.instance};
+            next_entry_ = (next_entry_ + 1) % capacity_;
+            ++in_flight_;
+            if (job.notify != 0) event_.signal();   // the game asked to be woken for this one
             if (r && ++failed_logged_ <= 4)
-                NXLOG_W("hwacod", "manager %u: instance %u, IO slot %u, sequence %u: decode of %u bytes failed 0x%x", tag_, t.instance,
-                        t.io, t.sequence, t.input_bytes, r);
+                NXLOG_W("hwacod", "manager %u: instance %u, IO slot %u, sequence %u: decode of %u bytes failed 0x%x", tag_, job.instance,
+                        job.io, job.sequence, job.input_bytes, r);
         }
         if (count && ++batches_logged_ <= 3)
-            NXLOG_I("hwacod", "manager %u: batch of %zu tasks published, producer index %u, %u outstanding", tag_, count, write_,
-                    outstanding_);
+            NXLOG_I("hwacod", "manager %u: batch of %zu tasks published, producer index %u, %u outstanding", tag_, count, next_entry_,
+                    in_flight_);
         return 0;
     }
 
@@ -556,7 +594,7 @@ private:
     std::vector<std::unique_ptr<Decoder>> decoders_;
     std::vector<Lease> leases_;
     ServiceEvent event_;
-    uint32_t write_ = 0, reclaimed_ = 0, outstanding_ = 0;
+    uint32_t next_entry_ = 0, last_consumer_ = 0, in_flight_ = 0;
     bool faulted_ = false;
     uint32_t failed_logged_ = 0, batches_logged_ = 0;
 };

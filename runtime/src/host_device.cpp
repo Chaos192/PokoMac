@@ -83,6 +83,13 @@ Switch config_switch(const char* section, const char* key) {
     return Switch::kAuto;
 }
 
+bool detect_wine();
+
+bool detect_wine_once() {
+    static const bool under_wine = detect_wine();
+    return under_wine;
+}
+
 // ---- the keyboard URLs, handed to Steam one at a time by one worker (FIFO; never stopped, never destroyed)
 
 struct UrlQueue {
@@ -123,19 +130,20 @@ void hand_to_steam(const std::string& url) {
             return;
         }
     }
-    if (host_is_wine() && run_with("C:\\windows\\system32\\winebrowser.exe", url)) {
+    if (detect_wine_once() && run_with("C:\\windows\\system32\\winebrowser.exe", url)) {
         NXLOG_I(kTag, "Steam keyboard: %s (through winebrowser)", url.c_str());
         return;
     }
-    const INT_PTR r = reinterpret_cast<INT_PTR>(ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
-    if (r > 32) NXLOG_I(kTag, "Steam keyboard: %s (ShellExecute)", url.c_str());
-    else NXLOG_W(kTag, "Steam keyboard: %s could not be handed to Steam (no steam.exe, ShellExecute %lld)", url.c_str(), static_cast<long long>(r));
+    const HINSTANCE shell = ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    const long long code = static_cast<long long>(reinterpret_cast<INT_PTR>(shell));   // > 32: handed over
+    if (code > 32) NXLOG_I(kTag, "Steam keyboard: %s (ShellExecute)", url.c_str());
+    else NXLOG_W(kTag, "Steam keyboard: %s could not be handed to Steam (no steam.exe, ShellExecute %lld)", url.c_str(), code);
 }
 
 void queue_url(std::string url) {
     UrlQueue& q = url_queue();
     std::lock_guard<std::mutex> g(q.m);
-    q.urls.push_back(std::move(url));
+    q.urls.emplace_back(std::move(url));
     if (!q.worker) {
         q.worker = true;
         std::thread([&q] {
@@ -151,81 +159,102 @@ void queue_url(std::string url) {
             }
         }).detach();
     }
-    q.cv.notify_one();
+    q.cv.notify_all();   // the one worker
+}
+
+// The answers, each worked out once per process (C++ static initialisation is thread-safe).
+bool detect_handheld() {
+    bool yes = false;
+    std::string why;
+    switch (config_switch("host", "handheld")) {
+    case Switch::kOn:
+        yes = true;
+        why = "[host] handheld = on";
+        break;
+    case Switch::kOff:
+        why = "[host] handheld = off";
+        break;
+    case Switch::kAuto:
+        if (env("SteamDeck", 16) == "1") {
+            yes = true;
+            why = "Steam's SteamDeck=1";
+            break;
+        }
+        const std::string p = product(), f = family();
+        yes = p == "jupiter" || p == "galileo" || starts(f, "legion go s") || starts(p, "rog ally") || starts(f, "rog ally");
+        why = yes ? "board " + p + " / " + f : "not a known handheld (board '" + p + "' / '" + f + "')";
+        break;
+    }
+    NXLOG_I(kTag, "handheld: %s (%s)", yes ? "yes" : "no", why.c_str());
+    return yes;
+}
+
+bool detect_steam_deck() {
+    const std::string p = product();
+    const bool yes = env("SteamDeck", 16) == "1" || p == "jupiter" || p == "galileo";
+    NXLOG_I(kTag, "steam deck: %s (board '%s')", yes ? "yes" : "no", p.c_str());
+    return yes;
+}
+
+bool detect_wine() {
+    const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    return ntdll != nullptr && GetProcAddress(ntdll, "wine_get_version") != nullptr;
+}
+
+// Whether Steam's keyboard is wanted, and why (the config, else: never outside Wine, then the Deck, gamepad UI, SteamOS).
+bool keyboard_wanted(std::string* why) {
+    switch (config_switch("applet", "steam_keyboard")) {
+    case Switch::kOn:
+        *why = "[applet] steam_keyboard = on";
+        return true;
+    case Switch::kOff:
+        *why = "[applet] steam_keyboard = off";
+        return false;
+    case Switch::kAuto:
+        break;
+    }
+    if (!detect_wine_once()) {
+        *why = "Windows (a steam:// URL would start Steam if it is not running)";
+        return false;
+    }
+    if (host_is_steam_deck()) {
+        *why = "Steam Deck";
+        return true;
+    }
+    if (env("SteamGamepadUI", 64) == "1") {
+        *why = "Steam's gamepad UI (SteamGamepadUI=1)";
+        return true;
+    }
+    if (env("SteamOS", 64) == "1") {
+        *why = "SteamOS (SteamOS=1)";
+        return true;
+    }
+    *why = "Wine, but not a Steam Deck, SteamOS or Steam's gamepad UI";
+    return false;
 }
 
 }  // namespace
 
 bool host_is_handheld() {
-    static const bool handheld = [] {
-        bool yes = false;
-        std::string why;
-        const Switch s = config_switch("host", "handheld");
-        if (s == Switch::kOn) {
-            yes = true;
-            why = "[host] handheld = on";
-        } else if (s == Switch::kOff) {
-            why = "[host] handheld = off";
-        } else if (env("SteamDeck", 16) == "1") {
-            yes = true;
-            why = "Steam's SteamDeck=1";
-        } else {
-            const std::string p = product(), f = family();
-            yes = p == "jupiter" || p == "galileo" || starts(f, "legion go s") || starts(p, "rog ally") || starts(f, "rog ally");
-            why = yes ? "board " + p + " / " + f : "not a known handheld (board '" + p + "' / '" + f + "')";
-        }
-        NXLOG_I(kTag, "handheld: %s (%s)", yes ? "yes" : "no", why.c_str());
-        return yes;
-    }();
-    return handheld;
+    static const bool handheld_host = detect_handheld();
+    return handheld_host;
 }
 
 bool host_is_steam_deck() {
-    static const bool deck = [] {
-        const std::string p = product();
-        const bool yes = env("SteamDeck", 16) == "1" || p == "jupiter" || p == "galileo";
-        NXLOG_I(kTag, "steam deck: %s (board '%s')", yes ? "yes" : "no", p.c_str());
-        return yes;
-    }();
-    return deck;
+    static const bool deck_host = detect_steam_deck();
+    return deck_host;
 }
 
-bool host_is_wine() {
-    static const bool wine = [] {
-        const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-        return ntdll != nullptr && GetProcAddress(ntdll, "wine_get_version") != nullptr;
-    }();
-    return wine;
-}
+bool host_is_wine() { return detect_wine_once(); }
 
 bool host_steam_keyboard_wanted() {
-    static const bool wanted = [] {
-        bool yes = false;
+    static const bool wanted_here = [] {
         std::string why;
-        const Switch s = config_switch("applet", "steam_keyboard");
-        if (s == Switch::kOn) {
-            yes = true;
-            why = "[applet] steam_keyboard = on";
-        } else if (s == Switch::kOff) {
-            why = "[applet] steam_keyboard = off";
-        } else if (!host_is_wine()) {
-            why = "Windows (a steam:// URL would start Steam if it is not running)";
-        } else if (host_is_steam_deck()) {
-            yes = true;
-            why = "Steam Deck";
-        } else if (env("SteamGamepadUI", 64) == "1") {
-            yes = true;
-            why = "Steam's gamepad UI (SteamGamepadUI=1)";
-        } else if (env("SteamOS", 64) == "1") {
-            yes = true;
-            why = "SteamOS (SteamOS=1)";
-        } else {
-            why = "Wine, but not a Steam Deck, SteamOS or Steam's gamepad UI";
-        }
+        const bool yes = keyboard_wanted(&why);
         NXLOG_I(kTag, "Steam keyboard for text the game asks for: %s (%s)", yes ? "yes" : "no", why.c_str());
         return yes;
     }();
-    return wanted;
+    return wanted_here;
 }
 
 void host_steam_keyboard_open(int x, int y, int w, int h) {
@@ -236,6 +265,9 @@ void host_steam_keyboard_open(int x, int y, int w, int h) {
     queue_url(url);
 }
 
-void host_steam_keyboard_close() { queue_url("steam://close/keyboard"); }
+void host_steam_keyboard_close() {
+    static const char kClose[] = "steam://close/keyboard";
+    queue_url(kClose);
+}
 
 }  // namespace nxrt

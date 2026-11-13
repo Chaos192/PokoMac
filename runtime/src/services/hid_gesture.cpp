@@ -60,22 +60,22 @@ void Recognizer::set_touch(const hidshm::TouchState* touches, uint32_t count, in
     }
     f.detection_count = prev_.detection_count;
     cur_ = f;
-    const int64_t t = last_update_ns_ > ns ? last_tap_ns_ : ns;   // a clock that went back: measure from the last tap
-    dt_ = static_cast<float>(t - last_update_ns_) / kNsPerSecond;
+    const int64_t t = updated_ns_ > ns ? tap_ns_ : ns;   // a clock that went back: measure from the last tap
+    since_s_ = static_cast<float>(t - updated_ns_) / kNsPerSecond;
 }
 
 bool Recognizer::needs_update() {
-    if (force_) {
-        force_ = false;
+    if (forced_) {
+        forced_ = false;
         return true;
     }
     if (!same_points(cur_, prev_)) return true;
-    if (last_.type == kTouch && last_.point_count == 1 && dt_ > kPressSeconds) return press_and_tap_;
+    if (last_.type == kTouch && last_.point_count == 1 && since_s_ > kPressSeconds) return may_tap_;
     return false;
 }
 
 void Recognizer::update(hidshm::GestureState& next, int64_t ns) {
-    last_update_ns_ = ns;
+    updated_ns_ = ns;
     hidshm::GestureState g{};
     g.sampling = last_.sampling + 1;
     g.type = kIdle;
@@ -90,20 +90,20 @@ void Recognizer::update(hidshm::GestureState& next, int64_t ns) {
         ++cur_.detection_count;
         if (last_.type != kCancel) {
             attributes = kAttrNewTouch;
-            press_and_tap_ = true;
+            may_tap_ = true;
         }
     } else if (now > 0 && now != before) {   // fingers added or lifted while touching
         type = kCancel;
-        press_and_tap_ = false;
+        may_tap_ = false;
         for (hidshm::GesturePoint& p : cur_.points) p = {};
         cur_.active = 0;
         cur_.mid = {};
     } else if (now > 0 && !same_points(cur_, prev_)) {   // moved
         g.delta.x = cur_.mid.x - last_.pos.x;
         g.delta.y = cur_.mid.y - last_.pos.y;
-        g.vel_x = static_cast<float>(g.delta.x) / dt_;
-        g.vel_y = static_cast<float>(g.delta.y) / dt_;
-        last_pan_dt_ = dt_;
+        g.vel_x = static_cast<float>(g.delta.x) / since_s_;
+        g.vel_y = static_cast<float>(g.delta.y) / since_s_;
+        pan_s_ = since_s_;
         type = kPan;
         if (std::abs(cur_.avg - prev_.avg) > kPinchDistance) {
             type = kPinch;
@@ -121,12 +121,12 @@ void Recognizer::update(hidshm::GestureState& next, int64_t ns) {
     } else if (before > 0) {   // all fingers lifted
         switch (last_.type) {
         case kTouch:
-            force_ = true;
-            if (press_and_tap_) {
+            forced_ = true;
+            if (may_tap_) {
                 type = kTap;
                 cur_ = prev_;   // the tap is reported where the finger was
-                const float since = static_cast<float>(last_update_ns_ - last_tap_ns_) / kNsPerSecond;
-                last_tap_ns_ = ns;
+                const float since = static_cast<float>(updated_ns_ - tap_ns_) / kNsPerSecond;
+                tap_ns_ = ns;
                 if (since < kDoubleTapSeconds) attributes = kAttrDoubleTap;
             } else {
                 type = kCancel;
@@ -138,13 +138,13 @@ void Recognizer::update(hidshm::GestureState& next, int64_t ns) {
         case kPinch:
         case kRotate:
             type = kComplete;
-            force_ = true;
+            forced_ = true;
             break;
         case kPan: {
-            g.vel_x = static_cast<float>(last_.delta.x) / (last_pan_dt_ + dt_);
-            g.vel_y = static_cast<float>(last_.delta.y) / (last_pan_dt_ + dt_);
+            g.vel_x = static_cast<float>(last_.delta.x) / (pan_s_ + since_s_);
+            g.vel_y = static_cast<float>(last_.delta.y) / (pan_s_ + since_s_);
             const float speed = std::sqrt(g.vel_x * g.vel_x + g.vel_y * g.vel_y);
-            force_ = true;
+            forced_ = true;
             if (speed > kSwipeSpeed) {
                 type = kSwipe;
                 cur_ = prev_;   // reported at the last moved position

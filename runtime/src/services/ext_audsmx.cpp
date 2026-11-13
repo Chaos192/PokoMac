@@ -60,10 +60,11 @@ struct Stream {
     const uint32_t flags;
 
     std::mutex mu;   // everything below
-    bool open = false, engaged = false;
+    bool open = false;      // OpenStream .. CloseStream
+    bool engaged = false;   // the mixer moves its frames
     uint32_t slots = 0, frame_bytes = 0, sample_type = kTypeS16;
     uint32_t data_mode = 0;
-    int32_t threshold = 0;
+    int32_t data_threshold = 0;
     float gain = 1.0f;
     ServiceEvent state_event, data_event;
     uint32_t voice = 0;
@@ -84,10 +85,17 @@ struct Stream {
     }
     static uint32_t filled(uint32_t read, uint32_t write, uint32_t slots) { return (write + slots - read) % slots; }
 
-    // The data event: signalled while the game can move at least `threshold` frames (read them from an input, write them to an output).
+    // The data event: signalled while the game can move at least `data_threshold` frames (read from an input, written to an output).
     void data_rule(uint32_t now_filled) {
         const uint32_t available = input ? now_filled : slots - 1 - now_filled;
-        if (data_mode == 2 && int64_t{available} >= threshold) data_event.signal();
+        if (data_mode == 2 && int64_t{available} >= data_threshold) data_event.signal();
+    }
+    // CloseStream: nothing moves any more, the data event is off.
+    void close() {
+        open = false;
+        engaged = false;
+        data_mode = 0;
+        state_event.signal();
     }
     void set_engaged(bool on) {
         if (engaged == on) return;
@@ -99,7 +107,7 @@ struct Stream {
 // Every stream of the process, in creation order (weak: the stream object owns its stream), and the mixer thread.
 struct Mixer {
     std::mutex mu;
-    std::vector<std::weak_ptr<Stream>> streams;
+    std::vector<std::weak_ptr<Stream>> entries;
     bool running = false;
 };
 Mixer& mixer() {
@@ -152,7 +160,7 @@ void tick_stream(Stream& s) {
                 } else {
                     int16_t x;
                     std::memcpy(&x, f + 2 * c, 2);
-                    v = static_cast<float>(x) / 32768.0f;
+                    v = float(x) * (1.0f / 32768.0f);   // exact: a power of two
                 }
                 pcm[2 * k + c] = to_s16(v, s.gain);
             }
@@ -176,14 +184,14 @@ void mixer_thread() {
         {
             Mixer& m = mixer();
             std::lock_guard<std::mutex> lk(m.mu);
-            live.reserve(m.streams.size());
-            auto keep = m.streams.begin();
-            for (auto& w : m.streams)
+            live.reserve(m.entries.size());
+            auto keep = m.entries.begin();
+            for (auto& w : m.entries)
                 if (auto s = w.lock()) {
                     live.push_back(std::move(s));
                     *keep++ = w;
                 }
-            m.streams.erase(keep, m.streams.end());
+            m.entries.erase(keep, m.entries.end());
         }
         for (const auto& s : live) tick_stream(*s);
     }
@@ -192,7 +200,7 @@ void mixer_thread() {
 void mixer_add(const std::shared_ptr<Stream>& s) {
     Mixer& m = mixer();
     std::lock_guard<std::mutex> lk(m.mu);
-    m.streams.push_back(s);
+    m.entries.emplace_back(s);
     if (!m.running) {
         m.running = true;
         std::thread(mixer_thread).detach();
@@ -202,9 +210,10 @@ void mixer_add(const std::shared_ptr<Stream>& s) {
 std::shared_ptr<Stream> mixer_find(uint32_t id) {
     Mixer& m = mixer();
     std::lock_guard<std::mutex> lk(m.mu);
-    for (const auto& w : m.streams)
-        if (auto s = w.lock())
-            if (s->id == id) return s;
+    for (const std::weak_ptr<Stream>& entry : m.entries) {
+        std::shared_ptr<Stream> s = entry.lock();
+        if (s && s->id == id) return s;
+    }
     return nullptr;
 }
 
@@ -245,7 +254,7 @@ uint32_t purge_stream(Stream& s, Request& req, Response& rsp) {
     uint32_t read, write;
     if (!s.cursors(&read, &write)) return kInvalidAddress;
     const uint32_t filled = Stream::filled(read, write, s.slots);
-    const uint32_t n = frames == 0 || frames > filled ? filled : frames;
+    const uint32_t n = frames == 0 ? filled : std::min(frames, filled);   // 0: all of them
     uint32_t expect = read;
     if (!s.cursor(kReadCursor).compare_exchange_strong(expect, (read + n) % s.slots, std::memory_order_acq_rel)) return kOperationFailed;
     s.data_rule(filled - n);
@@ -258,9 +267,7 @@ std::shared_ptr<Service> make_stream_object(std::shared_ptr<Stream> st) {
         s.add_cmd(0, "OpenStream", [st](Request& req, Response&) { return open_stream(*st, req); });
         s.add_cmd(1, "CloseStream", [st](Request&, Response&) -> uint32_t {
             std::lock_guard<std::mutex> lk(st->mu);
-            st->open = st->engaged = false;
-            st->data_mode = 0;
-            st->state_event.signal();
+            st->close();   // also when it was not open
             return 0;
         });
         s.add_cmd(2, "GetStreamState", [st](Request&, Response& rsp) -> uint32_t {
@@ -276,28 +283,29 @@ std::shared_ptr<Service> make_stream_object(std::shared_ptr<Stream> st) {
         s.add_cmd(4, "SetStreamGain", [st](Request& req, Response&) -> uint32_t {
             const float gain = req.arg<float>(0);
             if (req.arg<int64_t>(8) != 0) return kNotSupported;   // no ramps
-            if (!(gain >= 0.0f && gain <= 128.0f)) return kInvalidArgument;
+            const bool in_range = gain >= 0.0f && gain <= 128.0f;   // false for NaN
+            if (!in_range) return kInvalidArgument;
             std::lock_guard<std::mutex> lk(st->mu);
             st->gain = gain;
             return 0;
         });
         s.add_cmd(5, "AcquireStreamStateChangeEvent", [st](Request&, Response& rsp) -> uint32_t {
-            rsp.out_copy.push_back(st->state_event.new_handle());
+            rsp.out_copy.emplace_back(st->state_event.new_handle());
             return 0;
         });
         s.add_cmd(6, "ReleaseStreamStateChangeEvent", [](Request&, Response&) -> uint32_t { return 0; });
         s.add_cmd(7, "AcquireStreamDataEvent", [st](Request& req, Response& rsp) -> uint32_t {
             const uint32_t mode = req.arg<uint32_t>(0);
             const int32_t threshold = req.arg<int32_t>(4);
-            if (mode != 0 && mode != 2) return kNotSupported;
+            if (mode == 1 || mode > 2) return kNotSupported;   // 0 off, 2 signalled at a threshold
             std::lock_guard<std::mutex> lk(st->mu);
-            if (!st->open || threshold < 0 || static_cast<uint32_t>(threshold) >= st->slots) return kInvalidArgument;
+            if (!st->open || threshold < 0 || int64_t{threshold} >= int64_t{st->slots}) return kInvalidArgument;
             uint32_t read, write;
             if (!st->cursors(&read, &write)) return kInvalidAddress;
             st->data_mode = mode;
-            st->threshold = threshold;
+            st->data_threshold = threshold;
             st->data_rule(Stream::filled(read, write, st->slots));
-            rsp.out_copy.push_back(st->data_event.new_handle());
+            rsp.out_copy.emplace_back(st->data_event.new_handle());
             return 0;
         });
         s.add_cmd(8, "ReleaseStreamDataEvent", [st](Request&, Response&) -> uint32_t {
@@ -330,9 +338,10 @@ struct UserSession {
 uint32_t create_stream(UserSession& us, Request& req, Response& rsp) {
     const uint32_t device = req.arg<uint32_t>(0x00), flags = req.arg<uint32_t>(0x04);
     const uint64_t ring = req.arg<uint64_t>(0x10), size = req.arg<uint64_t>(0x18);   // 0x08: the applet resource user id, unused
-    if (device != 1 && device != 2) return kInvalidArgument;
-    const bool input = device == 2;
-    if (flags != (input ? 2u : 0x24u)) return kNotSupported;
+    const bool output = device == 1, input = device == 2;
+    if (!output && !input) return kInvalidArgument;
+    const uint32_t want_flags = input ? 2u : 0x24u;
+    if (flags != want_flags) return kNotSupported;
     if (ring == 0 || ring % 0x1000 != 0 || size % 0x1000 != 0 || size < 0x2000 || !mem::is_mapped(ring, size)) return kInvalidAddress;
     const uint32_t id = ++g_stream_ids;
     auto st = std::make_shared<Stream>(id, input, ring, size, flags);

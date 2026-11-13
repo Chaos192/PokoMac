@@ -60,6 +60,9 @@ if(NXRT_IPC_DIFF_ALT)
     if(TARGET pokopia_coop)   # the library links it privately; network.cpp's and ldn.cpp's #include "coop.h" needs its folder here too
         target_link_libraries(nxrt_ipc_alt PRIVATE pokopia_coop)
     endif()
+    if(TARGET opus)           # the same for audio_opus.cpp's <opus.h> (PokoMac: an alt audio_opus.cpp)
+        target_link_libraries(nxrt_ipc_alt PRIVATE opus)
+    endif()
     # the alt files' own #include "x.h" of their neighbours resolve in the source folders
     target_include_directories(nxrt_ipc_alt BEFORE PRIVATE "${NXRT_ROOT}/src/services" "${NXRT_ROOT}/src")
     if(NXRT_IPC_DIFF_ALT_QUIET)
