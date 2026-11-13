@@ -14,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "nxrt/dispatch.h"
 #include "nxrt/gauge.h"
@@ -39,6 +40,7 @@ std::mutex g_lock;                                    // registration and cleari
 std::unique_ptr<Entry> g_owned[kMaxListed];           // owns the entries, registration order
 std::atomic<Entry*> g_list[kMaxListed];               // the same, for lock-free readers: entries [0, g_count) are valid
 std::atomic<size_t> g_count{0};
+std::unordered_set<std::string> g_def_overrides;      // module_override_definition: names whose definitions dispatch to the host (g_lock)
 std::atomic<Entry*> g_by_index[kMaxModules];
 std::atomic<uint64_t> g_import_calls{0};
 std::mutex g_type_lock;                               // resolved imported typeinfo slots (ABI 3 NxEh.type_syms), keyed by slot address
@@ -129,6 +131,25 @@ uint64_t find_export(const char* name, const NxModule* except) {
 
 }  // namespace
 
+
+// module_override_definition, with g_lock held: the definitions in `nx` of the names in `names` (all of g_def_overrides when null) that
+// are lifted functions dispatch to their HLE handlers. Returns how many were bound.
+static size_t bind_definitions_locked(const NxModule* nx, const std::unordered_set<std::string>* names) {
+    if (g_def_overrides.empty()) return 0;
+    const std::unordered_set<std::string>& want = names ? *names : g_def_overrides;
+    size_t bound = 0;
+    for (int i = 0; i < nx->nsyms; i++) {
+        const DynSym& s = nx->syms[i];
+        if (!s.defined || !s.name || !want.count(s.name)) continue;
+        const uint64_t a = nxmodule_symbol_address(nx, i);
+        HleFn fn = hle_lookup(s.name);
+        if (!a || !fn || !fn_lookup(a)) continue;   // code only: a lifted function at the definition, and a registered handler
+        fn_register(a, fn);
+        bound++;
+    }
+    return bound;
+}
+
 RegResult nxmodule_register(Module* image, const NxModule* nx, uint32_t abi_version) {
     if (!nx) return refuse(RegStatus::Invalid, nx, "null descriptor");
     if (abi_version < kAbiVersionOldest || abi_version > kAbiVersion)
@@ -169,6 +190,8 @@ RegResult nxmodule_register(Module* image, const NxModule* nx, uint32_t abi_vers
     g_owned[n] = std::move(e);
     g_count.store(n + 1, std::memory_order_release);
     invalidate_caches_locked();
+    if (const size_t b = bind_definitions_locked(nx, nullptr))
+        NXLOG_I("loader", "%s: %zu definitions of symbols the host replaces dispatch to the host (calls by address: vtables, function pointers)", nx->name, b);
     NXLOG_I("loader", "registered lifted module %s (index %u, ABI %u): %zu of %d functions, %d dynamic symbols, %d resume pads, %d functions with mid-function entries, unwind tables %s",
             nx->name, nx->index, abi_version, r.functions, nx->nfns, nx->nsyms, nx->nresume, abi_version >= 4 ? nx->nentries : 0, nx->eh ? "yes" : "no");
     return r;
@@ -225,6 +248,7 @@ void nxmodules_clear() {
         g_owned[k].reset();
     }
     g_import_calls = 0;
+    g_def_overrides.clear();
     std::lock_guard<std::mutex> tk(g_type_lock);
     g_type_cache.clear();
 }
@@ -303,4 +327,16 @@ void count_import() {
 }
 }  // namespace detail
 
+}  // namespace nxrt
+
+namespace nxrt {
+void module_override_definition(const char* sym) {
+    if (!sym || !*sym) return;
+    module_override_symbol(sym);
+    std::lock_guard<std::mutex> lk(g_lock);
+    g_def_overrides.insert(sym);
+    const std::unordered_set<std::string> one{sym};
+    for (size_t k = 0; k < g_count.load(); k++)                       // modules registered before
+        if (const Entry* e = g_list[k].load()) bind_definitions_locked(e->nx, &one);
+}
 }  // namespace nxrt

@@ -1,309 +1,320 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Settings services set (nn::settings::ISettingsServer) and set:sys (nn::settings::ISystemSettingsServer), IPC level (S3c).
-// Adapted from ScarletNX src/nx/hle/services/set.c and set.swipc (GPL-3.0-or-later): the language order, the region mapping, the
-// firmware version layout and the settings-item lookup.
-// Adapted from Ryujinx src/Ryujinx.HLE/HOS/Services/Settings/ISettingsServer.cs, ISystemSettingsServer.cs, ResultCode.cs and
-// NxSettings.cs (MIT): the not-found and buffer-size handling, the settings table, result module 105.
-// Command ids, layouts and enum values follow https://switchbrew.org/wiki/Settings_services and
-// https://switchbrew.org/wiki/System_Version_Title (SDK 12.x era).
+// Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+// Portions Copyright (c) 2026 Chaos192
+// Settings services (S3c): set (nn::settings::ISettingsServer) and set:sys (nn::settings::ISystemSettingsServer), answered from the title
+// profile (services::profile(): language, region, firmware, nickname) and the host keyboard's key code map; plus host answers for the
+// SDK's two nn::settings::operator== (Language against LanguageCode).
+// Command ids, the Language order and codes, RegionCode, KeyCodeMap (0x1000), DeviceNickName (0x80), SerialNumber (0x18), ProductModel and
+// ColorSetId: https://switchbrew.org/wiki/Settings_services. The firmware version struct: https://switchbrew.org/wiki/System_Version_Title.
+// Result module 105 (625 LanguageOutOfRange, 808 NullDeviceNicknameBuffer): https://switchbrew.org/wiki/Error_codes. The settings
+// items set:sys answers (GetSettingsItemValue) are values of Ryujinx (MIT) src/Ryujinx.HLE/HOS/Services/Settings/NxSettings.cs.
+//
+// The compare hooks: a game made with an older SDK may compare the language it wants with Language::Chinese (zh-CN) while the console
+// gives it zh-Hans (Super Mario Odyssey 1.4.1 then fell back to Japanese), so either spelling of one Chinese script counts as equal there
+// (nxnative services.md "Chinese language aliases in settings comparisons"). The codes the game is handed stay as they are.
 #include <algorithm>
-#include <array>
 #include <atomic>
-#include <charconv>
+#include <cstdint>
 #include <cstring>
 #include <string>
-#include <system_error>
+#include <utility>
 #include <vector>
 
+#include "nxrt/abi.h"
+#include "nxrt/dispatch.h"
+#include "nxrt/key_code_map.h"
 #include "nxrt/log.h"
+#include "nxrt/module.h"
+#include "nxrt/nxmodule.h"
 #include "services_internal.h"
 
 namespace nxrt::services {
+
 namespace {
 
-// ---- constants ----------------------------------------------------------------------------------------------------------------
-constexpr uint32_t kSetModule = 105;                  // set, set:sys (ScarletNX RC(105, ...), Ryujinx ResultCode ModuleId 105)
-constexpr uint32_t kLanguageOutOfRange = 625;         // MakeLanguageCode with an invalid Language (ScarletNX, Ryujinx)
-constexpr uint32_t kNullDeviceNicknameBuffer = 808;   // GetDeviceNickName without an output buffer (Ryujinx)
+const uint32_t kLanguageOutOfRange = res(105, 625);
+const uint32_t kNullNicknameBuffer = res(105, 808);
+const uint32_t kNoKeyCodeMapBuffer = res(105, 1261);
 
-// Language::Count, the nn::settings::Language order of Switchbrew: 18 entries, the last one BrazilianPortuguese (10.1.0+).
-constexpr uint32_t kLanguageCount = static_cast<uint32_t>(Language::Count);
-// GetAvailableLanguageCodes and its count answer at most 0xF entries (Switchbrew: max_entries 0xF; ScarletNX and Ryujinx cap at 15).
-constexpr uint32_t kLanguageCountV1 = 15;
-constexpr size_t kNickNameSize = 0x80;                // nn::settings::system::DeviceNickName
-constexpr size_t kFirmwareSize = 0x100;               // nn::settings::system::FirmwareVersion (user processes: hard-coded 0x100)
-constexpr size_t kSerialSize = 0x18;                  // nn::settings::factory::SerialNumber (Switchbrew: 0x18-byte string)
-constexpr size_t kSettingsNameSize = 0x48;            // nn::settings::SettingsName and SettingsItemKey
-constexpr int32_t kProductModelNx = 1;                // nn::settings::system::ProductModel: 1 Nx ("HAC", Switch 1)
+constexpr uint32_t kLanguages = static_cast<uint32_t>(Language::Count);   // 18: Japanese .. BrazilianPortuguese
+constexpr uint32_t kLanguagesV1 = 15;                                      // GetAvailableLanguageCodes / Count: the first 15
+constexpr uint64_t kNicknameBytes = 0x80;
+constexpr size_t kItemTextMax = 0x47;                                      // a settings name or key, without its NUL
 
-// ---- state -----------------------------------------------------------------------------------------------------------------------
-// The state set:sys keeps for the run and that its getters report: the theme (ColorSetId: 0 Basic White, 1 Basic Black, Switchbrew)
-// and the lock screen flag (false by default). Process-wide; every session object shares it. settings_reset() puts it back.
-struct State {
-    std::atomic<int32_t> color_set{0};
-    std::atomic<uint8_t> lock_screen{0};
-};
-State& state() {
-    static State s;
-    return s;
-}
+std::atomic<int32_t> g_color_set{0};    // set:sys ColorSetId (0 Basic White)
+std::atomic<uint8_t> g_lock_screen{0};
 
-// ---- helpers ----------------------------------------------------------------------------------------------------------------------
-// The 8-byte LanguageCode of a language: its NUL-terminated name, zero padded (Switchbrew "LanguageCode").
-void put_code(uint8_t* dst, Language l) {
-    std::memset(dst, 0, 8);
-    const char* c = language_code(l);
-    std::memcpy(dst, c, std::min<size_t>(std::strlen(c), 7));
-}
-
-// GetAvailableLanguageCodes(2): as many codes as the out buffer holds, at most `max`; the count goes in the response.
-uint32_t put_codes(ipc::Request& req, ipc::Response& rsp, uint32_t max) {
+// ---- languages --------------------------------------------------------------------------------------------------------------
+// GetAvailableLanguageCodes(2): the codes of languages 0.. as 8-byte strings, as many as fit and `max` allows; the reply is the count.
+uint32_t write_language_codes(const ipc::Request& req, ipc::Response& rsp, uint32_t max) {
     const ipc::Buffer b = req.out_buf(0);
-    const uint64_t n = std::min<uint64_t>(b.size / 8, max);
-    std::vector<uint8_t> v(n * 8, 0);
-    for (uint64_t i = 0; i < n; ++i) put_code(&v[i * 8], static_cast<Language>(i));
-    buf_write(b, v.data(), v.size());
+    uint32_t n = 0;
+    if (b.addr) {
+        n = static_cast<uint32_t>(std::min<uint64_t>(b.size / 8, max));
+        std::vector<uint8_t> codes(8 * n);
+        for (uint32_t i = 0; i < n; ++i) {
+            const uint64_t c = language_code_u64(static_cast<Language>(i));
+            std::memcpy(codes.data() + 8 * i, &c, 8);
+        }
+        buf_write(b, codes.data(), codes.size());
+    }
     rsp.push<int32_t>(static_cast<int32_t>(n));
     return 0;
 }
 
-// nn::settings::system::RegionCode: 0 Japan, 1 Usa, 2 Europe, 3 Australia, 4 HongKongTaiwanKorea, 5 China (Switchbrew, ScarletNX); the profile
-// uses the same numbering (services.h). Out-of-range answers Usa (Ryujinx).
-int32_t region_code() {
-    const int r = profile().region;
-    return r >= 0 && r <= 5 ? r : 1;
-}
-
-// "major.minor.micro" into out[0..2]; missing trailing parts stay 0. False when even the major part is not a number.
-bool parse_version(const std::string& s, uint8_t out[3]) {
-    const char* p = s.data();
-    const char* end = p + s.size();
-    for (int k = 0; k < 3; ++k) {
-        unsigned v = 0;
-        const auto r = std::from_chars(p, end, v);
-        if (r.ec != std::errc{}) return k > 0;
-        out[k] = static_cast<uint8_t>(v);
-        p = r.ptr;
-        if (p == end || *p != '.') break;
-        ++p;
+// operator==(Language, LanguageCode): the language's own code, or the other spelling of the same Chinese script.
+bool language_matches(uint64_t lang_ptr, uint64_t code_ptr) {
+    uint32_t lang = 0xFFFFFFFFu;
+    if (lang_ptr) std::memcpy(&lang, reinterpret_cast<const void*>(static_cast<uintptr_t>(lang_ptr)), 4);
+    if (lang >= kLanguages || !code_ptr) return false;
+    char c8[9] = {};
+    std::memcpy(c8, reinterpret_cast<const void*>(static_cast<uintptr_t>(code_ptr)), 8);
+    const std::string code(c8);
+    const Language l = static_cast<Language>(lang);
+    if (code == language_code(l)) return true;
+    switch (l) {
+        case Language::Chinese: return code == "zh-Hans";
+        case Language::SimplifiedChinese: return code == "zh-CN";
+        case Language::Taiwanese: return code == "zh-Hant";
+        case Language::TraditionalChinese: return code == "zh-TW";
+        default: return false;
     }
-    return true;
 }
 
-// The 0x100-byte SystemVersion of the System Version Title (Switchbrew "System Version Title", Format table): major, minor, micro
-// at 0..2; revision major and minor at 4 and 5; platform "NX" at 0x08; version hash at 0x28 (40 hex characters); display version at
-// 0x68 (0x18 bytes); display title at 0x80 (0x80 bytes). The version is profile().firmware ("12.1.0" by default), the title is
-// "NintendoSDK Firmware for NX <version>-1.0" and the revision is 1.0 to match it. The hash is Switchbrew's for 12.1.0-1.0; other
-// versions get an empty hash because no source for it was checked.
-std::array<uint8_t, kFirmwareSize> firmware_version() {
-    constexpr char kHash121[] = "76b10c2dab7d3aa73fc162f8dff1655e6a21caf4";
-    uint8_t ver[3] = {0, 0, 0};
-    const bool parsed = parse_version(profile().firmware, ver);
-    const std::string fw = parsed ? profile().firmware : std::string("12.1.0");
-    if (!parsed) {
-        ver[0] = 12;
-        ver[1] = 1;
-        ver[2] = 0;
+constexpr const char* kEqLanguageCode = "_ZN2nn8settingseqERKNS0_8LanguageERKNS0_12LanguageCodeE";   // (const Language&, const LanguageCode&)
+constexpr const char* kEqCodeLanguage = "_ZN2nn8settingseqERKNS0_12LanguageCodeERKNS0_8LanguageE";   // (const LanguageCode&, const Language&)
+
+void eq_language_code(::Ctx* c) { c->x[0] = language_matches(c->x[0], c->x[1]) ? 1 : 0; }
+void eq_code_language(::Ctx* c) { c->x[0] = language_matches(c->x[1], c->x[0]) ? 1 : 0; }
+
+// ---- the firmware version -----------------------------------------------------------------------------------------------------
+// nn::settings::system::FirmwareVersion (0x100 bytes) for profile().firmware: "major.minor.micro" (missing parts 0); a string that does not
+// start with a number is taken as 12.1.0.
+std::vector<uint8_t> firmware_struct() {
+    std::string ver = profile().firmware;
+    uint32_t part[3] = {0, 0, 0};
+    bool valid = true;
+    size_t pos = 0;
+    for (int i = 0; i < 3; ++i) {
+        uint64_t v = 0;
+        size_t digits = 0;
+        while (pos < ver.size() && ver[pos] >= '0' && ver[pos] <= '9' && v <= 0xFFFFFFFFull) {
+            v = v * 10 + static_cast<uint64_t>(ver[pos] - '0');
+            ++pos;
+            ++digits;
+        }
+        if (digits == 0 || v > 0xFFFFFFFFull) {
+            if (i == 0) valid = false;
+            break;
+        }
+        part[i] = static_cast<uint32_t>(v);
+        if (i < 2) {
+            if (pos < ver.size() && ver[pos] == '.') ++pos;
+            else break;
+        }
     }
-    std::array<uint8_t, kFirmwareSize> v{};
-    v[0] = ver[0];
-    v[1] = ver[1];
-    v[2] = ver[2];
-    v[4] = 1;   // revision major
-    v[5] = 0;   // revision minor
-    std::memcpy(&v[0x08], "NX", 2);
-    if (fw == "12.1.0") std::memcpy(&v[0x28], kHash121, 40);
-    std::memcpy(&v[0x68], fw.data(), std::min<size_t>(fw.size(), 0x17));
-    const std::string title = "NintendoSDK Firmware for NX " + fw + "-1.0";
-    std::memcpy(&v[0x80], title.data(), std::min<size_t>(title.size(), 0x7F));
-    return v;
+    if (!valid) {
+        ver = "12.1.0";
+        part[0] = 12;
+        part[1] = 1;
+        part[2] = 0;
+    }
+    std::vector<uint8_t> fw(0x100, 0);
+    fw[0] = static_cast<uint8_t>(part[0]);
+    fw[1] = static_cast<uint8_t>(part[1]);
+    fw[2] = static_cast<uint8_t>(part[2]);
+    fw[4] = 1;   // revision 1.0
+    std::memcpy(fw.data() + 0x08, "NX", 2);
+    if (ver == "12.1.0") std::memcpy(fw.data() + 0x28, "76b10c2dab7d3aa73fc162f8dff1655e6a21caf4", 40);   // 12.1.0's version hash
+    std::memcpy(fw.data() + 0x68, ver.data(), std::min<size_t>(ver.size(), 0x17));
+    const std::string title = "NintendoSDK Firmware for NX " + ver + "-1.0";
+    std::memcpy(fw.data() + 0x80, title.data(), std::min<size_t>(title.size(), 0x7F));
+    return fw;
 }
 
-// The device nickname into a DeviceNickName buffer: NUL terminated, the rest zero (Switchbrew; ScarletNX zeroes the buffer too).
-uint32_t put_nickname(ipc::Request& req) {
+// ---- other answers ------------------------------------------------------------------------------------------------------------
+// The device nickname, NUL-terminated within the first 0x80 bytes of the buffer.
+uint32_t write_nickname(const ipc::Request& req) {
     const ipc::Buffer b = req.out_buf(0);
-    if (!b.addr) return res(kSetModule, kNullDeviceNicknameBuffer);
-    std::vector<uint8_t> v(std::min<uint64_t>(b.size, kNickNameSize), 0);
+    if (!b.addr) return kNullNicknameBuffer;
+    const uint64_t m = std::min<uint64_t>(b.size, kNicknameBytes);
+    if (m == 0) return 0;
+    std::vector<uint8_t> out(m, 0);
     const std::string& nick = profile().device_nickname;
-    if (!v.empty()) std::memcpy(v.data(), nick.data(), std::min(nick.size(), v.size() - 1));
-    buf_write(b, v.data(), v.size());
+    std::memcpy(out.data(), nick.data(), std::min<uint64_t>(nick.size(), m - 1));
+    buf_write(b, out.data(), m);
     return 0;
 }
 
-// ---- settings items (set:sys GetSettingsItemValue) ----------------------------------------------------------------------------
-// The name!key pairs a title may ask for. Values are the ones Ryujinx's NxSettings.cs holds (a Switch 3.0 config dump, not checked
-// against 12.x). Encodings follow Switchbrew: a bool is one byte, an int four bytes little endian, a string with its NUL.
-// Anything else answers size 0 with a zeroed buffer (ScarletNX: "no such setting here"; Ryujinx logs "not found").
-enum class SettingKind : uint8_t { Bool, Int, Str };
-struct SettingEntry {
+// GetKeyCodeMap / 2 / ByPort: the host keyboard's map (every port the same). A request without a buffer fails (the SDK aborts then).
+uint32_t write_key_code_map(const ipc::Request& req) {
+    const ipc::Buffer b = req.out_buf(0);
+    if (b.size == 0) return kNoKeyCodeMapBuffer;
+    std::vector<uint8_t> map(hid::kKeyCodeMapBytes);
+    hid::current_key_code_map(map.data());
+    buf_write(b, map.data(), map.size());
+    return 0;
+}
+
+// set:sys GetSettingsItemValue(Size): the few settings items games read.
+struct Item {
     const char* name;
     const char* key;
-    SettingKind kind;
-    int32_t i;            // Bool (0 or 1) and Int values
-    const char* s;        // Str value
+    std::vector<uint8_t> value;
 };
-constexpr SettingEntry kSettings[] = {
-    {"account", "na_required_for_network_service", SettingKind::Bool, 1, nullptr},
-    {"audio", "uac_speaker_enabled", SettingKind::Bool, 0, nullptr},
-    {"idle", "dim_level_percent_lcd", SettingKind::Int, 10, nullptr},
-    {"capsrv", "screenshot_layerstack", SettingKind::Str, 0, "screenshot"},
-};
-
-const SettingEntry* find_setting(const std::string& name, const std::string& key) {
-    for (const SettingEntry& e : kSettings)
-        if (name == e.name && key == e.key) return &e;
+const std::vector<Item>& items() {
+    static const std::vector<Item> v = {
+        {"account", "na_required_for_network_service", {1}},
+        {"audio", "uac_speaker_enabled", {0}},
+        {"idle", "dim_level_percent_lcd", {10, 0, 0, 0}},
+        {"capsrv", "screenshot_layerstack", {'s', 'c', 'r', 'e', 'e', 'n', 's', 'h', 'o', 't', 0}},
+    };
+    return v;
+}
+std::string item_text(const ipc::Buffer& b) {
+    char t[kItemTextMax + 1] = {};
+    buf_read(b, t, kItemTextMax);
+    return std::string(t);
+}
+const Item* find_item(const ipc::Request& req, std::string* name, std::string* key) {
+    *name = item_text(req.in_buf(0));
+    *key = item_text(req.in_buf(1));
+    for (const Item& i : items())
+        if (*name == i.name && *key == i.key) return &i;
     return nullptr;
 }
 
-std::vector<uint8_t> setting_bytes(const SettingEntry& e) {
-    switch (e.kind) {
-        case SettingKind::Bool: return {static_cast<uint8_t>(e.i ? 1 : 0)};
-        case SettingKind::Int: {
-            std::vector<uint8_t> v(4);
-            std::memcpy(v.data(), &e.i, 4);
-            return v;
-        }
-        case SettingKind::Str: {
-            const std::string s = e.s;
-            std::vector<uint8_t> v(s.begin(), s.end());
-            v.push_back(0);
-            return v;
-        }
-    }
-    return {};
+std::shared_ptr<ipc::Service> make_set() {
+    return make_iface("set", [](ipc::Service& s) {
+        s.add_cmd(0, "GetLanguageCode", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.push<uint64_t>(language_code_u64(profile().language));
+            return 0;
+        });
+        s.add_cmd(1, "GetAvailableLanguageCodes", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            return write_language_codes(req, rsp, kLanguagesV1);
+        });
+        s.add_cmd(2, "MakeLanguageCode", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            const uint32_t l = req.arg<uint32_t>(0);
+            if (l >= kLanguages) {
+                NXLOG_W("settings", "MakeLanguageCode: language %u is out of range", l);
+                return kLanguageOutOfRange;
+            }
+            rsp.push<uint64_t>(language_code_u64(static_cast<Language>(l)));
+            return 0;
+        });
+        s.add_cmd(3, "GetAvailableLanguageCodeCount", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.push<int32_t>(static_cast<int32_t>(kLanguagesV1));
+            return 0;
+        });
+        s.add_cmd(4, "GetRegionCode", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            const int r = profile().region;
+            rsp.push<int32_t>(r >= 0 && r <= 5 ? r : 1);   // out of range: Usa
+            return 0;
+        });
+        s.add_cmd(5, "GetAvailableLanguageCodes2", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            return write_language_codes(req, rsp, kLanguages);
+        });
+        s.add_cmd(6, "GetAvailableLanguageCodeCount2", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.push<int32_t>(static_cast<int32_t>(kLanguages));
+            return 0;
+        });
+        s.add_cmd(7, "GetKeyCodeMap", [](ipc::Request& req, ipc::Response&) -> uint32_t { return write_key_code_map(req); });
+        s.add_cmd(8, "GetQuestFlag", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.push<uint8_t>(0);   // not a kiosk unit
+            return 0;
+        });
+        s.add_cmd(9, "GetKeyCodeMap2", [](ipc::Request& req, ipc::Response&) -> uint32_t { return write_key_code_map(req); });
+        s.add_cmd(10, "GetFirmwareVersionForDebug", [](ipc::Request& req, ipc::Response&) -> uint32_t {
+            const std::vector<uint8_t> fw = firmware_struct();
+            buf_write(req.out_buf(0), fw.data() + 0x80, 0x80);
+            return 0;
+        });
+        s.add_cmd(11, "GetDeviceNickName", [](ipc::Request& req, ipc::Response&) -> uint32_t { return write_nickname(req); });
+        s.add_cmd(12, "GetKeyCodeMapByPort", [](ipc::Request& req, ipc::Response&) -> uint32_t { return write_key_code_map(req); });
+    });
 }
 
-// A SettingsName or SettingsItemKey buffer as text: the bytes up to the first NUL, at most 0x48 of them.
-std::string read_setting_text(const ipc::Buffer& b) {
-    char tmp[kSettingsNameSize] = {};
-    buf_read(b, tmp, sizeof tmp - 1);
-    return std::string(tmp);
-}
-
-// ---- set (ISettingsServer) ------------------------------------------------------------------------------------------------------
-void setup_set(ipc::Service& s) {
-    s.add_cmd(0, "GetLanguageCode", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push<uint64_t>(language_code_u64(profile().language));
-        return 0;
-    });
-    s.add_cmd(1, "GetAvailableLanguageCodes", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
-        return put_codes(req, rsp, kLanguageCountV1);
-    });
-    s.add_cmd(2, "MakeLanguageCode", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
-        const uint32_t l = req.arg<uint32_t>(0);
-        if (l >= kLanguageCount) {
-            NXLOG_W("set", "MakeLanguageCode(%u): out of range", l);
-            return res(kSetModule, kLanguageOutOfRange);
-        }
-        rsp.push<uint64_t>(language_code_u64(static_cast<Language>(l)));
-        return 0;
-    });
-    s.add_cmd(3, "GetAvailableLanguageCodeCount", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push<int32_t>(static_cast<int32_t>(kLanguageCountV1));
-        return 0;
-    });
-    s.add_cmd(4, "GetRegionCode", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push<int32_t>(region_code());
-        return 0;
-    });
-    s.add_cmd(5, "GetAvailableLanguageCodes2", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
-        return put_codes(req, rsp, kLanguageCount);
-    });
-    s.add_cmd(6, "GetAvailableLanguageCodeCount2", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push<int32_t>(static_cast<int32_t>(kLanguageCount));
-        return 0;
-    });
-    s.add_cmd(8, "GetQuestFlag", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push<uint8_t>(0);   // not a kiosk unit (Ryujinx answers false too)
-        return 0;
-    });
-    // GetFirmwareVersionForDebug (9.0.0+): the last 0x80 bytes of the GetFirmwareVersion2 data. Switchbrew gates it on the debug
-    // mode flag and says an error follows when that flag is 0; the flag's own fallback when its config is missing is 1, so this
-    // never errors.
-    s.add_cmd(10, "GetFirmwareVersionForDebug", [](ipc::Request& req, ipc::Response&) -> uint32_t {
-        const auto fw = firmware_version();
-        buf_write(req.out_buf(0), fw.data() + 0x80, 0x80);
-        return 0;
-    });
-    s.add_cmd(11, "GetDeviceNickName", [](ipc::Request& req, ipc::Response&) -> uint32_t { return put_nickname(req); });
-}
-
-// ---- set:sys (ISystemSettingsServer) --------------------------------------------------------------------------------------------
-void setup_set_sys(ipc::Service& s) {
-    auto firmware = [](ipc::Request& req, ipc::Response&) -> uint32_t {
-        const auto fw = firmware_version();
-        buf_write(req.out_buf(0), fw.data(), kFirmwareSize);
-        return 0;
-    };
-    s.add_cmd(3, "GetFirmwareVersion", firmware);
-    s.add_cmd(4, "GetFirmwareVersion2", firmware);
-    s.add_cmd(7, "GetLockScreenFlag", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push<uint8_t>(state().lock_screen.load());
-        return 0;
-    });
-    s.add_cmd(8, "SetLockScreenFlag", [](ipc::Request& req, ipc::Response&) -> uint32_t {
-        state().lock_screen = req.arg<uint8_t>(0) ? 1 : 0;
-        return 0;
-    });
-    s.add_cmd(23, "GetColorSetId", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push<int32_t>(state().color_set.load());
-        return 0;
-    });
-    s.add_cmd(24, "SetColorSetId", [](ipc::Request& req, ipc::Response&) -> uint32_t {
-        state().color_set = req.arg<int32_t>(0);
-        return 0;
-    });
-    // GetSettingsItemValueSize(name, key) -> u64: the value's size, 0 when the setting is not in the table.
-    s.add_cmd(37, "GetSettingsItemValueSize", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
-        const SettingEntry* e = find_setting(read_setting_text(req.in_buf(0)), read_setting_text(req.in_buf(1)));
-        uint64_t size = 0;
-        if (e) size = setting_bytes(*e).size();
-        rsp.push<uint64_t>(size);
-        return 0;
-    });
-    // GetSettingsItemValue(name, key, out buffer) -> u64: min(value size, out buffer size) bytes are written and that count returned.
-    s.add_cmd(38, "GetSettingsItemValue", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
-        const ipc::Buffer out = req.out_buf(0);
-        const std::string name = read_setting_text(req.in_buf(0));
-        const std::string key = read_setting_text(req.in_buf(1));
-        const SettingEntry* e = find_setting(name, key);
-        uint64_t size = 0;
-        if (e) {
-            const std::vector<uint8_t> v = setting_bytes(*e);
-            size = std::min<uint64_t>(v.size(), out.size);
-            buf_write(out, v.data(), size);
-        } else {
-            NXLOG_I("set:sys", "GetSettingsItemValue(%s!%s): no such setting in the table, answering size 0", name.c_str(), key.c_str());
-            const std::vector<uint8_t> zero(out.size, 0);
-            buf_write(out, zero.data(), zero.size());
-        }
-        rsp.push<uint64_t>(size);
-        return 0;
-    });
-    // GetSerialNumber -> 0x18-byte SerialNumber. A fixed fake (14 characters, zero padded), not a real console's serial.
-    s.add_cmd(68, "GetSerialNumber", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        uint8_t field[kSerialSize] = {};
-        std::memcpy(field, "NXRT0000000000", 14);
-        rsp.out.insert(rsp.out.end(), field, field + kSerialSize);
-        return 0;
-    });
-    s.add_cmd(77, "GetDeviceNickName", [](ipc::Request& req, ipc::Response&) -> uint32_t { return put_nickname(req); });
-    s.add_cmd(79, "GetProductModel", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
-        rsp.push<int32_t>(kProductModelNx);
-        return 0;
+std::shared_ptr<ipc::Service> make_set_sys() {
+    return make_iface("set:sys", [](ipc::Service& s) {
+        const auto firmware = [](ipc::Request& req, ipc::Response&) -> uint32_t {
+            const std::vector<uint8_t> fw = firmware_struct();
+            buf_write(req.out_buf(0), fw.data(), fw.size());
+            return 0;
+        };
+        s.add_cmd(3, "GetFirmwareVersion", firmware);
+        s.add_cmd(4, "GetFirmwareVersion2", firmware);
+        s.add_cmd(7, "GetLockScreenFlag", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.push<uint8_t>(g_lock_screen.load());
+            return 0;
+        });
+        s.add_cmd(8, "SetLockScreenFlag", [](ipc::Request& req, ipc::Response&) -> uint32_t {
+            g_lock_screen.store(req.arg<uint8_t>(0) ? 1 : 0);
+            return 0;
+        });
+        s.add_cmd(23, "GetColorSetId", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.push<int32_t>(g_color_set.load());
+            return 0;
+        });
+        s.add_cmd(24, "SetColorSetId", [](ipc::Request& req, ipc::Response&) -> uint32_t {
+            g_color_set.store(req.arg<int32_t>(0));
+            return 0;
+        });
+        s.add_cmd(37, "GetSettingsItemValueSize", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            std::string name, key;
+            const Item* it = find_item(req, &name, &key);
+            rsp.push<uint64_t>(it ? it->value.size() : 0);
+            return 0;
+        });
+        s.add_cmd(38, "GetSettingsItemValue", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            std::string name, key;
+            const Item* it = find_item(req, &name, &key);
+            const ipc::Buffer out = req.out_buf(0);
+            uint64_t n = 0;
+            if (it) {
+                n = buf_write(out, it->value.data(), it->value.size());
+            } else {
+                NXLOG_I("settings", "GetSettingsItemValue(%s, %s): no such setting", name.c_str(), key.c_str());
+                if (out.addr && out.size) std::memset(buf_mut(out), 0, static_cast<size_t>(out.size));
+            }
+            rsp.push<uint64_t>(n);
+            return 0;
+        });
+        s.add_cmd(68, "GetSerialNumber", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            uint8_t serial[0x18] = {};
+            std::memcpy(serial, "NXRT0000000000", 14);
+            rsp.out.insert(rsp.out.end(), serial, serial + sizeof serial);
+            return 0;
+        });
+        s.add_cmd(77, "GetDeviceNickName", [](ipc::Request& req, ipc::Response&) -> uint32_t { return write_nickname(req); });
+        s.add_cmd(79, "GetProductModel", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.push<int32_t>(1);   // Nx
+            return 0;
+        });
     });
 }
 
 }  // namespace
 
+void install_language_compare_hooks() {
+    const std::pair<const char*, HleFn> hooks[2] = {{kEqLanguageCode, eq_language_code}, {kEqCodeLanguage, eq_code_language}};
+    for (const auto& h : hooks) {
+        hle_register(h.first, h.second);
+        module_override_symbol(h.first);       // the game's imports
+        module_override_definition(h.first);   // the SDK's own definition, reached by its address
+    }
+}
+
 void register_settings() {
-    add("set", [] { return make_iface("set", setup_set); });
-    add("set:sys", [] { return make_iface("set:sys", setup_set_sys); });
+    add("set", [] {
+        install_language_compare_hooks();
+        return make_set();
+    });
+    add("set:sys", [] { return make_set_sys(); });
 }
 
 void settings_reset() {
-    state().color_set = 0;
-    state().lock_screen = 0;
+    g_color_set.store(0);
+    g_lock_screen.store(0);
 }
 
 }  // namespace nxrt::services

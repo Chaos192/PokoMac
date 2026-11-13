@@ -68,6 +68,10 @@ uint64_t nxmodule_symbol_address(const NxModule* nx, int sym);
 // cached). *out = 0 means catch(...). False (and *out = 0) when the import is defined by no registered module (logged once): the
 // clause then matches nothing.
 bool nxmodule_type_address(const NxModule* nx, const NxFde* fde, uint32_t filter, uint64_t* out);
+// The host replaces `sym` where the guest reaches it by address as well: module_override_symbol (its imports), and every definition of
+// `sym` in a lifted module, registered now or later, dispatches to the HLE handler of that name (register the handler first). Only for a
+// handler that never calls the guest's own definition of the symbol. Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
+void module_override_definition(const char* sym);
 // Absolute address of the function a registered module defines under `name` (any module, registration order), 0 if none.
 uint64_t nxmodule_find_export(const char* name, const NxModule* except = nullptr);
 void import_cache_invalidate();                    // forget every resolved import (module_override_symbol calls it)
