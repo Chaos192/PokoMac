@@ -70,7 +70,7 @@ public:
     LoadResult reload();
 
     // The loaded cheats, for the overlay list.
-    struct CheatRow { int entry; std::string name; bool master; bool enabled; size_t words; };
+    struct CheatRow { int entry; std::string name; bool master; bool enabled; size_t words; bool applying = false; };   // applying: its code is on its way in
     std::vector<CheatRow> cheats() const;
     void set_cheat_enabled(int entry, bool on);     // persists to toggles.txt
     size_t master_entry() const { return 0; }

@@ -53,6 +53,8 @@ public:
     // True when the code holding this word runs what memory now holds (no swap of its function is still on the way): a cave goes back only
     // when every code word that branched there has settled, else a thread could still enter it.
     virtual bool settled(uint64_t word) { (void)word; return true; }
+    // True while the patch of this word is being made (lifted, compiled, what it reaches made ready) and not swapped in yet.
+    virtual bool applying(uint64_t word) { (void)word; return false; }
     // [lo, hi) of the cave [cave_lo, cave_hi) holds new bytes: make the cave code and drop what was made from the old bytes.
     virtual void cave_written(uint64_t cave_lo, uint64_t cave_hi, uint64_t lo, uint64_t hi) = 0;
     virtual void log(const std::string& line) { (void)line; }
@@ -103,6 +105,8 @@ public:
 
     Counters counters() const;
     std::vector<Held> held() const;
+    // The cheat's code is on its way in (the cheats list says "applying..."): a code word it holds is not swapped in yet.
+    bool applying(int entry) const;
     size_t caves_waiting() const;                      // cave words whose return waits for their code to settle
 
 private:

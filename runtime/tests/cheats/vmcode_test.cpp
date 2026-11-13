@@ -105,6 +105,8 @@ struct FakeSink : Sink {
         }
     }
     bool settled(uint64_t) override { return settled_all; }
+    std::set<uint64_t> making;                       // words whose patch is not swapped in yet
+    bool applying(uint64_t w) override { return making.count(w) != 0; }
     void cave_written(uint64_t clo, uint64_t chi, uint64_t lo, uint64_t hi) override {
         char b[96];
         std::snprintf(b, sizeof b, "cave %llx..%llx in %llx..%llx", (unsigned long long)(lo - base), (unsigned long long)(hi - base),
@@ -217,6 +219,11 @@ static void test_asm_on_off() {
     CHECK(c.code_writes == 2 && c.cave_writes == 2 && c.words_patched == 1 && c.cave_words_written == 4);
     CHECK(g.r.held().size() == 5);
     for (const Held& h : g.r.held()) CHECK(h.owners == std::set<int>{1});
+    // "applying...": while the patch of its word is being made, and only for the cheat that holds it
+    CHECK(!g.r.applying(1));
+    g.s.making.insert(kMain + 0x1010);
+    CHECK(g.r.applying(1) && !g.r.applying(2));
+    g.s.making.clear();
     // the next passes change nothing
     g.s.calls.clear();
     g.pass();

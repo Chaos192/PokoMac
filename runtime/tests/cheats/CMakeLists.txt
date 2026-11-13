@@ -26,6 +26,10 @@ target_include_directories(nxrt_cheat_engine_test PRIVATE
 add_executable(nxrt_vmcode_test vmcode_test.cpp)
 target_include_directories(nxrt_vmcode_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cheats")
 
+# What a live patch reaches (reach.cpp: the code made ready before the swap); includes reach.cpp and disasm.cpp directly.
+add_executable(nxrt_reach_test reach_test.cpp)
+target_include_directories(nxrt_reach_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cheats")
+
 add_executable(nxrt_export_test export_test.cpp)
 target_include_directories(nxrt_export_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cheats")
 
@@ -56,6 +60,7 @@ add_test(NAME scanner COMMAND nxrt_scanner_test)
 add_test(NAME aob COMMAND nxrt_aob_test)
 add_test(NAME cheat_engine COMMAND nxrt_cheat_engine_test)
 add_test(NAME vmcode COMMAND nxrt_vmcode_test)
+add_test(NAME reach COMMAND nxrt_reach_test)
 add_test(NAME cheat_export COMMAND nxrt_export_test)
 add_test(NAME pointerscan COMMAND nxrt_pointerscan_test)
 add_test(NAME disasm COMMAND nxrt_disasm_test)

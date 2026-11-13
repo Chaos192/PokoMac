@@ -36,6 +36,7 @@
 #include "nxrt/missed.h"
 #include "nxrt/module.h"
 #include "nxrt/nxmodule.h"
+#include "reach.h"
 
 namespace nxrt::cheats::cp {
 namespace {
@@ -345,6 +346,25 @@ void set_state_locked(uint64_t fn_start, State st, const std::string& note) {
     }
 }
 
+// Everything the patched words reach that the dispatcher may not have yet (a code cave, the instruction after the hook): made ready here,
+// on the patch's worker thread before the swap, so no guest thread waits for the build's compiler when it first runs the patch (reach.h;
+// a code cheat turned on stalled a frame for 12.7 s on the PC). The game keeps running the old code meanwhile.
+void prepare_reach(uint64_t fn_start, uint64_t fn_end, const std::vector<std::pair<uint64_t, uint32_t>>& patched) {
+    reach::Source src;
+    src.read = [](uint64_t a, uint32_t* w) { return gmem::read(a, w, 4); };
+    src.region = [](uint64_t a, uint64_t* b, uint64_t* e) { return missed::code_region_of(a, b, e); };
+    const std::vector<uint64_t> targets = reach::to_prepare(patched, fn_start, fn_end, src);
+    size_t made = 0;
+    for (uint64_t t : targets) {
+        std::string e;
+        if (missed::prepare(t, &e)) ++made;
+        else NXLOG_W(kTag, "code the patch in %s reaches at %s could not be made ready (%s): its first call compiles it", where(fn_start).c_str(),
+                     where(t).c_str(), e.c_str());
+    }
+    if (!targets.empty())
+        NXLOG_I(kTag, "code at %s: %zu of the %zu addresses it reaches made ready before the swap", where(fn_start).c_str(), made, targets.size());
+}
+
 // Lifts the function again from its bytes in memory (with every patch in it) and the sites its breakpoints need, then swaps it in at the
 // next frame boundary. With nothing left in it, the compiled code comes back. Called with s.mu held.
 void rebuild_locked(uint64_t fn_start) {
@@ -404,10 +424,22 @@ void rebuild_locked(uint64_t fn_start) {
     }
     set_state_locked(fn_start, State::Compiling, "lifting the function again from the patched bytes");
     const std::string name = "patch_" + f.module;
-    std::thread([name, fn_start, bytes, sites, gen] {
+    // the patched words, for what they reach (reach.h): made ready on this worker before the swap, never by a guest thread at its first run
+    std::vector<std::pair<uint64_t, uint32_t>> patched;
+    for (const auto& kv : s.patches) {
+        if (kv.second.fn_start != fn_start || kv.second.state == State::Reverted) continue;
+        for (size_t k = 0; k + 4 <= kv.second.bytes.size(); k += 4) {
+            uint32_t w = 0;
+            std::memcpy(&w, kv.second.bytes.data() + k, 4);
+            patched.push_back({kv.first + k, w});
+        }
+    }
+    const uint64_t fn_end = f.end;
+    std::thread([name, fn_start, fn_end, bytes, sites, gen, patched] {
         const auto t0 = std::chrono::steady_clock::now();
         std::string err;
         const GuestFn unit = missed::make_code_unit(name, fn_start, bytes, sites, &err);
+        if (unit) prepare_reach(fn_start, fn_end, patched);
         const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         G& s = g();
         std::lock_guard<std::mutex> lk(s.mu);

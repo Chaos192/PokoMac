@@ -637,6 +637,10 @@ void page_cheats() {
             th::text(r.master ? th::Type::Body : th::Type::Strong, r.master ? p.text2 : p.text, "%s", r.master ? "Master code (sets the others up)" : r.name.c_str());
             ImGui::SameLine(0, th::sp(th::S3));
             th::text(th::Type::Small, p.text3, "%zu code words", r.words);
+            if (r.applying) {   // a code cheat's patch is being made off the game's threads; it swaps in at a frame boundary once ready
+                ImGui::SameLine(0, th::sp(th::S3));
+                th::text(th::Type::Small, p.text2, "applying…");
+            }
             if (!r.master) {   // pin it to the HUD over the game
                 const bool pinned = s.pinned_cheats.count(r.name) != 0;
                 ImGui::SetCursorScreenPos(ImVec2(o.x + w - th::px(th::kControlH) - th::sp(th::S2), o.y + (row_h - th::px(th::kControlH)) * 0.5f));

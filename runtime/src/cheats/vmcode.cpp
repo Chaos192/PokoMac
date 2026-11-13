@@ -276,6 +276,13 @@ std::vector<Held> Router::held() const {
     return out;
 }
 
+bool Router::applying(int entry) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    for (const auto& [w, h] : held_)
+        if (h.place.kind == Kind::Code && !h.plain && h.owners.count(entry) && sink_.applying(w)) return true;
+    return false;
+}
+
 size_t Router::caves_waiting() const {
     std::lock_guard<std::mutex> lk(mu_);
     return caves_back_.size();

@@ -53,6 +53,11 @@ public:
         NXLOG_I(kTag, "cheat code writes: %zu of %zu words back to their original code", n, words.size());
     }
     bool settled(uint64_t word) override { return cp::settled(word); }
+    bool applying(uint64_t word) override {
+        for (const cp::Patch& p : cp::patches())
+            if (p.addr == word) return p.state == cp::State::Compiling;
+        return false;
+    }
     void cave_written(uint64_t cave_lo, uint64_t cave_hi, uint64_t lo, uint64_t hi) override {
         std::lock_guard<std::mutex> lk(mu_);
         if (!caves_.count(cave_lo)) {

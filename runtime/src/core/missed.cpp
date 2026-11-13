@@ -732,6 +732,48 @@ bool enter(::Ctx* c, uint64_t addr) {
     return enter_units(c, addr);
 }
 
+bool prepare(uint64_t addr, std::string* err) {
+    if (addr & 3) {
+        if (err) *err = "not an instruction address";
+        return false;
+    }
+    if (fn_lookup(addr) || unit_answers(addr)) return true;
+    Where w;
+    if (!locate(addr, &w)) {
+        if (err) *err = "not guest code";
+        return false;
+    }
+    const Mode md = mode();
+    if (md != Mode::Compile) {
+        if (err) *err = md == Mode::Off ? "[missed] mode = off" : "no on-demand compiler here";
+        return false;
+    }
+    std::lock_guard<std::mutex> lk(g_make_lock);
+    if (fn_lookup(addr) || unit_answers(addr)) return true;   // made meanwhile (a guest thread met it first)
+    if (g_failed.count(addr)) {
+        if (err) *err = "recompiling it on demand failed earlier in this run";
+        return false;
+    }
+    if (!w.code) record(w.module, addr - w.base, w.build_id, "prepared for a code patch");
+    if (!obtain(w, addr)) {
+        g_failed.insert(addr);
+        if (err) *err = t_why;
+        return false;
+    }
+    return true;
+}
+
+bool code_region_of(uint64_t addr, uint64_t* base, uint64_t* end) {
+    std::lock_guard<std::mutex> lk(g_regions_lock);
+    for (const Region& r : g_regions)
+        if (addr - r.base < r.size) {
+            if (base) *base = r.base;
+            if (end) *end = r.base + r.size;
+            return true;
+        }
+    return false;
+}
+
 void code_region_add(uint64_t base, uint64_t size, const char* name) {
     std::lock_guard<std::mutex> lk(g_regions_lock);
     g_regions.push_back({base, size, name && *name ? name : "code"});

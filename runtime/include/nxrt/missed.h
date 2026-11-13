@@ -35,9 +35,18 @@ namespace nxrt::missed {
 // it; the address is recorded in missed.txt either way unless a table of the build covered it.
 bool enter(::Ctx* c, uint64_t addr);
 
+// Makes the code at `addr` ready ahead of its first call, on the calling (non-guest) thread: true when a call there will run without a
+// compile (a function the dispatcher knows, a loaded unit that answers for it, or a unit found in the cache or made now), false with *err
+// when no unit can be made. The cheats overlay's code patcher calls it for every address a live patch can reach (a code cave, the
+// instruction after it) before it swaps the patch in, so no guest thread waits for the build's compiler (pokomac-port 2026-11-12: a code
+// cheat turned on stalled a frame for 12.7 s on the PC while the game's thread waited for its cave to be compiled).
+bool prepare(uint64_t addr, std::string* err);
+
 // Code made at run time (the jit service's code memory; Switch games rarely have any): [base, base + size) holds guest code the game
 // wrote. An address in it that no table covers is lifted from those bytes (nxrecomp ondemand.lift_code) and cached by their hash.
 void code_region_add(uint64_t base, uint64_t size, const char* name);
+// The code region that holds addr (its [base, end)), false when none does.
+bool code_region_of(uint64_t addr, uint64_t* base, uint64_t* end);
 void code_region_remove(uint64_t base);
 // The game (the jit service's plugin) wrote new code into [addr, addr + size): every unit made for code there is dropped (its functions
 // leave the dispatcher's table), so the next call lifts the new bytes, or finds them in the cache when they were there before.

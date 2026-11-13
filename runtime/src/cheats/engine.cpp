@@ -231,7 +231,7 @@ std::vector<Engine::CheatRow> Engine::cheats() const {
     for (size_t i = 0; i < kMaxEntries; ++i) {
         const CheatEntry& e = file_.entries[i];
         if (!e.used) continue;
-        out.push_back({static_cast<int>(i), e.name, i == 0, e.enabled, e.words.size()});
+        out.push_back({static_cast<int>(i), e.name, i == 0, e.enabled, e.words.size(), e.enabled && router_.applying(static_cast<int>(i))});
     }
     return out;
 }

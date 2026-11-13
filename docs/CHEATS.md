@@ -255,6 +255,12 @@ only) runs the glass blur on the GPU against the reference and times it.
   code stays until the game restarts): here a cheat switched off puts the game back. These patches are the cheat's, never written to
   an IPS (`by_cheat`). With data cheats only, a write costs one range test more and the pass ends with nothing to do: the engine's
   `code` counters stay 0 (`nxrt_vmcode_test`, `nxrt_cheat_engine_test`; the scripted test's `codewords` step logs them and the words held).
+- **No frame waits for the compiler** when a code patch goes on (`reach.cpp`, `missed::prepare`): before the swap, the patch's worker
+  thread also makes ready every address the patched words reach that the dispatcher may not have (a branch out of the function, into a
+  code cave and on through the cave's calls and its branch back, the instruction after the hook), from the cache or compiled there; the
+  game runs the old code meanwhile and the cheats list says **applying…** until the swap. Before, the first guest thread to enter a
+  cheat's cave waited for its compile (pokomac-port's PC run: a 12.7 s frame; Pokopia's Leafage on the Mac: 0.75 s for two cave units).
+  `nxrt_reach_test` (Pokopia's real Leafage, Water Gun and crop caves).
 - **Breakpoints** use the same unit with an inline site (`nx_site_inline`, hooks.h) before the instruction, and before every other
   instruction of the function when a breakpoint there stops, so a held thread can step. A held thread waits in the site's hook; on the
   presenting thread the pause service keeps the overlay running meanwhile.
