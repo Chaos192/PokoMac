@@ -63,6 +63,7 @@ jobs:
           npm run build
           node scripts/test-gamepad-nav.mjs
           node scripts/test-mods-model.mjs
+          node scripts/test-releases.mjs
 
       - name: Check (Linux)
         working-directory: launcher/src-tauri

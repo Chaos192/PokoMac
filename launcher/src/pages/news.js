@@ -4,7 +4,7 @@ import './news.css';
 import { api, errText, esc, icon, toast } from '../ui.js';
 import { store } from '../store.js';
 import { canUpdate } from '../action.js';
-import { formatDate, isNewer, parseReleaseName, render as renderNote } from '../markdown.js';
+import { formatDate, isNewer, parseReleaseName, render as renderNote, withRunning } from '../markdown.js';
 import { groups } from '../testing-log.js';
 
 const isGithub = (url) => /^https:\/\/github\.com\//.test(url ?? '');
@@ -100,7 +100,7 @@ export function render(el, ctx) {
   }
 
   function draw(s) {
-    const list = s.news.releases;
+    const list = withRunning(s.news.releases, s.app?.version);
     part('split').hidden = !list.length;
     part('empty').hidden = !!list.length || checking;
     if (!list.length) return;

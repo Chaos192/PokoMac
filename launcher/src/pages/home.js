@@ -5,7 +5,7 @@ import { api, errText, esc, icon, toast } from '../ui.js';
 import { store } from '../store.js';
 import { canCancelUpdate, canUpdate, gamePhase, primaryAction } from '../action.js';
 import { readIni, viewOf } from '../linkplay-model.js';
-import { formatDate, highlights, parseReleaseName } from '../markdown.js';
+import { formatDate, highlights, parseReleaseName, withRunning } from '../markdown.js';
 import { reportProblem } from '../report.js';
 
 const REPORT_LABEL = {
@@ -23,13 +23,13 @@ store.subscribe((s) => {
   if (s.game?.state !== 'exited') crashDismissed = false;
 });
 
-function releaseCard(r) {
+function releaseCard(r, installed) {
   const { version, build } = parseReleaseName(r.name, r.tag);
   const date = formatDate(r.date);
   const lines = highlights(r.body, CARD_LINES);
   return `<button class="release glass hover" data-tag="${esc(r.tag)}">
     <span class="release-head">
-      <span class="release-title clip"><strong>${esc(version)}</strong>${build ? ` ${esc(build)}` : ''}${r.prerelease ? ' <span class="note-mark">Testing</span>' : ''}</span>
+      <span class="release-title clip"><strong>${esc(version)}</strong>${build ? ` ${esc(build)}` : ''}${version === installed ? ' <span class="note-mark">Installed</span>' : r.prerelease ? ' <span class="note-mark">Testing</span>' : ''}</span>
       ${date ? `<time>${esc(date)}</time>` : ''}
     </span>
     ${lines.map((l) => `<span class="release-line">${esc(l)}</span>`).join('')}
@@ -140,7 +140,7 @@ export function render(el, ctx) {
     patch(part('notices'), (s.updateError ? updateErrorCard(s) : '') + (crashed ? crashCard(s.game) : ''));
     el.firstElementChild.classList.toggle('noticed', !!(crashed || s.updateError));
 
-    patch(part('news'), s.news.releases.slice(0, CARDS).map(releaseCard).join(''));
+    patch(part('news'), withRunning(s.news.releases, s.app?.version).slice(0, CARDS).map((r) => releaseCard(r, s.app?.version)).join(''));
   }
 
   el.addEventListener('click', (e) => {

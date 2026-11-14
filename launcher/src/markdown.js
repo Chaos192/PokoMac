@@ -232,6 +232,22 @@ export function isNewer(a, b) {
   return false;
 }
 
+const DEV_VERSIONS = ['0.0.0', '0.1.1'];   // update.rs DEV_VERSIONS: a checkout's own build, never a release
+
+/**
+ * The releases as listed, with the running version first when no release is it and none is newer (a release candidate, or a version
+ * installed before its release is published): a local entry marked as installed, so Home and What's New never show an older release as
+ * if it were the one you have. A dev build adds nothing.
+ */
+export function withRunning(releases, version) {
+  const list = releases ?? [];
+  if (!version || DEV_VERSIONS.includes(version)) return list;
+  const versions = list.filter((r) => !r.virtual).map((r) => parseReleaseName(r.name, r.tag).version);
+  if (versions.includes(version) || versions.some((v) => isNewer(v, version))) return list;
+  const body = `This is the version you have. It is newer than every published release, so its notes appear here once it is published.`;
+  return [{ tag: `v${version}`, name: `PokoMac ${version}`, date: '', body, url: '', prerelease: false, local: true }, ...list];
+}
+
 /** "Oct 30, 2026", or "October 30, 2026" with month 'long'. A date that does not parse gives ''. */
 export function formatDate(iso, month = 'short') {
   const d = new Date(iso ?? '');

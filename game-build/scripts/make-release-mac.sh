@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Builds and packs the PokoMac player zip for macOS on Apple silicon, the twin of make-release.ps1 (release model b: no game code or data
 # in it; the player's Mac lifts the game from their own dump and links the native `pkp` against libpkp_rt.dylib). Run on a Mac:
-#   cmake --build build/mac --target pkp_rt                                         -> build/mac/libpkp_rt.dylib
+#   cmake -DPKP_VERSION=$(cat VERSION) build/mac && cmake --build build/mac --target pkp_rt   -> build/mac/libpkp_rt.dylib
+#     (PKP_VERSION: what pkp.log's "boot: pkp <version> (PokoMac)" line says; checked below against VERSION, as release.yml sets it)
 #   tools/shaders/scripts/setup_ryujinx.sh <ryubing checkout> &&
 #     dotnet publish -c Release -r osx-arm64 --self-contained true -p:DebugType=none tools/shaders/harness/SpirvHarness.csproj -o build/mac-harness
 #     (DebugType=none: the package ships no .pdb, and a DLL built with one names its path on the build Mac)
@@ -73,6 +74,11 @@ fail() { echo "make-release-mac: $*" >&2; exit 1; }
 version="$(tr -d ' \t\r\n' < "$root/VERSION")"
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || fail "VERSION holds '$version', not x.y.z or x.y.z-pre"
 [ -f "$rt" ] || fail "no runtime at $rt (cmake --build build/mac --target pkp_rt)"
+# the runtime names the release in pkp.log (pkp_main.cpp PKP_VERSION): a runtime from a build folder must have been configured for it
+if [ -f "$(dirname "$rt")/CMakeCache.txt" ]; then
+    rt_version=$(sed -n 's/^PKP_VERSION:STRING=//p' "$(dirname "$rt")/CMakeCache.txt")
+    [ "$rt_version" = "$version" ] || fail "the runtime was built as version '$rt_version', VERSION says $version: cmake -DPKP_VERSION=$version $(dirname "$rt"), then build pkp_rt again"
+fi
 [ -x "$harness/spirv_harness" ] || fail "no osx-arm64 shader translator in $harness (dotnet publish ... -r osx-arm64)"
 [ -f "$sdk/lib/libvulkan.1.dylib" ] || fail "no Vulkan SDK at $sdk (--vulkan-sdk <VulkanSDK>/<version>/macOS)"
 [ -d "$kbm" ] || fail "no keyboard and mouse icons at $kbm (--kbm-icons <dir>)"
