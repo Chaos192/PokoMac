@@ -19,6 +19,8 @@ local wireless come from it, and PokoMac's services were replaced with AnySwitch
 - **Mods**: install game-file and code mods from a .zip or a folder on the new Mods page
 - **Render resolution: Console** is the new default: the console's own 1920 x 1080, scaled to your window, so lower-end Macs and PCs
   hold 60 fps
+- **One look for every in-game screen**: the F1 menu, the cheats menu, the on-screen keyboard, prompts and notices share one theme
+  (the Inter typeface, a monospaced face for hex and code), readable over light, dark and busy scenes
 - A **Discord** button in the sidebar (and Settings > About > Community) opens the AnySwitch community's Discord in your browser;
   Settings > About also has an optional Patreon link (nothing is locked behind it)
 
