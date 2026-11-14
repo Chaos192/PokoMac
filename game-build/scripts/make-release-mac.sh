@@ -183,6 +183,9 @@ L="$R/licenses"
 mirror "$root/game-build/release_b/macos/licenses" "$L"
 put "$root/game-build/release_b/macos/BUNDLED_TOOLS.txt" "$L/BUNDLED_TOOLS.txt"
 put "$root/runtime/THIRD_PARTY_NOTICES.md" "$L/THIRD_PARTY_NOTICES.md"
+# the overlay's fonts are compiled into libpkp_rt.dylib: their licence texts also go with the other licences (as on Windows)
+put "$root/runtime/assets/fonts/LICENSE-Inter.txt" "$L/LICENSE.Inter.OFL-1.1.txt"
+put "$root/runtime/assets/fonts/LICENSE-CascadiaCode.txt" "$L/LICENSE.CascadiaCode.OFL-1.1.txt"
 put "$root/tools/shaders/licenses/LICENSE.mesa-nak.MIT" "$L/LICENSE.mesa-nak.MIT.txt"
 put "$dotnet_root/LICENSE.txt" "$L/LICENSE.dotnet.MIT.txt"
 put "$dotnet_root/ThirdPartyNotices.txt" "$L/THIRD-PARTY-NOTICES.dotnet.txt"
@@ -221,7 +224,9 @@ for d in "$R/licenses" "licenses"; do
     for f in LICENSE.ScarletNX.GPL-3.0.txt LICENSE.yuzu-Eden.GPL-2.0.txt; do [ ! -e "$pkg/$d/$f" ] || fail "the package still has $d/$f (its code is gone: licence switch)"; done
     [ -f "$pkg/$d/LICENSE.GPL-3.0.txt" ] || fail "the package has no $d/LICENSE.GPL-3.0.txt"
 done
-for f in "$R/NOTICE.txt" "$R/LICENSE.txt" LICENSE.txt; do [ -f "$pkg/$f" ] || fail "the package has no $f"; done
+for f in "$R/NOTICE.txt" "$R/LICENSE.txt" LICENSE.txt "$L/LICENSE.Inter.OFL-1.1.txt" "$L/LICENSE.CascadiaCode.OFL-1.1.txt" "$L/LICENSE.DejaVu.txt"; do
+    [ -f "$pkg/$f" ] || fail "the package has no $f"
+done
 # nothing names the build Mac: its home folder (and so the user name in it) and its host names, in any file, text or binary
 needles=(-e "$HOME")
 for h in "$(hostname -s 2>/dev/null)" "$(scutil --get LocalHostName 2>/dev/null)" "$(scutil --get ComputerName 2>/dev/null)"; do

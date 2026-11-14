@@ -309,7 +309,8 @@ The services that first took code or layouts from yuzu and Eden (`src/services/f
 is a subset of DejaVu Sans 2.37 (its arrows, mathematical operators, technical symbols, box drawing, blocks, geometric shapes, miscellaneous
 symbols, dingbats and supplemental arrows, Armenian, Georgian and the emoticons it has, minus every glyph Inter has), made with fontTools
 by `scripts/make_overlay_fonts.py` and compiled into the runtime as the overlay's symbol fallback. As the licence asks of a modified font,
-it is renamed ("AnySwitch Symbols"; no "Bitstream", "Vera" or "Arev" in its names). Licence text: `assets/fonts/LICENSE-DejaVu.txt`.
+it is renamed ("AnySwitch Symbols"; no "Bitstream", "Vera" or "Arev" in its names). Licence text: `assets/fonts/LICENSE-DejaVu.txt` (in
+the packages: `licenses/LICENSE.DejaVu.txt`).
 
 ## Inter 4.1 (SIL Open Font License 1.1)
 
@@ -319,7 +320,7 @@ static Regular and SemiBold (Inter-4.1.zip, `extras/ttf`) subset to Latin (with 
 Cyrillic, punctuation, currency, letterlike symbols, number forms, arrows, mathematical operators and the symbol blocks Inter draws, with
 the tabular figures (`tnum`) made the default digits, hinting and layout tables dropped, by `scripts/make_overlay_fonts.py` (fontTools),
 and compiled into the runtime. The Inter licence declares no Reserved Font Name, so the names are kept. Licence text:
-`assets/fonts/LICENSE-Inter.txt` (the release's `LICENSE.txt`).
+`assets/fonts/LICENSE-Inter.txt` (the release's `LICENSE.txt`; in the packages: `licenses/LICENSE.Inter.OFL-1.1.txt`).
 
 ## Cascadia Mono (SIL Open Font License 1.1)
 
@@ -327,7 +328,8 @@ Copyright (c) 2019 - Present, Microsoft Corporation, with Reserved Font Name Cas
 `assets/fonts/AnySwitchMono-Regular.ttf` is the overlay's monospaced face for hex, addresses and code: Cascadia Mono 2407.24's static
 Regular (`ttf/static/CascadiaMono-Regular.ttf`) subset to ASCII, Latin-1, Latin Extended-A, punctuation, currency, arrows, box drawing,
 blocks and geometric shapes by `scripts/make_overlay_fonts.py` (fontTools) and compiled into the runtime. As the OFL asks of a Modified
-Version under a Reserved Font Name, it is renamed "AnySwitch Mono". Licence text: `assets/fonts/LICENSE-CascadiaCode.txt`.
+Version under a Reserved Font Name, it is renamed "AnySwitch Mono". Licence text: `assets/fonts/LICENSE-CascadiaCode.txt` (in the packages:
+`licenses/LICENSE.CascadiaCode.OFL-1.1.txt`).
 
 ## AMD FidelityFX SDK v1.1.4, FSR 1 shader headers (MIT)
 
@@ -358,14 +360,6 @@ Files: `third_party/nvidia_streamline/include/` (unmodified). Copyright (c) NVID
 `nvngx_dlss.dll` (NVIDIA DLSS Super Resolution 310.9.16) is under the NVIDIA RTX SDKs LICENSE (v. March 14, 2024; https://github.com/NVIDIA/DLSS/blob/main/LICENSE.txt, a copy is `licenses/LICENSE.NVIDIA-RTX-SDKs.txt` in the release). That licence requires redistributors to pass on terms at least as protective as its own and forbids any use that subjects the SDK to a licence requiring it to be redistributable at no charge (section 4e), which does not fit a GPL-3.0 package, so neither the repository nor the release package contains the file. The launcher's Game files page offers to download it from NVIDIA's own repository (https://github.com/NVIDIA/DLSS, tag v310.9.16, sha256 checked) into `upscalers/streamline/` on the player's PC after showing the licence. `libxess.dll` (Intel XeSS) is never shipped either; `xess_dll` is read but not used (see `docs/CONFIG.md`). The DLSS SDK itself (NGX static library) is not used.
 
 ## The cheats menu's third-party parts (ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch)
-
-### Inter 4 (SIL Open Font License 1.1)
-
-The cheats overlay's typeface (`src/gfx/play/cheats_theme.cpp`), the same as the launcher's (`@fontsource-variable/inter`). Copyright 2016
-The Inter Project Authors (https://github.com/rsms/inter). `assets/fonts/Inter-Regular.ttf`, `Inter-Regular-Ext.ttf` and
-`Inter-SemiBold.ttf` are static instances (weights 400 and 600) of the launcher's variable Inter files, subset to Latin and Latin Extended,
-made with fontTools (`varLib.instancer`, `subset`) and compiled into the runtime. The font names are kept; the OFL allows subsetting and
-embedding. Licence text: `assets/fonts/LICENSE-Inter.txt`.
 
 ### stb_image 2.30 (public domain or MIT, the user's choice)
 
