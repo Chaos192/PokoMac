@@ -6,11 +6,12 @@ PokoMac as they are. The in-game cheat tools are our own C++ in `runtime/src/che
 `docs/reference/cheats.md` (no Atmosphere GPL code). Everything is per build id, kept **outside the repository**, and **defaults off** until
 the player turns it on (Settings > Cheats > Enable cheats).
 
-**In PokoMac:** everything AnySwitch's overlay has works, live code patches included: Set up lifts the game with the live-patch checks
-(every function entry and loop head checks `Ctx.ov`: recomp `ctx.h` NX_OV / NX_OVL; `pkp_build.py --no-live-patch` leaves them out to
-measure their cost), and a patch, an injection or a breakpoint makes the patched function again on demand (`runtime/src/core/missed.cpp`
-runs `pkp_build.py --ondemand`, the bundled lifter and Zig, from `<game folder>/build/missed/manifest.tsv`; the first patch of a function
-takes a few seconds, later ones come from `build/missed/cache`). It reaches every caller while the game runs, also on Apple silicon.
+**In PokoMac:** everything AnySwitch's overlay has works, live code patches included. Set up lifts the game with no checks in its code
+and with room before every function's entry (see "Cheats cost nothing while no code cheat is on" below), and a patch, an injection or a
+breakpoint makes the patched function again on demand (`runtime/src/core/missed.cpp` runs `pkp_build.py --ondemand`, the bundled lifter
+and Zig, from `<game folder>/build/missed/manifest.tsv`; the first patch of a function takes a few seconds, later ones come from
+`build/missed/cache`), then redirects the function's entry and the callers that inlined it. It reaches them while the game runs, also on
+Apple silicon.
 
 ## Config contract (pkp.ini, read by the runtime)
 

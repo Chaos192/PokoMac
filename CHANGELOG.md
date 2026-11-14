@@ -6,8 +6,8 @@ of the game (version 2.0.1a): the download contains no game files.
 
 ## 1.1.0
 
-**Update:** press **Update**, then **Set up again** once (the game is translated again with the new CPU core and the live code patch
-checks; your saves, settings and shaders are kept).
+**Update:** press **Update**, then **Set up again** once (the game is translated again with the new CPU core and room for code
+cheats before every function; your saves, settings and shaders are kept).
 
 PokoMac is now **built on [AnySwitch](https://github.com/Chaos192/AnySwitch) by Chaos192**: the in-game menus, cheats, mods and
 local wireless come from it, and PokoMac's services were replaced with AnySwitch's clean rewrites.
