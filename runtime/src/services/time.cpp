@@ -751,6 +751,37 @@ std::shared_ptr<ipc::Service> make_static(const char* name, uint32_t perm) {
             buf_write(req.out_buf(0), &cs, sizeof cs);
             return 0;
         });
+        // CalculateStandardUserSystemClockDifferenceByUser(ClockSnapshot a, b) -> s64 TimeSpan (ns): how far the player moved the user clock
+        // between the two snapshots; 0 when they hold the same context, come from different clock sources, or automatic correction moved
+        // it. Pokopia calls it right after the name-entry keyboard closes (snapshots at open and close); without it the stub's failure
+        // made the SDK svcBreak (the owner's crash, 11-14). Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch, 36226ca3).
+        tcmd(s, 500, "CalculateStandardUserSystemClockDifferenceByUser", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            ClockSnapshot a{}, b{};
+            if (buf_read(req.in_buf(0), &a, sizeof a) != sizeof a || buf_read(req.in_buf(1), &b, sizeof b) != sizeof b) return res(116, 1);
+            int64_t diff = (b.user_ctx.offset - a.user_ctx.offset) * 1000000000ll;
+            const bool same = std::memcmp(&a.user_ctx, &b.user_ctx, sizeof a.user_ctx) == 0;
+            if (same || std::memcmp(a.user_ctx.source, b.user_ctx.source, 16) != 0) diff = 0;
+            else if (a.auto_correction && b.auto_correction &&
+                     (std::memcmp(a.network_ctx.source, a.steady_source, 16) == 0 || std::memcmp(b.network_ctx.source, b.steady_source, 16) == 0))
+                diff = 0;
+            rsp.push<int64_t>(diff);
+            return 0;
+        });
+        // CalculateSpanBetween(ClockSnapshot a, b) -> s64 TimeSpan (ns): the steady time between them on one steady clock, else the
+        // network times' difference, else TimeNotFound (116-200). Ported from AnySwitch (36226ca3) with 500.
+        tcmd(s, 501, "CalculateSpanBetween", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            ClockSnapshot a{}, b{};
+            if (buf_read(req.in_buf(0), &a, sizeof a) != sizeof a || buf_read(req.in_buf(1), &b, sizeof b) != sizeof b) return res(116, 1);
+            int64_t secs;
+            if (std::memcmp(a.steady_source, b.steady_source, 16) == 0) {
+                secs = b.steady_time_point - a.steady_time_point;
+            } else {
+                if (a.network_time == 0 || b.network_time == 0) return res(116, 200);
+                secs = b.network_time - a.network_time;
+            }
+            rsp.push<int64_t>(secs * 1000000000ll);
+            return 0;
+        });
         tcmd(s, 100, "IsStandardUserSystemClockAutomaticCorrectionEnabled", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
             std::lock_guard<std::mutex> lk(mu());
             rsp.push<uint8_t>(state_locked().auto_correction ? 1 : 0);
