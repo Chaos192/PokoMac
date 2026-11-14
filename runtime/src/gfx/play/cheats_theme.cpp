@@ -10,35 +10,51 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "nxrt/config.h"
 #include "nxrt/log.h"
+#include "theme_fonts.h"
 
 namespace nxrt::cheats::ui::theme {
 namespace {
 
 #if defined(NXRT_HAVE_CHEATS_FONTS)
-// Inter (SIL Open Font License 1.1, runtime/assets/fonts/LICENSE-Inter.txt): the launcher's typeface, static instances made from its
-// @fontsource-variable/inter files and subset to Latin (tools: scratch mkfont.py, see runtime/assets/fonts/README-Inter.md).
+// The overlay's faces, compiled in (runtime/assets/fonts, made by runtime/scripts/make_overlay_fonts.py; cmake/gfx.cmake writes the .inc
+// files at configure): Inter 4.1 (SIL OFL 1.1, LICENSE-Inter.txt), the launcher's typeface; AnySwitch Mono, Cascadia Mono 2407.24 subset
+// and renamed (SIL OFL 1.1 with the Reserved Font Name "Cascadia Code", LICENSE-CascadiaCode.txt); AnySwitch Symbols, DejaVu Sans' symbol
+// blocks renamed (LICENSE-DejaVu.txt). A build folder configured before the mono and symbol faces existed has only Inter's files until
+// cmake runs again (it does on its own: the font files are configure dependencies): the overlay then has Inter alone.
 alignas(4) const unsigned char kInterRegular[] = {
 #include "cheats_font_inter_regular.inc"
-};
-alignas(4) const unsigned char kInterRegularExt[] = {
-#include "cheats_font_inter_regular_ext.inc"
 };
 alignas(4) const unsigned char kInterSemiBold[] = {
 #include "cheats_font_inter_semibold.inc"
 };
+#if __has_include("cheats_font_anyswitchmono_regular.inc")
+#define NXRT_HAVE_MONO_FONT 1
+alignas(4) const unsigned char kMono[] = {
+#include "cheats_font_anyswitchmono_regular.inc"
+};
+#endif
+#if __has_include("cheats_font_anyswitchsymbols_regular.inc")
+#define NXRT_HAVE_SYMBOL_FONT 1
+alignas(4) const unsigned char kSymbols[] = {
+#include "cheats_font_anyswitchsymbols_regular.inc"
+};
+#endif
 #endif
 
-ImFont* g_body = nullptr;     // Inter Regular (+ Latin Extended)
-ImFont* g_strong = nullptr;   // Inter SemiBold
-ImFont* g_mono = nullptr;     // ImGui's default vector font (monospaced)
+ImFont* g_body = nullptr;     // Inter Regular (+ symbols, CJK)
+ImFont* g_strong = nullptr;   // Inter SemiBold (+ symbols, CJK)
+ImFont* g_mono = nullptr;     // AnySwitch Mono (+ Inter, symbols, CJK)
 Palette g_pal;
 float g_k = 1.f;
 ThemeSpec g_theme;            // the theme in force (set_theme; the default Sunrise until then)
 bool g_glass = false;         // after apply(): the panel is glass this frame
+bool g_applied_colours = false;          // apply() ran (style_check)
+constexpr ImVec4 kUnset(1.f, 0.f, 1.f, 0.123f);   // apply()'s marker of a colour not set yet (no theme colour has this alpha)
 float g_blur = 0.6f, g_tint = 0.55f;
 
 constexpr ImU32 rgb(int r, int g, int b, float a = 1.f) {
@@ -104,40 +120,99 @@ float glass_blur() { return g_blur; }
 float glass_tint() { return g_tint; }
 
 // ---- fonts ---------------------------------------------------------------------------------------------------------------------------
+namespace {
+// The fallbacks merged into a face: the symbols (glyphs Inter has not got), then the system's CJK faces, in that order (the first source
+// that has a glyph draws it).
+// ImGui sizes a face by its ascender to descender height; a fallback with a taller box would draw smaller than Inter at the same size, so
+// each is scaled to Inter's em (fonts::em_per_height).
+float g_inter_em = 0.f;
+void merge_fallbacks(ImFontAtlas* atlas, ImFont* dst) {
+    if (!dst) return;
+    ImFontConfig m;
+    m.MergeMode = true;
+    m.DstFont = dst;
+    m.FontDataOwnedByAtlas = false;
+#if defined(NXRT_HAVE_CHEATS_FONTS)
+    if (g_inter_em <= 0.f) g_inter_em = fonts::em_per_height(kInterRegular, sizeof kInterRegular, 0);
+#endif
+#if defined(NXRT_HAVE_SYMBOL_FONT)
+    std::snprintf(m.Name, sizeof m.Name, "AnySwitch Symbols");
+    {
+        ImFontConfig s = m;
+        const float em = fonts::em_per_height(kSymbols, sizeof kSymbols, 0);
+        if (g_inter_em > 0.f && em > 0.f) s.ExtraSizeScale = g_inter_em / em;
+        atlas->AddFontFromMemoryTTF(const_cast<unsigned char*>(kSymbols), static_cast<int>(sizeof kSymbols), 16.f, &s);
+    }
+#endif
+    for (const fonts::Mapped& f : fonts::system_cjk()) {
+        ImFontConfig c = m;
+        c.FontNo = static_cast<ImU32>(f.index);
+        if (g_inter_em > 0.f && f.em > 0.f) c.ExtraSizeScale = g_inter_em / f.em;
+        std::snprintf(c.Name, sizeof c.Name, "CJK %s", f.name);
+        atlas->AddFontFromMemoryTTF(const_cast<unsigned char*>(f.data), static_cast<int>(f.size), 16.f, &c);
+    }
+}
+ImFont* add_face(ImFontAtlas* atlas, const char* name, const unsigned char* data, size_t size) {
+    ImFontConfig cfg;
+    cfg.FontDataOwnedByAtlas = false;     // the bytes are the program's own (static)
+    std::snprintf(cfg.Name, sizeof cfg.Name, "%s", name);
+    return atlas->AddFontFromMemoryTTF(const_cast<unsigned char*>(data), static_cast<int>(size), 16.f, &cfg);
+}
+}  // namespace
+
 void load_fonts(ImFontAtlas* atlas) {
     // once per atlas, found by name: a new atlas (a new ImGui context) may sit at the address of a destroyed one, so a pointer says nothing
     if (!atlas) return;
-    g_body = g_strong = nullptr;
-    g_mono = atlas->Fonts.Size > 0 ? atlas->Fonts[0] : nullptr;
+    g_body = g_strong = g_mono = nullptr;
+    ImFont* own = nullptr;
     for (ImFont* f : atlas->Fonts) {
         if (std::strcmp(f->GetDebugName(), "Inter Regular") == 0 && !g_body) g_body = f;
         if (std::strcmp(f->GetDebugName(), "Inter SemiBold") == 0 && !g_strong) g_strong = f;
-        if (std::strcmp(f->GetDebugName(), "Theme font") == 0) g_body = g_strong = f;
+        if (std::strcmp(f->GetDebugName(), "AnySwitch Mono") == 0 && !g_mono) g_mono = f;
+        if (std::strcmp(f->GetDebugName(), "Theme font") == 0) own = f;
     }
-    if (g_body) return;
+    if (!g_body && !atlas->Fonts.empty()) g_body = atlas->Fonts[0];   // only the last resort below was there
+    if (g_body) {
+        if (own) g_body = g_strong = own;
+        if (!g_strong) g_strong = g_body;
+        if (!g_mono) g_mono = g_body;
+        return;
+    }
 #if defined(NXRT_HAVE_CHEATS_FONTS)
-    ImFontConfig cfg;
-    cfg.FontDataOwnedByAtlas = false;     // the bytes are the program's own (static)
-    std::snprintf(cfg.Name, sizeof cfg.Name, "Inter Regular");
-    g_body = atlas->AddFontFromMemoryTTF(const_cast<unsigned char*>(kInterRegular), static_cast<int>(sizeof kInterRegular), 16.f, &cfg);
-    ImFontConfig ext = cfg;
-    ext.MergeMode = true;                 // the Latin Extended letters into the same face
-    std::snprintf(ext.Name, sizeof ext.Name, "Inter Regular Ext");
-    if (g_body) atlas->AddFontFromMemoryTTF(const_cast<unsigned char*>(kInterRegularExt), static_cast<int>(sizeof kInterRegularExt), 16.f, &ext);
-    ImFontConfig sb = cfg;
-    std::snprintf(sb.Name, sizeof sb.Name, "Inter SemiBold");
-    g_strong = atlas->AddFontFromMemoryTTF(const_cast<unsigned char*>(kInterSemiBold), static_cast<int>(sizeof kInterSemiBold), 16.f, &sb);
-    if (g_strong) {                       // its accented letters come from the regular face
-        ImFontConfig sbx = ext;
-        atlas->AddFontFromMemoryTTF(const_cast<unsigned char*>(kInterRegularExt), static_cast<int>(sizeof kInterRegularExt), 16.f, &sbx);
+    // Inter Regular first: Fonts[0] is the context's default font
+    g_body = add_face(atlas, "Inter Regular", kInterRegular, sizeof kInterRegular);
+    merge_fallbacks(atlas, g_body);
+    g_strong = add_face(atlas, "Inter SemiBold", kInterSemiBold, sizeof kInterSemiBold);
+    merge_fallbacks(atlas, g_strong);
+#if defined(NXRT_HAVE_MONO_FONT)
+    g_mono = add_face(atlas, "AnySwitch Mono", kMono, sizeof kMono);
+#endif
+    if (g_mono) {   // letters the mono subset has not got (Greek, Cyrillic, ...) from Inter, then the symbols and CJK
+        ImFontConfig m;
+        m.MergeMode = true;
+        m.DstFont = g_mono;
+        m.FontDataOwnedByAtlas = false;
+        std::snprintf(m.Name, sizeof m.Name, "AnySwitch Mono + Inter");
+        atlas->AddFontFromMemoryTTF(const_cast<unsigned char*>(kInterRegular), static_cast<int>(sizeof kInterRegular), 16.f, &m);
+        merge_fallbacks(atlas, g_mono);
     }
 #endif
+    if (!g_body) {
+        // overlay-theme: last-resort font. Only a build without the compiled-in faces (NXRT_HAVE_CHEATS_FONTS unset: the font files were
+        // missing at configure) gets here; it is ImGui's own, so the overlay still has text. tools/dev/overlay_theme_guard.py allows it
+        // here and nowhere else.
+        g_body = atlas->AddFontDefaultVector();
+        NXLOG_W("cheats", "the overlay's fonts are not compiled in (runtime/assets/fonts missing at configure): ImGui's own font is used");
+    }
+    if (!g_strong) g_strong = g_body;
+    if (!g_mono) g_mono = g_body;
     // the theme ([cheats] theme) may bring its own font: it replaces Inter for the text (headings too); a font that does not load keeps Inter
     g_theme = load_theme(config_get_str("cheats", "theme", ""), nullptr);
     if (!g_theme.font.empty()) {
-        ImFontConfig own;
-        std::snprintf(own.Name, sizeof own.Name, "Theme font");
-        if (ImFont* f = atlas->AddFontFromFileTTF(g_theme.font.c_str(), 16.f, &own)) {
+        ImFontConfig cfg;
+        std::snprintf(cfg.Name, sizeof cfg.Name, "Theme font");
+        if (ImFont* f = atlas->AddFontFromFileTTF(g_theme.font.c_str(), 16.f, &cfg)) {
+            merge_fallbacks(atlas, f);
             g_body = f;
             g_strong = f;
         } else {
@@ -145,6 +220,16 @@ void load_fonts(ImFontAtlas* atlas) {
         }
     }
 }
+
+ImFont* font_of(Type t) {
+    switch (t) {
+        case Type::Strong: case Type::Title: case Type::Display: return g_strong ? g_strong : g_body;
+        case Type::Mono: return g_mono ? g_mono : g_body;
+        default: return g_body;
+    }
+}
+
+const char* cjk_fonts() { return fonts::system_cjk_names(); }
 
 float size_of(Type t) {
     const float b = g_theme.font_size > 0.f ? g_theme.font_size : 16.f;   // the theme's body size (16, the launcher's 1rem, by default)
@@ -157,24 +242,8 @@ float size_of(Type t) {
     }
 }
 
-void push(Type t) {
-    ImFont* f = nullptr;
-    switch (t) {
-        case Type::Strong: case Type::Title: case Type::Display: f = g_strong ? g_strong : g_body; break;
-        case Type::Mono: f = g_mono; break;
-        default: f = g_body; break;
-    }
-    ImGui::PushFont(f, size_of(t));
-}
-void push(Type t, float scale) {
-    ImFont* f = nullptr;
-    switch (t) {
-        case Type::Strong: case Type::Title: case Type::Display: f = g_strong ? g_strong : g_body; break;
-        case Type::Mono: f = g_mono; break;
-        default: f = g_body; break;
-    }
-    ImGui::PushFont(f, size_of(t) * scale);
-}
+void push(Type t) { ImGui::PushFont(font_of(t), size_of(t)); }
+void push(Type t, float scale) { ImGui::PushFont(font_of(t), size_of(t) * scale); }
 void pop() { ImGui::PopFont(); }
 
 // ---- style ---------------------------------------------------------------------------------------------------------------------------
@@ -267,9 +336,58 @@ void apply(const Look& look, const unsigned char* frame_rgba, bool blur_ok) {
     s.SeparatorTextPadding = ImVec2(0.f, S1);
     s.SelectableTextAlign = ImVec2(0.f, 0.5f);
     s.DisabledAlpha = 0.45f;
+    // every other variable from the tokens too, so nothing keeps ImGui's look (tools/dev/overlay_theme_guard.py, style_check)
+    s.Alpha = 1.f;
+    s.WindowBorderHoverPadding = 4.f;
+    s.WindowMinSize = ImVec2(S8, S8);
+    s.WindowMenuButtonPosition = ImGuiDir_None;   // no collapse triangle: windows have the overlay's header (begin_window)
+    s.TouchExtraPadding = ImVec2(0.f, 0.f);
+    s.ColumnsMinSpacing = S2;
+    s.ScrollbarPadding = 2.f;                    // a thin pill floating in its lane, the launcher's overlay scroll bar
+    s.LogSliderDeadzone = 4.f;
+    s.ImageRounding = kRadiusSm * rk;
+    s.ImageBorderSize = 0.f;
+    s.TabBorderSize = 0.f;
+    s.TabMinWidthBase = S8;
+    s.TabMinWidthShrink = S8;
+    s.TabCloseButtonMinWidthSelected = -1.f;     // always
+    s.TabCloseButtonMinWidthUnselected = 0.f;    // on hover only
+    s.TabBarBorderSize = 1.f;
+    s.TabBarOverlineSize = 2.f;
+    s.TableAngledHeadersAngle = 35.f * IM_PI / 180.f;
+    s.TableAngledHeadersTextAlign = ImVec2(0.5f, 0.f);
+    s.TreeLinesFlags = ImGuiTreeNodeFlags_DrawLinesNone;
+    s.TreeLinesSize = 1.f;
+    s.TreeLinesRounding = 0.f;
+    s.MenuItemRounding = kRadiusXs * rk;
+    s.SelectableRounding = kRadiusXs * rk;
+    s.DragDropTargetRounding = kRadiusSm * rk;
+    s.DragDropTargetBorderSize = 2.f;
+    s.DragDropTargetPadding = 3.f;
+    s.ColorMarkerSize = 3.f;
+    s.ColorButtonPosition = ImGuiDir_Left;
+    s.ButtonTextAlign = ImVec2(0.5f, 0.5f);
+    s.InputTextCursorSize = 2.f;
+    s.SeparatorSize = 1.f;
+    s.SeparatorTextAlign = ImVec2(0.f, 0.5f);
+    s.DisplayWindowPadding = ImVec2(S5, S5);
+    s.DisplaySafeAreaPadding = ImVec2(S2, S2);
+    s.MouseCursorScale = 1.f;
+    s.AntiAliasedLines = true;
+    s.AntiAliasedLinesUseTex = true;
+    s.AntiAliasedFill = true;
+    s.CurveTessellationTol = 1.25f;
+    s.CircleTessellationMaxError = 0.25f;        // round knobs and pills stay round at every size
+    s.HoverStationaryDelay = 0.15f;
+    s.HoverDelayShort = 0.25f;
+    s.HoverDelayNormal = 0.5f;
+    s.HoverFlagsForTooltipMouse = ImGuiHoveredFlags_Stationary | ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled;
+    s.HoverFlagsForTooltipNav = ImGuiHoveredFlags_NoSharedDelay | ImGuiHoveredFlags_DelayNormal | ImGuiHoveredFlags_AllowWhenDisabled;
     s.ScaleAllSizes(g_k);
 
     ImVec4* c = s.Colors;
+    // every colour starts as a marker no theme colour is: style_check() finds any apply() left out (a colour a newer ImGui adds)
+    for (int i = 0; i < ImGuiCol_COUNT; ++i) c[i] = kUnset;
     const ImVec4 a = v4(ac);
     c[ImGuiCol_Text] = v4(p.text);
     c[ImGuiCol_TextDisabled] = v4(p.text3);
@@ -329,6 +447,67 @@ void apply(const Look& look, const unsigned char* frame_rgba, bool blur_ok) {
     c[ImGuiCol_NavWindowingHighlight] = a;
     c[ImGuiCol_NavWindowingDimBg] = v4(p.scrim_bottom);
     c[ImGuiCol_ModalWindowDimBg] = v4(p.modal_dim);
+    c[ImGuiCol_CheckboxSelectedBg] = a;  // a checked box is filled with the accent (theme::checkbox draws it the same)
+    c[ImGuiCol_DragDropTargetBg] = v4(p.accent_tint);
+    c[ImGuiCol_UnsavedMarker] = v4(p.warn);
+    for (int i = 0; i < ImGuiCol_COUNT; ++i)
+        if (c[i].x == kUnset.x && c[i].y == kUnset.y && c[i].z == kUnset.z && c[i].w == kUnset.w) {
+            static bool logged = false;
+            if (!logged) {
+                logged = true;
+                NXLOG_W("cheats", "theme: ImGui colour %s has no theme value (a newer ImGui?): drawn in the text colour", ImGui::GetStyleColorName(i));
+            }
+            c[i] = v4(p.text);
+        }
+    g_applied_colours = true;
+}
+
+bool style_check(std::string* why) {
+    auto fail = [&](const std::string& w) {
+        if (why) *why = w;
+        return false;
+    };
+    if (!ImGui::GetCurrentContext()) return fail("no ImGui context");
+    if (!g_applied_colours) return fail("the theme was never applied (theme::apply)");
+    const ImGuiStyle& s = ImGui::GetStyle();
+    // the stock style's colours: a fresh ImGuiStyle holds StyleColorsDark's
+    const ImGuiStyle stock;
+    int same = 0;
+    std::string first;
+    for (int i = 0; i < ImGuiCol_COUNT; ++i) {
+        const ImVec4 v = s.Colors[i], d = stock.Colors[i];
+        if (v.x == kUnset.x && v.y == kUnset.y && v.z == kUnset.z) return fail(std::string("colour ") + ImGui::GetStyleColorName(i) + " not set");
+        const ImU32 u = ImGui::ColorConvertFloat4ToU32(v);
+        if (is_stock_colour(u)) return fail(std::string("colour ") + ImGui::GetStyleColorName(i) + " is ImGui's stock blue");
+        if (v.x == d.x && v.y == d.y && v.z == d.z && v.w == d.w && v.w > 0.f && !(v.x == 0.f && v.y == 0.f && v.z == 0.f)) {
+            if (!same++) first = ImGui::GetStyleColorName(i);
+        }
+    }
+    if (same > 3) return fail(std::to_string(same) + " colours are StyleColorsDark's (" + first + ", ...)");
+    if (s.WindowMenuButtonPosition != ImGuiDir_None) return fail("the window collapse button is ImGui's");
+    if (s.ScrollbarRounding < s.ScrollbarSize * 0.5f) return fail("square scroll bar");
+    ImFont* def = ImGui::GetIO().FontDefault ? ImGui::GetIO().FontDefault : (ImGui::GetIO().Fonts->Fonts.empty() ? nullptr : ImGui::GetIO().Fonts->Fonts[0]);
+    if (!def) return fail("no font");
+#if defined(NXRT_HAVE_CHEATS_FONTS)
+    if (def != g_body && std::strcmp(def->GetDebugName(), "Inter Regular") != 0) return fail(std::string("default font is ") + def->GetDebugName());
+    for (ImFont* f : ImGui::GetIO().Fonts->Fonts)
+        if (std::strstr(f->GetDebugName(), "Proggy")) return fail(std::string("ImGui's own font is in the atlas: ") + f->GetDebugName());
+    if (ImGui::GetFont() && std::strstr(ImGui::GetFont()->GetDebugName(), "Proggy")) return fail("the font in force is ImGui's own");
+#endif
+    return true;
+}
+
+bool is_stock_colour(ImU32 c) {
+    // The blues of StyleColorsDark and Light (buttons, headers, check marks, the focus ring: 66,150,250; frames and title bars:
+    // 41,74,122; slider grabs, pressed buttons, separators, tabs) and Classic's purples. Matched on RGB (any alpha, +-1): no theme colour
+    // is one of these, so a vertex in one of them was drawn by a stock path.
+    const int r = static_cast<int>(c >> IM_COL32_R_SHIFT & 0xFF), g = static_cast<int>(c >> IM_COL32_G_SHIFT & 0xFF),
+              b = static_cast<int>(c >> IM_COL32_B_SHIFT & 0xFF);
+    static const int kStock[][3] = {{66, 150, 250}, {41, 74, 122}, {61, 133, 224}, {15, 135, 250},
+                                    {26, 102, 191}, {51, 105, 173}, {120, 120, 176}, {102, 102, 230}};
+    for (const auto& k : kStock)
+        if (std::abs(r - k[0]) <= 1 && std::abs(g - k[1]) <= 1 && std::abs(b - k[2]) <= 1) return true;
+    return false;
 }
 
 // ---- icons ---------------------------------------------------------------------------------------------------------------------------
@@ -474,6 +653,19 @@ void icon(ImDrawList* dl, Icon ic, ImVec2 c, float size, ImU32 col) {
             line(12, 16, 12, 22);
             poly({8, 3, 16, 3, 15, 9, 18.5f, 12.5f, 18.5f, 16, 5.5f, 16, 5.5f, 12.5f, 9, 9}, true);
             break;
+        case Icon::Minus: line(5, 12, 19, 12); break;
+        case Icon::ChevronDown: poly({6, 9, 12, 15, 18, 9}); break;
+        case Icon::Power:
+            dl->PathArcTo(P(12, 13), 8 * u, IM_PI * -0.28f, IM_PI * 1.28f, 24); dl->PathStroke(col, 0, t);
+            line(12, 3, 12, 12);
+            break;
+        case Icon::Mark: {   // the AnySwitch mark (launcher/scripts/brand/mark.svg): a monoline A whose crossbar is the rising sun
+            const float tm = std::max(1.5f, 2.6f * u);
+            const ImVec2 a[3] = {P(5.5f, 20), P(12, 4), P(18.5f, 20)};
+            dl->AddPolyline(a, 3, col, ImDrawFlags_None, tm);
+            dl->AddCircleFilled(P(12, 15.2f), 2.1f * u, col);
+            break;
+        }
         default: break;
     }
 }
@@ -536,7 +728,7 @@ bool icon_button(const char* id, Icon ic, const char* tooltip, Btn kind, float s
     ImGui::PushID(id);
     const bool r = button("", ic, kind, 0.f, size > 0.f ? size : kControlH);
     ImGui::PopID();
-    if (tooltip && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("%s", tooltip);
+    if (tooltip && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) theme::tooltip("%s", tooltip);
     return r;
 }
 

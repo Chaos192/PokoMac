@@ -8,7 +8,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <string>
+
+#include "play/cheats_theme.h"
 
 namespace nxrt::test {
 namespace {
@@ -164,6 +168,67 @@ void soft_render(ImDrawData* dd, std::vector<uint8_t>& rgba, int w, int h) {
             }
         }
     }
+}
+
+bool theme_guard(ImDrawData* dd, const char* what) {
+    namespace th = nxrt::cheats::ui::theme;
+    std::string why;
+    if (!th::style_check(&why)) {
+        std::printf("FAILED %s: theme guard: %s\n", what, why.c_str());
+        return false;
+    }
+    int stock = 0, verts = 0;
+    ImU32 first = 0;
+    if (dd)
+        for (const ImDrawList* dl : dd->CmdLists)
+            for (const ImDrawVert& v : dl->VtxBuffer) {
+                ++verts;
+                if ((v.col >> IM_COL32_A_SHIFT) && th::is_stock_colour(v.col)) {
+                    if (!stock++) first = v.col;
+                }
+            }
+    if (stock) {
+        std::printf("FAILED %s: theme guard: %d of %d vertices have ImGui's stock colours (first #%06x)\n", what, stock, verts,
+                    static_cast<unsigned>(((first & 0xFF) << 16) | (first & 0xFF00) | ((first >> 16) & 0xFF)));
+        return false;
+    }
+    return true;
+}
+
+const char* background_name(int kind) {
+    static const char* const k[] = {"scene", "light", "dark", "busy"};
+    return kind >= 0 && kind < 4 ? k[kind] : "scene";
+}
+
+void background(int kind, std::vector<uint8_t>& px, int w, int h) {
+    px.assign(static_cast<size_t>(w) * h * 4, 255);
+    uint32_t seed = 0x9e3779b9u;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            const float fy = static_cast<float>(y) / h, fx = static_cast<float>(x) / w;
+            float r = 0, g = 0, b = 0;
+            if (kind == 1) {          // light: a pale sky over snow, a white sun
+                r = 0.86f + 0.10f * fy; g = 0.92f + 0.06f * fy; b = 0.98f;
+                const float sx = fx - 0.25f, sy = fy - 0.25f;
+                if (sx * sx * 3.16f + sy * sy < 0.012f) { r = g = b = 1.f; }
+                if (fy > 0.66f + 0.05f * std::sin(fx * 5.f)) { r = 0.97f; g = 0.98f; b = 1.f; }
+            } else if (kind == 2) {   // dark: a night sky with a few stars over black hills
+                r = 0.02f + 0.03f * fy; g = 0.03f + 0.03f * fy; b = 0.07f + 0.05f * fy;
+                seed = seed * 1664525u + 1013904223u;
+                if ((seed >> 24) == 7 && fy < 0.6f) { r = g = b = 0.85f; }
+                if (fy > 0.72f + 0.06f * std::sin(fx * 9.f)) { r = 0.01f; g = 0.01f; b = 0.015f; }
+            } else {                  // busy: saturated diagonal stripes over a checkerboard of dark and bright squares (sharp edges everywhere)
+                const int u = std::max(1, w / 1280);
+                const int stripe = ((x + y) / (14 * u)) % 6;
+                static const float c6[6][3] = {{1, .2f, .2f}, {1, .85f, .1f}, {.1f, .8f, .3f}, {.1f, .5f, 1}, {.8f, .2f, 1}, {1, 1, 1}};
+                r = c6[stripe][0]; g = c6[stripe][1]; b = c6[stripe][2];
+                if (((x / (40 * u)) + (y / (40 * u))) % 2 == 0) { r *= 0.3f; g *= 0.3f; b *= 0.3f; }
+            }
+            uint8_t* p = &px[(static_cast<size_t>(y) * w + x) * 4];
+            p[0] = static_cast<uint8_t>(r * 255);
+            p[1] = static_cast<uint8_t>(g * 255);
+            p[2] = static_cast<uint8_t>(b * 255);
+        }
 }
 
 }  // namespace nxrt::test

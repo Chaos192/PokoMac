@@ -128,9 +128,15 @@ buttons (as key caps) of the device used last.
   fields as usual.
 
 **Look.** One theme module (`runtime/src/gfx/play/cheats_theme.cpp`) holds every token, taken from the launcher's `launcher/src/theme.css`
-(the default "Sunrise" tone: amber on warm dark, the same surfaces, lines, radii and spacing scale), its typeface Inter (OFL-1.1, compiled
-in: `runtime/assets/fonts/`; hex and code use ImGui's monospaced face), vector icons in the launcher's icon style, and the shared widgets
-(pill buttons, the launcher's switch, choice cards, chips, empty states, key caps for the hints). The panel is nearly opaque (text keeps
+(the default "Sunrise" tone: amber on warm dark, the same surfaces, lines, radii and spacing scale), its typeface Inter 4.1 (OFL-1.1, Latin,
+Greek and Cyrillic with tabular figures; hex and code in AnySwitch Mono, a Cascadia Mono subset; symbols from DejaVu Sans; all compiled in
+from `runtime/assets/fonts/`, made by `runtime/scripts/make_overlay_fonts.py`; Chinese, Japanese and Korean from the system's faces,
+`[overlay] cjk`), vector icons in the launcher's icon style, and the shared widgets (pill buttons, the launcher's switch, choice cards, chips,
+empty states, key caps for the hints, and themed stand-ins for every ImGui control the screens use: checkbox, radio, slider, select,
+stepper, disclosure, progress, colour swatch, graph, tooltip; `theme_widgets.cpp`). The same theme is the base style of every overlay
+frame from the first one on (`cheats::ui::setup_context`, `frame_style`), so the F1 menu, the pins, the software keyboard, the quit and
+controller prompts, the counter and notices and any debug window wear it too; `tools/dev/overlay_theme_guard.py` (CI) refuses ImGui's
+stock style, font, widgets and tool windows anywhere in the runtime, and both screenshot tests check every screen for them. The panel is nearly opaque (text keeps
 WCAG AA contrast over a white frame); the backdrop around it dims the game a little so it stays visible. Every size scales with the DPI
 scale times `[cheats] scale`. `accent = auto` takes the accent from the game frame: the frame under the overlay is read back once when it
 opens (`Renderer::capture_next_frame`, the overlay hidden for that one frame) and its most saturated colour, weighted by brightness, sets the

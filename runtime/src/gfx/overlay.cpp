@@ -37,14 +37,17 @@
 #include "extras/overlay_composite.h"
 #include "fps_stats.h"
 #include "../cheats/control.h"
+#include "play/cheats_theme.h"
 #include "play/cheats_ui.h"
 #include "play/hotkeys.h"
+#include "play/overlay_screens.h"
 #include "play/perf_pins.h"
 #include "play/play_ui.h"
 
 namespace nxrt::gfx {
 namespace {
 constexpr const char* kTag = "overlay";
+namespace th = cheats::ui::theme;
 
 ImGuiKey map_key(int sc) {
     if (sc >= SDL_SCANCODE_A && sc <= SDL_SCANCODE_Z) return static_cast<ImGuiKey>(ImGuiKey_A + (sc - SDL_SCANCODE_A));
@@ -114,27 +117,9 @@ std::string u32_to_utf8(const std::u32string& s, size_t from = 0, size_t to = st
     return out;
 }
 
-// Typographic punctuation the overlay's font has no glyph for, as plain ASCII, for the game's header and guide text (Pokopia's name question
-// is "What\u2019s your name?", drawn as "What?s" otherwise).
-std::string fold_punct(const std::string& s) {
-    std::u32string in = utf8_to_u32(s), out;
-    for (char32_t c : in) {
-        switch (c) {
-            case 0x2018: case 0x2019: case 0x201A: case 0x2032: out += U'\''; break;
-            case 0x201C: case 0x201D: case 0x201E: case 0x2033: out += U'"'; break;
-            case 0x2010: case 0x2011: case 0x2012: case 0x2013: case 0x2014: case 0x2212: out += U'-'; break;
-            case 0x2026: out += U"..."; break;
-            case 0x00A0: case 0x2002: case 0x2003: case 0x2009: case 0x3000: out += U' '; break;
-            default: out += c;
-        }
-    }
-    return u32_to_utf8(out);
-}
-
 // The grid: rows of 10 column units, a key spans `w` of them. Shift turns letters upper case and punctuation into its second character (alt).
 enum class KbOp : uint8_t { Char, Shift, Space, Back, Ok, Cancel };
 struct KbKey { char32_t ch; char32_t alt; int w; KbOp op; };
-constexpr int kKbUnits = 10;
 const std::vector<std::vector<KbKey>>& kb_rows() {
     static const std::vector<std::vector<KbKey>> rows = [] {
         std::vector<std::vector<KbKey>> r;
@@ -192,8 +177,7 @@ int shader_backlog() { return g_shader_backlog.load(std::memory_order_relaxed); 
 struct Overlay::Impl {
     Context ctx;
     ImGuiContext* imgui = nullptr;
-    ImGuiStyle base_style;            // the style at scale 1; style = base_style scaled by ui_scale (update_scale)
-    float ui_scale = 0.f;             // 0: not applied yet
+    float ui_scale = 0.f;             // the frame's DPI scale (update_scale; 0: not set yet); every frame's style is the theme at it (frame_style)
     bool backend_ready = false;
     std::atomic<bool> visible{false};
     std::atomic<bool> touch_btn{false};      // set_touch_button: the corner button and finger-sized controls
@@ -227,6 +211,7 @@ struct Overlay::Impl {
     // the auto accent: one frame without the overlay is read back when it opens (Renderer::capture_next_frame)
     std::atomic<bool> cheats_cap_req{false};
     bool cheats_cap_wait = false;
+    bool menu_cap_done = false;               // the F1 menu asked for the frame's colour since it opened (presenting thread)
     std::vector<uint8_t> cheats_cap;
     uint32_t cheats_cap_w = 0, cheats_cap_h = 0;
     bool restore_relative = false;
@@ -375,14 +360,8 @@ bool Overlay::Impl::touch_button_event(const input::Event& e) {
 
 void Overlay::Impl::draw_touch_button(bool open) {
     const ImVec4 r = touch_rect();
-    const float k = ui_scale > 0.f ? ui_scale : 1.f;
-    const ImVec2 p0(r.x, r.y), p1(r.x + r.z, r.y + r.w);
-    ImDrawList* dl = ImGui::GetForegroundDrawList();
-    dl->AddRectFilled(p0, p1, IM_COL32(20, 20, 24, open ? 200 : 150), 10.f * k);
-    dl->AddRect(p0, p1, IM_COL32(255, 255, 255, open ? 230 : 160), 10.f * k, 0, 1.5f * k);
-    const char* label = open ? "Close" : "Menu";
-    const ImVec2 ts = ImGui::CalcTextSize(label);
-    dl->AddText(ImVec2(p0.x + (r.z - ts.x) * 0.5f, p0.y + (r.w - ts.y) * 0.5f), IM_COL32(255, 255, 255, 235), label);
+    const ImVec2 p0(r.x, r.y);
+    play::screens::touch_button(ImGui::GetForegroundDrawList(), r, open);   // in the overlay's theme
     if (open) {
         // the menu is up: ImGui gets the mouse, so the button is a real widget this time
         ImGui::SetNextWindowPos(p0, ImGuiCond_Always);
@@ -412,7 +391,7 @@ void Overlay::Impl::diagnostics() {
     ImGui::SeparatorText("Presentation");
     const PresentMode modes[] = {PresentMode::Fifo, PresentMode::FifoRelaxed, PresentMode::Mailbox, PresentMode::Immediate};
     int cur = static_cast<int>(r.requested_present_mode());
-    if (ImGui::BeginCombo("Present mode", present_mode_name(modes[cur]))) {
+    if (th::begin_combo("Present mode", present_mode_name(modes[cur]))) {
         for (int i = 0; i < 4; ++i) {
             const bool ok = r.present_mode_supported(modes[i]);
             ImGui::BeginDisabled(!ok);
@@ -427,7 +406,7 @@ void Overlay::Impl::diagnostics() {
         char label[32];
         const double t = ctx.limiter->target_fps();
         std::snprintf(label, sizeof label, t > 0 ? "%.0f fps" : "unlimited", t);
-        if (ImGui::BeginCombo("Frame cap", label)) {
+        if (th::begin_combo("Frame cap", label)) {
             for (double v : kFpsChoices) {
                 std::snprintf(label, sizeof label, v > 0 ? "%.0f fps" : "unlimited", v);
                 if (ImGui::Selectable(label, v == t)) ctx.limiter->set_target_fps(v);
@@ -444,13 +423,13 @@ void Overlay::Impl::diagnostics() {
     if (ctx.has_window && platform::has_window()) {
         ImGui::SeparatorText("Window");
         const auto fm = platform::fullscreen_mode();
-        if (ImGui::RadioButton("Windowed", fm == platform::FullscreenMode::Windowed)) { want_fullscreen = true; new_fullscreen = platform::FullscreenMode::Windowed; }
+        if (th::radio("Windowed", fm == platform::FullscreenMode::Windowed)) { want_fullscreen = true; new_fullscreen = platform::FullscreenMode::Windowed; }
         ImGui::SameLine();
-        if (ImGui::RadioButton("Borderless", fm == platform::FullscreenMode::Borderless)) { want_fullscreen = true; new_fullscreen = platform::FullscreenMode::Borderless; }
+        if (th::radio("Borderless", fm == platform::FullscreenMode::Borderless)) { want_fullscreen = true; new_fullscreen = platform::FullscreenMode::Borderless; }
         ImGui::SameLine();
-        if (ImGui::RadioButton("Exclusive", fm == platform::FullscreenMode::Exclusive)) { want_fullscreen = true; new_fullscreen = platform::FullscreenMode::Exclusive; }
+        if (th::radio("Exclusive", fm == platform::FullscreenMode::Exclusive)) { want_fullscreen = true; new_fullscreen = platform::FullscreenMode::Exclusive; }
         bool rel = platform::relative_mouse();
-        if (ImGui::Checkbox("Raw mouse (relative mode)", &rel)) platform::set_relative_mouse(rel);
+        if (th::checkbox("Raw mouse (relative mode)", &rel)) platform::set_relative_mouse(rel);
         ImGui::SameLine();
         ImGui::TextDisabled(platform::relative_mouse_is_raw() ? "(unaccelerated)" : "(system scaling!)");
     }
@@ -461,7 +440,7 @@ void Overlay::Impl::diagnostics() {
     frame_ms[frame_ms_pos] = dt_ms;
     frame_ms_pos = (frame_ms_pos + 1) % 120;
     ImGui::Text("CPU frame %.2f ms (%.0f fps)   GPU %.2f ms (avg %.2f)", dt_ms, dt_ms > 0 ? 1000.f / dt_ms : 0.f, rs.gpu_ms_last, rs.gpu_ms_avg);
-    ImGui::PlotLines("##ft", frame_ms, 120, frame_ms_pos, nullptr, 0.f, 33.f, ImVec2(0, 48));
+    th::plot_lines("##ft", frame_ms, 120, frame_ms_pos, nullptr, 0.f, 33.f, ImVec2(ImGui::GetContentRegionAvail().x, th::px(48.f)));
     ImGui::Text("frames %llu, swapchains %llu, out-of-date %llu, screenshots %llu", static_cast<unsigned long long>(rs.frames),
                 static_cast<unsigned long long>(rs.swapchain_creates), static_cast<unsigned long long>(rs.out_of_date),
                 static_cast<unsigned long long>(rs.screenshots));
@@ -471,7 +450,7 @@ void Overlay::Impl::diagnostics() {
     ImGui::SeparatorText("NVN front end");
     ImGui::Text("%zu entry points, %zu implemented; stub calls %llu (%zu distinct)", nvn::entry_count(), nvn::implemented_count(),
                 static_cast<unsigned long long>(nvn::stub_calls_total()), nvn::stubs_called_distinct());
-    if (ImGui::TreeNode("Most called stubs")) {
+    if (th::tree_node("Most called stubs")) {
         auto calls = nvn::called_entries();
         int shown = 0;
         for (auto& c : calls) {
@@ -513,14 +492,13 @@ void Overlay::Impl::build_ui() {
     }
     ImGui::SetNextWindowPos(ImVec2(std::max(16.f * k, disp.x - diag_w - 16.f * k), 16.f * k), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(diag_w, 0), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowCollapsed(true, ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("Diagnostics")) diagnostics();
+    if (th::begin_window("Diagnostics", nullptr)) diagnostics();
     ImGui::End();
     for (auto& p : panels) {
         ImGui::SetNextWindowPos(ImVec2(16.f * k, 16.f * k), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(std::min(760.f * k, std::max(240.f, disp.x - 32.f * k)), std::min(680.f * k, std::max(200.f, disp.y - 32.f * k))),
                                  ImGuiCond_FirstUseEver);
-        if (ImGui::Begin(p.title.c_str())) p.fn();
+        if (th::begin_window(p.title.c_str(), nullptr)) p.fn();
         ImGui::End();
     }
 }
@@ -583,19 +561,8 @@ void Overlay::Impl::update_scale(const VkExtent2D& extent) {
     const bool touch = touch_btn.load(std::memory_order_relaxed);
     // finger-sized: a quarter bigger than the frame asks for, so rows and buttons reach about 40 px on a 720 to 800 pixel handheld screen
     const float want = std::round(std::clamp(static_cast<float>(extent.height) / 1080.f * (touch ? 1.25f : 1.f), touch ? 1.25f : 1.0f, 3.0f) * 20.f) / 20.f;   // steps of 0.05
-    if (want == ui_scale && touch == scaled_touch) return;
     ui_scale = want;
-    scaled_touch = touch;
-    ImGuiStyle& style = ImGui::GetStyle();
-    style = base_style;
-    style.ScaleAllSizes(want);
-    style.FontScaleDpi = want;
-    if (touch) {   // easier to hit with a finger: a taller row and a wider scroll bar and slider grip
-        style.FramePadding.y = std::max(style.FramePadding.y, 8.f * want);
-        style.ItemSpacing.y = std::max(style.ItemSpacing.y, 8.f * want);
-        style.ScrollbarSize = std::max(style.ScrollbarSize, 22.f * want);
-        style.GrabMinSize = std::max(style.GrabMinSize, 20.f * want);
-    }
+    scaled_touch = touch;   // the style itself is made every frame from the theme at this scale (cheats::ui::frame_style, draw)
 }
 
 std::unique_ptr<Overlay> Overlay::create(const Context& ctx, std::string* error) {
@@ -650,11 +617,10 @@ std::unique_ptr<Overlay> Overlay::create(const Context& ctx, std::string* error)
     io.LogFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     io.BackendFlags |= ImGuiBackendFlags_HasGamepad;   // without it ImGui ignores the gamepad keys that set_keyboard_pad sends while the page is open
-    ImGui::StyleColorsDark();
-    io.Fonts->AddFontDefaultVector();          // the scalable default font: stays sharp at every UI scale (update_scale)
-    cheats::ui::load_fonts(io.Fonts);          // the cheats overlay's Inter (the launcher's typeface); the default above stays the menu's
-    ImGui::GetStyle().FontSizeBase = 16.0f;
-    s.base_style = ImGui::GetStyle();
+    // the overlay's fonts (Inter first: the default font) and the theme as the base style, before the first frame: nothing the overlay
+    // draws starts from ImGui's stock look (tools/dev/overlay_theme_guard.py)
+    cheats::ui::setup_context();
+    NXLOG_I(kTag, "overlay fonts: Inter, AnySwitch Mono, symbols; CJK fallback: %s", th::cjk_fonts());
     const VkExtent2D e = ctx.renderer->extent();
     io.DisplaySize = ImVec2(static_cast<float>(e.width), static_cast<float>(e.height));
 
@@ -825,7 +791,7 @@ bool Overlay::Impl::kb_poll() {
     kb_keys = !kb_steam_want;
     if (now_id) {
         kb_req = std::move(r);
-        for (std::string* t : {&kb_req.title, &kb_req.header, &kb_req.sub, &kb_req.guide, &kb_req.ok_text}) *t = fold_punct(*t);
+        // (typographic punctuation, as in Pokopia's name question, draws as it is: Inter has it, the symbols and CJK faces the rest)
         kb_text = utf8_to_u32(kb_req.initial);
         if (kb_req.max_len && kb_text.size() > kb_req.max_len) kb_text.resize(kb_req.max_len);
         kb_caret = kb_text.size();
@@ -977,127 +943,65 @@ void Overlay::Impl::draw_keyboard(double now_s) {
         return;
     }
 
-    // A centred panel over the dimmed game, sized in units of the UI scale like the menu.
-    const ImVec2 disp = ImGui::GetIO().DisplaySize;
-    const float k = ui_scale > 0.f ? ui_scale : 1.f;
-    const float w = std::max(320.f, std::min(760.f * k, disp.x - 32.f * k));
-    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), disp, IM_COL32(0, 0, 0, 110));
-    // centred; at the top when Steam's keyboard comes up from the bottom of the screen
-    if (kb_steam_want) ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, std::round(disp.y * 0.04f)), ImGuiCond_Always, ImVec2(0.5f, 0.f));
-    else ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(w, 0), ImGuiCond_Always);
-    const std::string title = (kb_req.title.empty() ? std::string("Keyboard") : kb_req.title) + "###nxrt_swkbd";
-    const ImGuiWindowFlags wf = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
-                                ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoScrollbar | (kb_keys ? 0 : ImGuiWindowFlags_NoTitleBar);
-    if (ImGui::Begin(title.c_str(), nullptr, wf)) {
-        ImGui::PushTextWrapPos(0.f);
-        if (!kb_req.header.empty()) ImGui::TextUnformatted(kb_req.header.c_str());
-        if (!kb_req.sub.empty()) ImGui::TextDisabled("%s", kb_req.sub.c_str());
-        ImGui::PopTextWrapPos();
-
-        // the text field: drawn here, not an ImGui InputText, so the keyboard, the pad and the mouse all edit the same text and caret
-        const ImGuiStyle& style = ImGui::GetStyle();
-        ImFont* font = ImGui::GetFont();
-        const float big = ImGui::GetFontSize() * 1.25f;
-        const float fh = std::round(big * 1.7f), pad = style.FramePadding.x * 1.5f;
-        const ImVec2 p0 = ImGui::GetCursorScreenPos();
-        const float fw = ImGui::GetContentRegionAvail().x;
-        ImGui::Dummy(ImVec2(fw, fh));
-        const ImVec2 p1(p0.x + fw, p0.y + fh);
-        // Steam's keyboard, asked for once the field has its place (an auto-sized window takes its size in the frames after the first):
-        // Steam keeps the field uncovered and types into the window
-        if (kb_steam_want && !kb_steam_open && ++kb_frames >= 3) {
-            kb_steam_open = true;
-            host_steam_keyboard_open(static_cast<int>(p0.x), static_cast<int>(p0.y), static_cast<int>(fw), static_cast<int>(fh));
-        }
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        dl->AddRectFilled(p0, p1, ImGui::GetColorU32(ImGuiCol_FrameBg), style.FrameRounding);
-        dl->AddRect(p0, p1, ImGui::GetColorU32(ImGuiCol_Border), style.FrameRounding);
-        std::string shown, before;
-        if (kb_req.password) {
-            shown.assign(kb_text.size(), '*');
-            before.assign(kb_caret, '*');
-        } else {
-            shown = u32_to_utf8(kb_text);
-            before = u32_to_utf8(kb_text, 0, kb_caret);
-        }
-        const float cx = font->CalcTextSizeA(big, FLT_MAX, 0.0f, before.c_str()).x;
-        const float scroll = std::max(0.f, cx - (fw - 2.f * pad) + 2.f);   // keep the caret in view
-        const float ty = p0.y + (fh - big) * 0.5f;
-        dl->PushClipRect(ImVec2(p0.x + pad * 0.5f, p0.y), ImVec2(p1.x - pad * 0.5f, p1.y), true);
-        if (shown.empty() && !kb_req.guide.empty()) dl->AddText(font, big, ImVec2(p0.x + pad, ty), ImGui::GetColorU32(ImGuiCol_TextDisabled), kb_req.guide.c_str());
-        else dl->AddText(font, big, ImVec2(p0.x + pad - scroll, ty), ImGui::GetColorU32(ImGuiCol_Text), shown.c_str());
-        if (std::fmod(now_s, 1.0) < 0.6) {
-            const float x = p0.x + pad - scroll + cx;
-            dl->AddLine(ImVec2(x, ty), ImVec2(x, ty + big), ImGui::GetColorU32(ImGuiCol_Text), std::max(1.f, 1.5f * k));
-        }
-        dl->PopClipRect();
-        if (kb_req.max_len) {
-            char count[32];
-            std::snprintf(count, sizeof count, "%zu / %u", kb_text.size(), kb_req.max_len);
-            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + fw - ImGui::CalcTextSize(count).x);
-            ImGui::TextDisabled("%s", count);
-        }
-        ImGui::Spacing();
-
-        // the keys; the pad's key has a bright frame, the mouse clicks any of them
-        const float gap = std::round(style.ItemSpacing.x * 0.75f);
-        const float unit = (ImGui::GetContentRegionAvail().x - gap * (kKbUnits - 1)) / kKbUnits;
-        const float kh = std::round(ImGui::GetFontSize() * 2.3f);
-        const bool ok_allowed = kb_text.size() >= kb_req.min_len;
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(gap, gap));
-        for (int r = 0; r < nrows && !closed && kb_keys; ++r) {
-            int x = 0;
-            for (int i = 0; i < static_cast<int>(rows[r].size()) && !closed; ++i) {
-                const KbKey& key = rows[r][i];
-                if (i) ImGui::SameLine();
-                std::string label;
-                switch (key.op) {
-                    case KbOp::Char: label = u32_to_utf8(std::u32string(1, kb_shift ? key.alt : key.ch)); break;
-                    case KbOp::Shift: label = kb_shift == 2 ? "CAPS" : kb_shift ? "SHIFT" : "Shift"; break;
-                    case KbOp::Space: label = "Space"; break;
-                    case KbOp::Back: label = "Delete"; break;
-                    case KbOp::Ok: label = kb_req.ok_text.empty() ? "OK" : kb_req.ok_text; break;
-                    case KbOp::Cancel: label = "Cancel"; break;
-                }
-                ImGui::PushID(r * 32 + i);
-                const bool is_sel = r == kb_row && i == sel;
-                const bool lit = key.op == KbOp::Shift && kb_shift;
-                if (lit) ImGui::PushStyleColor(ImGuiCol_Button, style.Colors[ImGuiCol_ButtonActive]);
-                ImGui::BeginDisabled(key.op == KbOp::Ok && !ok_allowed);
-                if (ImGui::Button(label.c_str(), ImVec2(unit * key.w + gap * (key.w - 1), kh))) {
-                    kb_row = r;
-                    kb_unit = x;
-                    closed = kb_press(key);
-                }
-                ImGui::EndDisabled();
-                if (lit) ImGui::PopStyleColor();
-                if (is_sel)
-                    ImGui::GetWindowDrawList()->AddRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), IM_COL32(255, 200, 40, 255), style.FrameRounding,
-                                                        0, std::max(2.f, 2.5f * k));
-                ImGui::PopID();
-                x += key.w;
-            }
-        }
-        ImGui::PopStyleVar();
-        if (!closed) {
-            ImGui::Spacing();
-            // the face buttons are Switch buttons after the player's mapping: by printed label they are named so, by position they sit
-            // where a Switch pad has them
-            const bool lab = kb_by_label.load(std::memory_order_relaxed);
-            ImGui::PushTextWrapPos(0.f);
-            if (!kb_keys) {
-                ImGui::TextDisabled("Type on Steam's keyboard, Enter to confirm. Steam + X brings it back; any button shows the on-screen keys.");
-            } else {
-                ImGui::TextDisabled("Pad: %s type, %s delete, %s space, %s shift, L/R move, + OK, - cancel", lab ? "A" : "A (right)",
-                                    lab ? "B" : "B (bottom)", lab ? "Y" : "Y (left)", lab ? "X" : "X (top)");
-                ImGui::TextDisabled("Keyboard: type, Enter OK, Esc cancel, Ctrl+V paste");
-                if (kb_steam_want) ImGui::TextDisabled("Steam keyboard: Steam + X");
-            }
-            ImGui::PopTextWrapPos();
-        }
+    // The dialog (overlay_screens.cpp), in the overlay's theme: centred over the dimmed game; at the top when Steam's keyboard comes up from
+    // the bottom of the screen.
+    play::screens::KeyboardView v;
+    v.title = kb_req.title;
+    v.header = kb_req.header;
+    v.sub = kb_req.sub;
+    v.guide = kb_req.guide;
+    if (kb_req.password) {
+        v.shown.assign(kb_text.size(), '*');
+        v.before_caret.assign(kb_caret, '*');
+    } else {
+        v.shown = u32_to_utf8(kb_text);
+        v.before_caret = u32_to_utf8(kb_text, 0, kb_caret);
     }
-    ImGui::End();
+    if (kb_req.max_len) {
+        char count[32];
+        std::snprintf(count, sizeof count, "%zu / %u", kb_text.size(), kb_req.max_len);
+        v.count = count;
+    }
+    v.caret_on = std::fmod(now_s, 1.0) < 0.6;
+    v.keys = kb_keys;
+    v.steam = kb_steam_want;
+    v.pad = pad_last.load(std::memory_order_relaxed) || !kb_keys;
+    v.by_label = kb_by_label.load(std::memory_order_relaxed);
+    v.sel_row = kb_row;
+    v.sel_key = sel;
+    const bool ok_allowed = kb_text.size() >= kb_req.min_len;
+    for (int r = 0; r < nrows; ++r) {
+        std::vector<play::screens::KeyboardKey> row;
+        for (const KbKey& key : rows[r]) {
+            play::screens::KeyboardKey k;
+            k.w = key.w;
+            switch (key.op) {
+                case KbOp::Char: k.label = u32_to_utf8(std::u32string(1, kb_shift ? key.alt : key.ch)); break;
+                case KbOp::Shift: k.label = kb_shift == 2 ? "CAPS" : "Shift"; k.on = kb_shift != 0; break;
+                case KbOp::Space: k.label = "Space"; break;
+                case KbOp::Back: k.label = "Delete"; break;
+                case KbOp::Ok: k.label = kb_req.ok_text.empty() ? "OK" : kb_req.ok_text; k.accent = true; k.disabled = !ok_allowed; break;
+                case KbOp::Cancel: k.label = "Cancel"; break;
+            }
+            row.push_back(std::move(k));
+        }
+        v.rows.push_back(std::move(row));
+    }
+    play::screens::KeyboardResult res;
+    play::screens::keyboard(v, &res);
+    // Steam's keyboard, asked for once the field has its place (an auto-sized window takes its size in the frames after the first): Steam
+    // keeps the field uncovered and types into the window
+    if (kb_steam_want && !kb_steam_open && res.field_placed && ++kb_frames >= 3) {
+        kb_steam_open = true;
+        host_steam_keyboard_open(static_cast<int>(res.field[0]), static_cast<int>(res.field[1]), static_cast<int>(res.field[2]), static_cast<int>(res.field[3]));
+    }
+    if (res.row >= 0 && res.row < nrows && res.key >= 0 && res.key < static_cast<int>(rows[res.row].size())) {
+        int x = 0;
+        for (int j = 0; j < res.key; ++j) x += rows[res.row][j].w;
+        kb_row = res.row;
+        kb_unit = x;
+        closed = kb_press(rows[res.row][res.key]);
+    }
     if (closed) clear_imgui_input(imgui);
 }
 
@@ -1115,45 +1019,19 @@ bool Overlay::Impl::quit_key_event(const input::Event& e) {
 }
 
 void Overlay::Impl::draw_quit_prompt() {
-    const ImVec2 disp = ImGui::GetIO().DisplaySize;
-    const float k = ui_scale > 0.f ? ui_scale : 1.f;
-    const float w = std::max(280.f, std::min(440.f * k, disp.x - 32.f * k));
-    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), disp, IM_COL32(0, 0, 0, 110));
-    ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(w, 0), ImGuiCond_Always);
-    ImGui::SetNextWindowFocus();
-    const ImGuiWindowFlags wf = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
-                                ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoScrollbar;
+    // the face buttons are Switch buttons after the player's mapping, named as in the on-screen keyboard's hints
+    const play::screens::QuitChoice c =
+        play::screens::quit_prompt(quit_confirmed.load(), pad_last.load(std::memory_order_relaxed), kb_by_label.load(std::memory_order_relaxed));
     bool cancelled = false;
-    if (ImGui::Begin("Close the game?###nxrt_quit", nullptr, wf)) {
-        const bool done = quit_confirmed.load();
-        ImGui::PushTextWrapPos(0.f);
-        ImGui::TextUnformatted(done ? "Closing ..." : "Progress since the game's last save is lost.");
-        ImGui::PopTextWrapPos();
-        ImGui::Spacing();
-        const float gap = ImGui::GetStyle().ItemSpacing.x;
-        const ImVec2 bs((ImGui::GetContentRegionAvail().x - gap) * 0.5f, std::round(ImGui::GetFontSize() * 2.2f));
-        ImGui::BeginDisabled(done);
-        if (ImGui::Button("Quit", bs)) quit_answer(true);
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel", bs)) {
-            quit_answer(false);
-            cancelled = true;
-        }
-        if (ImGui::Button("Settings", ImVec2(bs.x * 2.f + gap, bs.y))) {
-            quit_to_settings();
-            cancelled = true;
-        }
-        ImGui::EndDisabled();
-        ImGui::Spacing();
-        // the face buttons are Switch buttons after the player's mapping, named as in the on-screen keyboard's help line
-        const bool lab = kb_by_label.load(std::memory_order_relaxed);
-        ImGui::PushTextWrapPos(0.f);
-        ImGui::TextDisabled("Pad: %s quit, %s cancel, %s settings", lab ? "A" : "A (right)", lab ? "B" : "B (bottom)", lab ? "X" : "X (top)");
-        ImGui::TextDisabled("Keyboard: Enter quit, Esc cancel");
-        ImGui::PopTextWrapPos();
+    if (c == play::screens::QuitChoice::Quit) quit_answer(true);
+    if (c == play::screens::QuitChoice::Cancel) {
+        quit_answer(false);
+        cancelled = true;
     }
-    ImGui::End();
+    if (c == play::screens::QuitChoice::Settings) {
+        quit_to_settings();
+        cancelled = true;
+    }
     if (cancelled) clear_imgui_input(imgui);
 }
 
@@ -1396,39 +1274,11 @@ void Overlay::Impl::refresh_counter_text(double now_s) {
     }
 }
 
-// Draws the counter with the foreground draw list: no window, so it never takes mouse or keyboard input.
+// Draws the counter with the foreground draw list: no window, so it never takes mouse or keyboard input (a notice in the theme).
 void Overlay::Impl::draw_counter(const FrameInfo& f, double now_s) {
     refresh_counter_text(now_s);
-    ImFont* font = ImGui::GetFont();
-    const float size = std::clamp(std::round(static_cast<float>(f.extent.height) / 45.f), 14.f, 40.f);
-    const float pad = size * 0.4f;
-    const float gap = size * 0.15f;
-    const float margin = size * 0.8f;
-    const int n = counter_n;
-    float lines_w[4] = {};
-    float line_h = 0, text_w = 0;
-    for (int i = 0; i < n; ++i) {
-        const ImVec2 sz = font->CalcTextSizeA(size, FLT_MAX, 0.0f, counter_lines[i].c_str());
-        lines_w[i] = sz.x;
-        line_h = std::max(line_h, sz.y);
-        text_w = std::max(text_w, sz.x);
-    }
-    const float box_w = text_w + 2.f * pad;
-    const float box_h = static_cast<float>(n) * line_h + static_cast<float>(n - 1) * gap + 2.f * pad;
-    const int corner = counter_corner.load(std::memory_order_relaxed);
-    const bool right = corner == 1 || corner == 3;
-    const bool bottom = corner >= 2;
-    const float W = static_cast<float>(f.extent.width), H = static_cast<float>(f.extent.height);
-    const float x0 = right ? W - margin - box_w : margin;
-    const float y0 = bottom ? H - margin - box_h : margin;
-
-    ImDrawList* dl = ImGui::GetForegroundDrawList();
-    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + box_w, y0 + box_h), IM_COL32(0, 0, 0, 140), size * 0.3f);
-    for (int i = 0; i < n; ++i) {
-        const float x = right ? x0 + box_w - pad - lines_w[i] : x0 + pad;
-        const float y = y0 + pad + static_cast<float>(i) * (line_h + gap);
-        dl->AddText(font, size, ImVec2(x, y), IM_COL32(255, 255, 255, 255), counter_lines[i].c_str());
-    }
+    play::screens::fps_counter(ImGui::GetForegroundDrawList(), counter_lines, counter_n, counter_corner.load(std::memory_order_relaxed),
+                               ImVec2(static_cast<float>(f.extent.width), static_cast<float>(f.extent.height)));
 }
 
 bool Overlay::Impl::note_visible(double now_s) {
@@ -1451,19 +1301,7 @@ bool Overlay::Impl::note_visible(double now_s) {
 }
 
 void Overlay::Impl::draw_note(const FrameInfo& f) {
-    char text[96];
-    const int pending = shader_backlog();
-    if (pending > 0) std::snprintf(text, sizeof text, "Preparing shaders (%d left)", pending);
-    else std::snprintf(text, sizeof text, "Preparing shaders (done)");
-    ImFont* font = ImGui::GetFont();
-    const float size = std::clamp(std::round(static_cast<float>(f.extent.height) / 60.f), 12.f, 28.f);
-    const float pad = size * 0.4f;
-    const ImVec2 sz = font->CalcTextSizeA(size, FLT_MAX, 0.0f, text);
-    const float W = static_cast<float>(f.extent.width), H = static_cast<float>(f.extent.height);
-    const float x0 = (W - sz.x) * 0.5f - pad, y0 = H - size * 0.8f - sz.y - 2.f * pad;
-    ImDrawList* dl = ImGui::GetForegroundDrawList();
-    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + sz.x + 2.f * pad, y0 + sz.y + 2.f * pad), IM_COL32(0, 0, 0, 120), size * 0.3f);
-    dl->AddText(font, size, ImVec2(x0 + pad, y0 + pad), IM_COL32(255, 255, 255, 220), text);
+    play::screens::shader_note(ImGui::GetForegroundDrawList(), shader_backlog(), ImVec2(static_cast<float>(f.extent.width), static_cast<float>(f.extent.height)));
 }
 
 bool Overlay::Impl::save_notice_visible(double now_s) {
@@ -1476,17 +1314,8 @@ bool Overlay::Impl::save_notice_visible(double now_s) {
 }
 
 void Overlay::Impl::draw_save_notice(const FrameInfo& f) {
-    char text[160];
-    std::snprintf(text, sizeof text, "Save failed: %s. The last good save is kept.", services::fsapi::save_failure_reason(services::fsapi::save_failures().host_error));
-    ImFont* font = ImGui::GetFont();
-    const float size = std::clamp(std::round(static_cast<float>(f.extent.height) / 45.f), 14.f, 36.f);
-    const float pad = size * 0.5f;
-    const ImVec2 sz = font->CalcTextSizeA(size, FLT_MAX, 0.0f, text);
-    const float W = static_cast<float>(f.extent.width);
-    const float x0 = (W - sz.x) * 0.5f - pad, y0 = size;
-    ImDrawList* dl = ImGui::GetForegroundDrawList();
-    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + sz.x + 2.f * pad, y0 + sz.y + 2.f * pad), IM_COL32(120, 0, 0, 200), size * 0.3f);
-    dl->AddText(font, size, ImVec2(x0 + pad, y0 + pad), IM_COL32(255, 255, 255, 255), text);
+    play::screens::save_notice(ImGui::GetForegroundDrawList(), services::fsapi::save_failure_reason(services::fsapi::save_failures().host_error),
+                               ImVec2(static_cast<float>(f.extent.width), static_cast<float>(f.extent.height)));
 }
 
 void Overlay::draw(const FrameInfo& f) {
@@ -1514,6 +1343,12 @@ void Overlay::draw(const FrameInfo& f) {
             cheats::ui::set_key_peek(true);
         }
     }
+    // the F1 menu (and its prompts) wear the same look: with accent = auto, each time the menu opens one frame is read back for its colour
+    if (s.visible && !s.menu_cap_done) {
+        s.menu_cap_done = true;
+        if (cheats::ui::accent_auto()) s.cheats_cap_req = true;
+    }
+    if (!s.visible) s.menu_cap_done = false;
     // the auto accent: the frame after the open request is read back without the cheats overlay on it; the next one has its colour
     bool cheats_sampling = false;
     if (s.cheats_cap_req.load(std::memory_order_relaxed) && !s.ctx.renderer->capture_pending()) {
@@ -1590,10 +1425,11 @@ void Overlay::draw(const FrameInfo& f) {
     s.disp_h.store(io.DisplaySize.y, std::memory_order_relaxed);
 
     s.update_scale(f.extent);
+    cheats::ui::frame_style(s.ui_scale, s.scaled_touch);   // the theme is every frame's base style (menus push their look over it)
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
     // the keyboard and the quit prompt are modal: the menu (and a keyboard under the prompt) comes back once they are answered
-    const bool menu_on = s.visible && !kb_on && !quit_on;
+    const bool menu_on = s.visible && !kb_on && !quit_on && !cheats_sampling;   // (not in the frame read for the auto accent)
     if (menu_on) cheats::ui::init_look();   // the menus' shared look (glass or solid)
     bool glass_ok = false;
     s.menu_glass = false;
@@ -1638,15 +1474,15 @@ void Overlay::draw(const FrameInfo& f) {
     if (show_counter) s.draw_counter(f, now_s);
     if (note_on) s.draw_note(f);
     if (save_on) s.draw_save_notice(f);
-    if (ptr_on) {   // a plain arrow, white with a dark outline, sized with the frame height
+    if (ptr_on) {   // a plain arrow, white with a dark outline, sized with the frame height (a cursor: the same over every theme)
         const float k = std::max(1.f, static_cast<float>(f.extent.height) / 720.f);
         const float x = s.ptr_x.load(std::memory_order_relaxed), y = s.ptr_y.load(std::memory_order_relaxed);
         const ImVec2 pts[7] = {{0, 0}, {0, 16 * k}, {4 * k, 12.5f * k}, {7.5f * k, 19 * k}, {10 * k, 18 * k}, {6.5f * k, 11.5f * k}, {12 * k, 11.5f * k}};
         ImVec2 poly[7];
         for (int i = 0; i < 7; ++i) poly[i] = ImVec2(x + pts[i].x, y + pts[i].y);
         ImDrawList* dl = ImGui::GetForegroundDrawList();
-        dl->AddConvexPolyFilled(poly, 7, IM_COL32(255, 255, 255, 255));
-        dl->AddPolyline(poly, 7, IM_COL32(0, 0, 0, 255), ImDrawFlags_Closed, 1.5f * k);
+        dl->AddConvexPolyFilled(poly, 7, IM_COL32(255, 255, 255, 255));   // theme-ok: the mouse pointer
+        dl->AddPolyline(poly, 7, IM_COL32(0, 0, 0, 255), ImDrawFlags_Closed, 1.5f * k);   // theme-ok: the mouse pointer
     }
     ImGui::Render();
     // the glass panel's backdrop: the frame under it blurred before ImGui draws over the frame (only while it is open and glass)

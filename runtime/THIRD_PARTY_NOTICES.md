@@ -303,9 +303,31 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 The services that first took code or layouts from yuzu and Eden (`src/services/fs_romfs.cpp`, `audio_out.cpp`, `vi_nv.cpp`, `hid_shm.h`) were rewritten clean-room on 2026-11-12; no yuzu or Eden code is left.
 
-## DejaVu fonts (Bitstream Vera licence, reference only)
+## DejaVu fonts (Bitstream Vera licence; DejaVu changes public domain)
 
-`src/services/pl.cpp` uses DejaVu Sans (`DejaVuSans.ttf`) as the fallback shared font. The font file is not in this worktree. Its licence text is `assets/fonts/LICENSE-DejaVu.txt` (in the `svc-pl` worktree, with the font at `assets/fonts/DejaVuSans.ttf`), the Bitstream Vera licence as the DejaVu fonts name it. Not copied here.
+`src/services/pl.cpp` uses DejaVu Sans (`assets/fonts/DejaVuSans.ttf`) as the fallback shared font. `assets/fonts/AnySwitchSymbols-Regular.ttf`
+is a subset of DejaVu Sans 2.37 (its arrows, mathematical operators, technical symbols, box drawing, blocks, geometric shapes, miscellaneous
+symbols, dingbats and supplemental arrows, Armenian, Georgian and the emoticons it has, minus every glyph Inter has), made with fontTools
+by `scripts/make_overlay_fonts.py` and compiled into the runtime as the overlay's symbol fallback. As the licence asks of a modified font,
+it is renamed ("AnySwitch Symbols"; no "Bitstream", "Vera" or "Arev" in its names). Licence text: `assets/fonts/LICENSE-DejaVu.txt`.
+
+## Inter 4.1 (SIL Open Font License 1.1)
+
+The overlay's typeface (`src/gfx/play/cheats_theme.cpp`), the same as the launcher's (`@fontsource-variable/inter`). Copyright 2016
+The Inter Project Authors (https://github.com/rsms/inter). `assets/fonts/Inter-Regular.ttf` and `Inter-SemiBold.ttf` are the release's
+static Regular and SemiBold (Inter-4.1.zip, `extras/ttf`) subset to Latin (with Extended-A/B and Additional), Greek (with Extended),
+Cyrillic, punctuation, currency, letterlike symbols, number forms, arrows, mathematical operators and the symbol blocks Inter draws, with
+the tabular figures (`tnum`) made the default digits, hinting and layout tables dropped, by `scripts/make_overlay_fonts.py` (fontTools),
+and compiled into the runtime. The Inter licence declares no Reserved Font Name, so the names are kept. Licence text:
+`assets/fonts/LICENSE-Inter.txt` (the release's `LICENSE.txt`).
+
+## Cascadia Mono (SIL Open Font License 1.1)
+
+Copyright (c) 2019 - Present, Microsoft Corporation, with Reserved Font Name Cascadia Code (https://github.com/microsoft/cascadia-code).
+`assets/fonts/AnySwitchMono-Regular.ttf` is the overlay's monospaced face for hex, addresses and code: Cascadia Mono 2407.24's static
+Regular (`ttf/static/CascadiaMono-Regular.ttf`) subset to ASCII, Latin-1, Latin Extended-A, punctuation, currency, arrows, box drawing,
+blocks and geometric shapes by `scripts/make_overlay_fonts.py` (fontTools) and compiled into the runtime. As the OFL asks of a Modified
+Version under a Reserved Font Name, it is renamed "AnySwitch Mono". Licence text: `assets/fonts/LICENSE-CascadiaCode.txt`.
 
 ## AMD FidelityFX SDK v1.1.4, FSR 1 shader headers (MIT)
 

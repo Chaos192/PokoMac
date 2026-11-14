@@ -92,10 +92,18 @@ constexpr float kRadiusXs = 6.f, kRadiusSm = 10.f, kRadiusMd = 14.f, kRadiusLg =
 constexpr float kControlH = 38.f, kControlSm = 30.f, kControlLg = 48.f, kRowH = 46.f;
 
 // ---- type ------------------------------------------------------------------------------------------------------------------------------
-// Body 16 px (the launcher's 1rem), Small 13.5, Strong (semibold body), Title 20, Display 28, Mono (ImGui's own vector font: hex and code).
+// Body 16 px (the launcher's 1rem), Small 13.5, Strong (semibold body), Title 20, Display 28, Mono (AnySwitch Mono: hex and code).
 enum class Type : uint8_t { Body, Small, Strong, Title, Display, Mono };
-// Adds the overlay's faces to the shared atlas (overlay.cpp, once, after its default font, which stays the dev menu's and the Mono face).
+// Adds the overlay's faces to the atlas, Inter first, so it is the context's default font (every window, tooltip and draw-list text):
+// Inter 4.1 Regular and SemiBold (Latin, Greek, Cyrillic, tabular figures), AnySwitch Mono (Cascadia Mono subset) and, merged into each,
+// AnySwitch Symbols (DejaVu Sans' symbol blocks) and the system's CJK faces (theme_fonts.cpp), so game names and cheat text in Chinese,
+// Japanese or Korean draw. All three files are compiled in (assets/fonts, OFL 1.1 / Bitstream Vera; licences beside them). ImGui's own
+// font is only the last resort of a build without them, never seen otherwise (tools/dev/overlay_theme_guard.py).
 void load_fonts(ImFontAtlas* atlas);
+// The faces in force (the theme's own font replaces Inter when it brings one).
+ImFont* font_of(Type t);
+// The system CJK faces found and mapped (theme_fonts.cpp): their paths, for the log and the tests. Empty when none was found.
+const char* cjk_fonts();
 void push(Type t);
 void push(Type t, float scale);   // the type at `scale` times its size (a pin's own size, pin_board.cpp)
 void pop();
@@ -108,6 +116,13 @@ float size_of(Type t);
 void apply(const Look& look, const unsigned char* frame_rgba, bool blur_ok);
 // The accent a setting names: the theme's ("theme" or empty), "auto", a preset or a colour.
 ImU32 accent_colour(const char* accent, const unsigned char* frame_rgba);
+// The guard (tools/dev/overlay_theme_guard.py is its static half): true when the style in force is the theme's, every ImGuiCol set by
+// apply() (none left at ImGui's stock dark colours, which ImGuiStyle's constructor puts there) and the default font Inter (or the theme's).
+// *why names what is not. Both screenshot tests check it on every screen.
+bool style_check(std::string* why);
+// ImGui's stock colours (StyleColorsDark / Light / Classic), for the tests' scan of the drawn vertices: true when `c` is one of the
+// stock accents no theme colour may equal (the blue family of the stock buttons, headers, check marks, sliders and title bars).
+bool is_stock_colour(ImU32 c);
 inline ImVec4 v4(ImU32 c) { return ImGui::ColorConvertU32ToFloat4(c); }
 ImU32 with_alpha(ImU32 c, float a);
 
@@ -117,6 +132,7 @@ enum class Icon : uint8_t {
     Changed, Same, Folder, Code, Eye, Bolt, Pad, Chevron, Back, Export, Import, Refresh, Graph, Memory, Pointer, Thread, Breakpoint, Help,
     Text, Number, Decimal, Question, Dots, Star, Map, Camera, Speed, Tag, Layers, Popout, DockLeft, DockCentre, DockRight, Pin,
     Monitor, Volume, Expand,   // the F1 settings menu's pages (play_ui.cpp)
+    Minus, ChevronDown, Power, Mark,   // steppers, disclosure / combo chevrons, the quit prompt, the AnySwitch mark (the monoline A and sun)
 };
 void icon(ImDrawList* dl, Icon i, ImVec2 centre, float size, ImU32 col);
 void icon_item(Icon i, float size = 0.f, ImU32 col = 0);   // an icon as a layout item (size 0: the text height)
@@ -148,5 +164,61 @@ void stat(const char* value, const char* caption, ImU32 col = 0);
 // A key of the on-screen keyboard: a rounded key cap with a label or an icon; `accent` for the confirming key, `on` for a latched one
 // (shift). `size` in pixels.
 bool key(const char* id, const char* label, Icon icon, bool accent, bool on, ImVec2 size);
+
+// ---- ImGui's stock widgets, drawn in the theme (theme_widgets.cpp) ----------------------------------------------------------------------
+// The same arguments and behaviour as the ImGui call each replaces (mouse, keyboard and pad navigation, Ctrl+click typing on a slider),
+// drawn as the launcher draws its controls. Screens call these, never ImGui's (tools/dev/overlay_theme_guard.py).
+// A rounded box, filled with the accent and a tick when on, the label after it (ImGui::Checkbox).
+bool checkbox(const char* label, bool* v);
+// A ring with an accent dot when chosen (ImGui::RadioButton).
+bool radio(const char* label, bool active);
+bool radio(const char* label, int* v, int value);
+// The launcher's slider: a thin track filled with the accent up to a white round knob, the value after it (ImGui::SliderInt/Float).
+bool slider_int(const char* label, int* v, int lo, int hi, const char* format = "%d", ImGuiSliderFlags flags = 0);
+bool slider_float(const char* label, float* v, float lo, float hi, const char* format = "%.3f", ImGuiSliderFlags flags = 0);
+// A select: the field with a chevron, its list in a themed popup (ImGui::BeginCombo; end with end_combo()).
+bool begin_combo(const char* label, const char* preview, ImGuiComboFlags flags = 0);
+void end_combo();
+bool combo(const char* label, int* cur, const char* const items[], int n);
+bool combo(const char* label, int* cur, const char* items_zero_separated);   // "a\0b\0c\0"
+// A number field with round - and + buttons (ImGui::InputInt; step 0: no buttons).
+bool input_int(const char* label, int* v, int step = 1, int step_fast = 100, ImGuiInputTextFlags flags = 0);
+// A row that opens and closes what is under it, with a chevron (ImGui::TreeNode: TreePop when open / CollapsingHeader: none).
+bool tree_node(const char* label, ImGuiTreeNodeFlags flags = 0);
+bool collapsing_header(const char* label, ImGuiTreeNodeFlags flags = 0);
+// The launcher's progress bar: a thin pill with the accent part done; `overlay` text after it (ImGui::ProgressBar).
+void progress(float fraction, ImVec2 size = ImVec2(-1.f, 0.f), const char* overlay = nullptr);
+// A round colour swatch button (ImGui::ColorButton); a colour row: swatch + hex field (ImGui::ColorEdit3, RGB 0..1).
+bool colour_swatch(const char* id, ImU32 col, float size = 0.f, bool selected = false);
+bool colour_edit(const char* label, float rgb[3]);
+// A line graph on a sunken card (ImGui::PlotLines); `offset` is the ring's first value.
+void plot_lines(const char* label, const float* values, int n, int offset, const char* overlay, float lo, float hi, ImVec2 size);
+// Tooltips: the solid dialog colour, Small type, tight padding (ImGui::SetTooltip / SetItemTooltip).
+void tooltip(const char* fmt, ...) IM_FMTARGS(1);
+void item_tooltip(const char* fmt, ...) IM_FMTARGS(1);
+
+// ---- windows -----------------------------------------------------------------------------------------------------------------------
+// A window with the overlay's header (title in Strong type, a close button when `open` is given) in place of ImGui's title bar; the
+// panel colour, radius and padding of the theme. End it with ImGui::End(). Tool pop-outs, Diagnostics, debug panels.
+bool begin_window(const char* title, bool* open, ImGuiWindowFlags flags = 0);
+// A centred dialog sheet over the dimmed game (the keyboard, the quit and controller prompts): the theme's dialog colour and radius, a
+// header with an icon and the title, `width` in pixels (0: the theme's), at the top of the screen when `top`. Returns true when its
+// content is to be drawn; end it with end_dialog() either way.
+bool begin_dialog(const char* id, const char* title, Icon icon, float width = 0.f, bool top = false);
+void end_dialog();
+// A notice drawn on the foreground list (no window, no input): the dialog colour at `opacity`, rounded, a coloured stripe on the left
+// (`stripe` 0: none), lines of text (the first in Strong type), placed by `anchor` (0..1 of the free space on each axis) inside `area`.
+struct Notice {
+    const char* lines[4] = {};
+    int n = 0;
+    ImU32 stripe = 0;
+    Icon icon = Icon::None;
+    ImU32 icon_col = 0;
+    float size = 0.f;                // the body text size in pixels (0: the theme's at the UI scale)
+    float opacity = 0.92f;
+    bool right_align = false;        // lines right-aligned (a counter in a right corner)
+};
+ImVec2 notice_size(const Notice& n);
+void notice(ImDrawList* dl, const Notice& n, ImVec2 pos);
 
 }  // namespace nxrt::cheats::ui::theme

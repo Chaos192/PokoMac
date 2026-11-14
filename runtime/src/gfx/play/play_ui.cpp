@@ -382,15 +382,15 @@ bool check(const char* label, bool* v) {
     return th::toggle(id, v);
 }
 
-bool combo(const char* label, const char* preview, ImGuiComboFlags flags) { return ImGui::BeginCombo(row(label), preview, flags); }
+bool combo(const char* label, const char* preview, ImGuiComboFlags flags) { return th::begin_combo(row(label), preview, flags); }
 bool slider_int(const char* label, int* v, int lo, int hi, const char* format, ImGuiSliderFlags flags) {
-    return ImGui::SliderInt(row(label), v, lo, hi, format, flags);
+    return th::slider_int(row(label), v, lo, hi, format, flags);
 }
 bool slider_float(const char* label, float* v, float lo, float hi, const char* format, ImGuiSliderFlags flags) {
-    return ImGui::SliderFloat(row(label), v, lo, hi, format, flags);
+    return th::slider_float(row(label), v, lo, hi, format, flags);
 }
 bool input_int(const char* label, int* v, int step, int step_fast, ImGuiInputTextFlags flags) {
-    return ImGui::InputInt(row(label), v, step, step_fast, flags);
+    return th::input_int(row(label), v, step, step_fast, flags);
 }
 
 bool segmented(const char* label, const char* const* names, int n, int* cur) {
@@ -438,7 +438,7 @@ bool segmented(const char* label, const char* const* names, int n, int* cur) {
 void tip(const char* text) {
     if (!text) return;
     if (ImGui::IsItemFocused() || ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) g_tip = text;
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal | ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetItemTooltip("%s", text);
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal | ImGuiHoveredFlags_AllowWhenDisabled)) th::item_tooltip("%s", text);
 }
 
 void restart_badge() {
@@ -507,7 +507,7 @@ bool int_field(const char* label, int* v, int lo, int hi, int step, int step_fas
 
 // One side of the fixed render size: 0 (follow the window) or 320..16384. A value in between is clamped to 320 when the field is left.
 bool render_size_field(const char* label, int* v) {
-    bool changed = ImGui::InputInt(label, v, 0, 0);
+    bool changed = th::input_int(label, v, 0, 0);
     if (ImGui::IsItemDeactivated()) {
         const int c = *v <= 0 ? 0 : std::clamp(*v, 320, 16384);
         changed = changed || c != *v;
@@ -721,9 +721,9 @@ void pad_tab(const LiveStatus& live, Page& p) {   // the Gamepad tab of the Cont
     if (slider("Right stick max", &pad.right_stick_max, 0.5, 1.0, "%.2f")) mark(p);
     tip("The same for the right stick (looking): lower it if the camera never turns at full speed.");
     if (check("Invert look (right stick up looks down)", &pad.invert_y)) mark(p);
-    if (ImGui::IsItemHovered()) ImGui::SetItemTooltip("%s", "Applies in play only; adds to the game's own invert option.");
+    if (ImGui::IsItemHovered()) th::item_tooltip("%s", "Applies in play only; adds to the game's own invert option.");
     if (slider("Look sensitivity", &pad.look_sens, 0.25, 3.0, "%.2f", ImGuiSliderFlags_Logarithmic)) mark(p);
-    if (ImGui::IsItemHovered()) ImGui::SetItemTooltip("%s", "Multiplies the right stick while playing. Below 1 the top turning speed is lower; above 1 you reach it with less stick.");
+    if (ImGui::IsItemHovered()) th::item_tooltip("%s", "Multiplies the right stick while playing. Below 1 the top turning speed is lower; above 1 you reach it with less stick.");
     if (slider("Trigger threshold", &pad.trigger_threshold, 0.05, 1.0, "%.2f")) mark(p);
     if (check("Gyro (six-axis sensor)", &pad.gyro)) mark(p);
     if (slider("Gyro scale", &pad.gyro_scale, 0.1, 4.0, "%.2f", ImGuiSliderFlags_Logarithmic)) mark(p);
@@ -933,7 +933,7 @@ void hdr_group(Page& p) {
     tip("0 keeps the game's SDR look up to its own white, 1 lets highlights reach the display's peak, 2 pushes them further.");
 
     const extras::HdrState hs = extras::hdr_state();
-    ImGui::Text("HDR scene: %s, swapchain: %s, paper white %.0f nits, peak %.0f nits, peak ratio %.2f, display reports HDR: %s",
+    ImGui::TextWrapped("HDR scene: %s, swapchain: %s, paper white %.0f nits, peak %.0f nits, peak ratio %.2f, display reports HDR: %s",
                 hs.scene_hdr ? "on" : "off", extras::output_kind_name(hs.output), static_cast<double>(hs.paper_white_nits),
                 static_cast<double>(hs.peak_nits), static_cast<double>(hs.peak_ratio), yes_no(hs.display_hdr));
 }
@@ -966,7 +966,7 @@ void upscale_group(Page& p) {
             }
             if (!ok) {
                 ImGui::EndDisabled();
-                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", temporal_why(m));
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) th::tooltip("%s", temporal_why(m));
             }
         }
         ImGui::EndCombo();
@@ -1127,7 +1127,7 @@ void window_group(const LiveStatus& live, Page& p) {
         ImGui::EndCombo();
     }
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-        ImGui::SetTooltip("%s", windowed ? "The size of the game window in windowed mode. It is not the size the game renders at: see Resolution below."
+        th::tooltip("%s", windowed ? "The size of the game window in windowed mode. It is not the size the game renders at: see Resolution below."
                                          : "Only used in windowed mode: the size the window returns to. Fullscreen shows the display's size; the size "
                                            "the game renders at is under Resolution below.");
     if (int_field("Width##win_w", &d.width, 320, 16384, 1, 100)) mark(p);
@@ -1310,7 +1310,7 @@ void quality_preset_combo(Page& p, const GamePlay* gp) {
             if (ImGui::Selectable(qs[i].name, i == sel) && i != sel && gp->quality_preset && gp->quality_preset(qs[i].id, d)) mark(p);
             if (ImGui::IsItemHovered()) {
                 const std::string t = quality_preset_summary(qs[i], gp, d);
-                ImGui::SetItemTooltip("%s", t.c_str());
+                th::item_tooltip("%s", t.c_str());
             }
         }
         ImGui::EndCombo();
@@ -1583,7 +1583,7 @@ void bindings_tab(UiHost& host, Page& p) {
             if (!clash.empty() && ImGui::IsItemHovered()) {
                 std::string who;
                 for (int c : clash) who += std::string(who.empty() ? "" : ", ") + act_label(p.edit.bindings[static_cast<std::size_t>(c)].act);
-                ImGui::SetItemTooltip("Also bound here to: %s", who.c_str());
+                th::item_tooltip("Also bound here to: %s", who.c_str());
             }
             if (clicked) {
                 stop_fps_capture(host, p);
@@ -1998,7 +1998,7 @@ void pins_page(UiHost& host, Page& p, const MenuFrame& f) {
         if (up > 0 || (down >= 0 && down + 1 <= static_cast<int>(g.items.size())) || drop >= 0) hud_edited(p);
         if (g.items.empty()) ImGui::TextDisabled("Nothing yet");
         ImGui::SetNextItemWidth(th::px(260.f));
-        if (ImGui::BeginCombo("##pin_add", "Add a readout...")) {
+        if (th::begin_combo("##pin_add", "Add a readout...")) {
             for (const perf::ItemInfo& it : perf::catalogue()) {
                 if (std::find(g.items.begin(), g.items.end(), std::string(it.id)) != g.items.end()) continue;
                 if (ImGui::Selectable(it.name)) {
@@ -2198,7 +2198,7 @@ void menu_rail(Page& p, float w, bool compact) {
                 dl->AddText(ImVec2(bb.Min.x + th::sp(th::S3) + isz + th::sp(th::S2), bb.Min.y + (h - ImGui::GetFontSize()) * 0.5f), fg, kPageNames[i]);
                 dl->PopClipRect();
             } else if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-                ImGui::SetTooltip("%s", kPageNames[i]);
+                th::tooltip("%s", kPageNames[i]);
             }
             if (sel && p.focus_rail) {
                 ImGui::SetItemDefaultFocus();

@@ -69,9 +69,9 @@ void win_access() {
     ImGui::BeginDisabled(on);
     field("##aw", s.aw_addr, sizeof s.aw_addr, Keys::Text, "address", 190);
     ImGui::SameLine();
-    ImGui::RadioButton("writes", &s.aw_mode, 0);
+    theme::radio("writes", &s.aw_mode, 0);
     ImGui::SameLine();
-    ImGui::RadioButton("reads and writes", &s.aw_mode, 1);
+    theme::radio("reads and writes", &s.aw_mode, 1);
     ImGui::EndDisabled();
     ImGui::SameLine();
     if (!on) {
@@ -226,20 +226,22 @@ void win_breakpoints() {
             ImGui::PushID(static_cast<int>(b.addr));
             ImGui::TableSetColumnIndex(0);
             bool en = b.enabled;
-            if (ImGui::Checkbox("##en", &en)) cp::bp_enable(b.addr, en);
+            if (theme::checkbox("##en", &en)) cp::bp_enable(b.addr, en);
             ImGui::TableSetColumnIndex(1);
             ImGui::Text("%s %s", b.stop ? "break" : "trace", cp::where(b.addr).c_str());
             ImGui::TableSetColumnIndex(2);
             ImGui::Text("%llu", static_cast<unsigned long long>(b.hits));
             ImGui::TableSetColumnIndex(3);
             ImGui::TextUnformatted(cp::state_name(b.state));
-            if (ImGui::IsItemHovered() && !b.note.empty()) ImGui::SetTooltip("%s", b.note.c_str());
+            if (ImGui::IsItemHovered() && !b.note.empty()) theme::tooltip("%s", b.note.c_str());
             ImGui::TableSetColumnIndex(4);
             if (ImGui::SmallButton("code")) goto_disasm(b.addr);
             ImGui::SameLine();
             if (ImGui::SmallButton("remove")) { std::string e; cp::bp_remove(b.addr, &e); }
             ImGui::PopID();
-            if (b.hits && !b.stop && ImGui::TreeNode(reinterpret_cast<void*>(b.addr), "last hit: thread %s", b.last.thread.c_str())) {
+            char hit[128];
+            std::snprintf(hit, sizeof hit, "last hit: thread %s##hit%llx", b.last.thread.c_str(), static_cast<unsigned long long>(b.addr));
+            if (b.hits && !b.stop && theme::tree_node(hit)) {
                 regs_table(b.last, false);
                 ImGui::TreePop();
             }
@@ -369,17 +371,17 @@ void win_watch() {
         if (!v.empty()) { lo = *std::min_element(v.begin(), v.end()); hi = *std::max_element(v.begin(), v.end()); if (hi == lo) { hi += 1; lo -= 1; } }
         char over[96];
         std::snprintf(over, sizeof over, "%s = %g  (%g .. %g)", e->desc.c_str(), v.empty() ? 0.0 : static_cast<double>(v.back()), static_cast<double>(lo), static_cast<double>(hi));
-        ImGui::PlotLines("##p", v.empty() ? nullptr : v.data(), static_cast<int>(v.size()), 0, over, lo, hi, ImVec2(-1, theme::px(70.f)));
+        theme::plot_lines("##p", v.empty() ? nullptr : v.data(), static_cast<int>(v.size()), 0, over, lo, hi, ImVec2(-1, theme::px(70.f)));
         const char* trig[] = {"no trigger", "on any change", "when above", "when below", "when equal to"};
         ImGui::SetNextItemWidth(theme::px(150.f));
-        ImGui::Combo("##trig", &wt.trig, trig, 5);
+        theme::combo("##trig", &wt.trig, trig, 5);
         if (wt.trig >= 2) {
             ImGui::SameLine();
             ImGui::SetNextItemWidth(theme::px(110.f));
-            ImGui::InputDouble("##tv", &wt.trig_value);
+            ImGui::InputScalar("##tv", ImGuiDataType_Double, &wt.trig_value);
         }
         ImGui::SameLine();
-        ImGui::Checkbox("pause the game", &wt.trig_pause);
+        theme::checkbox("pause the game", &wt.trig_pause);
         ImGui::SameLine();
         if (wt.fired) {
             ImGui::TextColored(ImVec4(1.f, 0.6f, 0.4f, 1.f), "fired");
@@ -407,14 +409,14 @@ void win_control() {
     if (ImGui::Button(p ? "Resume" : "Pause", ImVec2(theme::px(120.f), 0))) ctl::pause(!p);
     ImGui::SameLine();
     ImGui::SetNextItemWidth(theme::px(90.f));
-    ImGui::InputInt("##n", &s.advance_n);
+    theme::input_int("##n", &s.advance_n);
     s.advance_n = std::clamp(s.advance_n, 1, 600);
     ImGui::SameLine();
     if (ImGui::Button("Advance frames")) ctl::frame_advance(s.advance_n);
     ImGui::Text("frame %llu   %s", static_cast<unsigned long long>(ctl::frames()), ctl::status_text().c_str());
     ImGui::SeparatorText("Speed");
     ImGui::SetNextItemWidth(theme::px(260.f));
-    if (ImGui::SliderFloat("##speed", &s.speed, 0.1f, 8.f, "x%.2f", ImGuiSliderFlags_Logarithmic)) ctl::set_speed(s.speed);
+    if (theme::slider_float("##speed", &s.speed, 0.1f, 8.f, "x%.2f", ImGuiSliderFlags_Logarithmic)) ctl::set_speed(s.speed);
     for (float sp : {0.25f, 0.5f, 1.f, 2.f, 4.f}) {
         ImGui::SameLine();
         char b[16];
@@ -422,7 +424,7 @@ void win_control() {
         if (ImGui::SmallButton(b)) { s.speed = sp; ctl::set_speed(sp); }
     }
     ImGui::TextDisabled("The console clock, sleeps, timed waits, vsync and the frame limiter run at this speed; sound stays real time.");
-    ImGui::Checkbox("pause the game while the overlay is open", &s.pause_while_open);
+    theme::checkbox("pause the game while the overlay is open", &s.pause_while_open);
     tool_end();
 }
 
@@ -454,7 +456,7 @@ void win_lua() {
                 if (running && in.id == s.lua_ids[l.name] && !in.running) err = in.error;
             std::string label = std::string(running ? (err.empty() ? "> " : "! ") : "  ") + l.name;
             if (ImGui::Selectable(label.c_str(), s.lua_sel == static_cast<int>(i))) { s.lua_sel = static_cast<int>(i); s.lua_edit = l.source; }
-            if (!err.empty() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", err.c_str());
+            if (!err.empty() && ImGui::IsItemHovered()) theme::tooltip("%s", err.c_str());
         }
         ImGui::TableSetColumnIndex(1);
         if (s.lua_sel >= 0 && s.lua_sel < static_cast<int>(s.lua_scripts.size())) {
@@ -593,7 +595,7 @@ void page_cheats() {
         ImGui::BeginGroup();
         if (th::toggle("##engine", &run)) e.enable(run);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
-            ImGui::SetTooltip("Cheat codes and frozen values are written 12 times a second while this is on");
+            theme::tooltip("Cheat codes and frozen values are written 12 times a second while this is on");
         ImGui::SameLine(0, th::sp(th::S2));
         ImGui::AlignTextToFramePadding();
         th::text(th::Type::Body, run ? p.text : p.text2, "%s", run_label);
@@ -645,13 +647,13 @@ void page_cheats() {
                 ImGui::SameLine(0, th::sp(th::S3));
                 th::text(th::Type::Small, p.text2, "not run yet");
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("%s", "On, but the game has not run its new code yet. It takes effect the next time the game calls the "
+                    theme::tooltip("%s", "On, but the game has not run its new code yet. It takes effect the next time the game calls the "
                                             "changed function; if the game is inside that function in a loop it never leaves, only once it returns.");
             }
             if (!r.error.empty()) {   // its code could not go live (a compile failed, the patcher refused it): turned off, never half on
                 ImGui::SameLine(0, th::sp(th::S3));
                 th::text(th::Type::Small, p.warn, "could not turn on");
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", ("Turned off: its code could not go live.\n" + r.error).c_str());
+                if (ImGui::IsItemHovered()) theme::tooltip("%s", ("Turned off: its code could not go live.\n" + r.error).c_str());
             }
             if (!r.master) {   // pin it to the HUD over the game
                 const bool pinned = s.pinned_cheats.count(r.name) != 0;
@@ -714,7 +716,7 @@ void win_settings() {
         if (cur == std::string("builtin:") + builtins[i]) ti = i;
     ImGui::SetNextItemWidth(theme::px(300.f));
     const std::string label = ti >= 0 ? builtin_names[ti] : th::theme().name + " (a theme file)";
-    if (ImGui::BeginCombo("##theme", label.c_str())) {
+    if (theme::begin_combo("##theme", label.c_str())) {
         for (int i = 0; i < 6; ++i)
             if (ImGui::Selectable(builtin_names[i], ti == i)) {
                 s.theme_name = builtins[i];
@@ -734,17 +736,17 @@ void win_settings() {
     const char* styles[] = {"The theme's", "Solid", "Glass"};
     int si = s.style + 1;
     ImGui::SetNextItemWidth(theme::px(300.f));
-    if (ImGui::Combo("Style", &si, styles, 3)) s.style = si - 1;
+    if (theme::combo("Style", &si, styles, 3)) s.style = si - 1;
     auto pct = [&](const char* name, float* v, const th::Range& r, float theirs) {
         bool own = *v >= 0.f;
         ImGui::PushID(name);
-        if (ImGui::Checkbox("##own", &own)) *v = own ? theirs : -1.f;
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("Off: the theme's own value");
+        if (theme::checkbox("##own", &own)) *v = own ? theirs : -1.f;
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) theme::tooltip("Off: the theme's own value");
         ImGui::SameLine();
         ImGui::BeginDisabled(!own);
         int x = static_cast<int>(std::lround((own ? *v : theirs) * 100.f));
         ImGui::SetNextItemWidth(theme::px(260.f));
-        if (ImGui::SliderInt(name, &x, r.min, r.max, "%d%%")) *v = static_cast<float>(x) / 100.f;
+        if (theme::slider_int(name, &x, r.min, r.max, "%d%%")) *v = static_cast<float>(x) / 100.f;
         ImGui::EndDisabled();
         ImGui::PopID();
     };
@@ -762,7 +764,7 @@ void win_settings() {
     for (int i = 0; i < 9; ++i)
         if (s.accent == accents[i]) ai = i;
     ImGui::SetNextItemWidth(theme::px(300.f));
-    if (ImGui::Combo("##accent", &ai, accent_names, 10)) {
+    if (theme::combo("##accent", &ai, accent_names, 10)) {
         if (ai < 9) s.accent = accents[ai];
         else {
             char hex[16];
@@ -776,14 +778,8 @@ void win_settings() {
     if (ai == 9) {
         ImU32 c = 0;
         th::parse_colour(s.accent, &c);
-        float rgbf[3] = {(c & 0xFF) / 255.f, ((c >> 8) & 0xFF) / 255.f, ((c >> 16) & 0xFF) / 255.f};
         ImGui::SameLine();
-        if (ImGui::ColorEdit3("##own_accent", rgbf, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_DisplayHex)) {
-            char hex[16];
-            std::snprintf(hex, sizeof hex, "#%02x%02x%02x", static_cast<int>(rgbf[0] * 255.f + 0.5f), static_cast<int>(rgbf[1] * 255.f + 0.5f),
-                          static_cast<int>(rgbf[2] * 255.f + 0.5f));
-            s.accent = hex;
-        }
+        th::colour_swatch("##own_accent", c | IM_COL32_A_MASK);   // the colour the field below names
         ImGui::SameLine();
         static char hexbuf[16];
         std::snprintf(hexbuf, sizeof hexbuf, "%s", s.accent.c_str());
@@ -795,20 +791,20 @@ void win_settings() {
     }
     if (s.accent == "auto") {
         ImGui::SameLine();
-        ImGui::ColorButton("##frame", ImVec4(s.frame_rgba[0] / 255.f, s.frame_rgba[1] / 255.f, s.frame_rgba[2] / 255.f, 1.f));
+        th::colour_swatch("##frame", IM_COL32(s.frame_rgba[0], s.frame_rgba[1], s.frame_rgba[2], 255));
         ImGui::SameLine();
         ImGui::TextDisabled(s.have_frame_rgba ? "from the game frame" : "(no frame sampled yet)");
     }
     th::text(th::Type::Strong, p.text, "HUD over the game");
     int ho = static_cast<int>(std::lround(s.hud_opacity * 100.f));
     ImGui::SetNextItemWidth(theme::px(300.f));
-    if (ImGui::SliderInt("Opacity##hud", &ho, spec.hud_opacity.min, spec.hud_opacity.max, "%d%%")) s.hud_opacity = static_cast<float>(ho) / 100.f;
-    ImGui::Checkbox("Also list every active cheat and hotkey", &s.hud_mini);
+    if (theme::slider_int("Opacity##hud", &ho, spec.hud_opacity.min, spec.hud_opacity.max, "%d%%")) s.hud_opacity = static_cast<float>(ho) / 100.f;
+    theme::checkbox("Also list every active cheat and hotkey", &s.hud_mini);
     th::text_wrapped(th::Type::Small, p.text3, "Pin values in My table (their actions) or cheat codes on the Cheats page (the pin): they show over the game while the panel is closed. Drag the HUD to move it while the panel is open.");
     th::text(th::Type::Strong, p.text, "Size");
     int sc = static_cast<int>(std::lround(s.scale * 100.f));
     ImGui::SetNextItemWidth(theme::px(300.f));
-    if (ImGui::SliderInt("##scale", &sc, spec.scale.min, spec.scale.max, "%d%%")) s.scale = static_cast<float>(sc) / 100.f;
+    if (theme::slider_int("##scale", &sc, spec.scale.min, spec.scale.max, "%d%%")) s.scale = static_cast<float>(sc) / 100.f;
     th::text_wrapped(th::Type::Small, p.text3,
                      "For this session; the AnySwitch app's Settings > Cheats set them for every game (pkp.ini [cheats]: theme, style, "
                      "opacity, blur, tint, accent, scale). A theme's own font needs a restart.");

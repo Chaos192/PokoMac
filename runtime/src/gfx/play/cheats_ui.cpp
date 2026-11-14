@@ -273,7 +273,7 @@ bool tool_begin(const char* title, bool* open) {
     const bool inside = g_embed && std::strcmp(g_embed, title) == 0;
     g_tool_stack.push_back(inside);
     if (inside) return ImGui::BeginChild("##tool_body", ImVec2(0, 0), ImGuiChildFlags_NavFlattened);
-    return ImGui::Begin(title, open);
+    return theme::begin_window(title, open);
 }
 void tool_end() {
     const bool inside = !g_tool_stack.empty() && g_tool_stack.back();
@@ -475,6 +475,28 @@ void apply_theme(bool blur_ok) {
 }
 
 void load_fonts(ImFontAtlas* atlas) { th::load_fonts(atlas); }
+
+void setup_context() {
+    ImGuiIO& io = ImGui::GetIO();
+    th::load_fonts(io.Fonts);
+    io.FontDefault = th::font_of(th::Type::Body);
+    init_look();
+    frame_style(1.f, false);
+}
+
+void frame_style(float dpi, bool touch) {
+    init_look();
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.FontScaleDpi = dpi > 0.f ? dpi : 1.f;   // theme::apply() takes the DPI scale from the style in force
+    apply_theme(false);
+    if (touch) {   // easier to hit with a finger: a taller row and a wider scroll bar and slider grip
+        const float k = th::k();
+        style.FramePadding.y = std::max(style.FramePadding.y, 8.f * k);
+        style.ItemSpacing.y = std::max(style.ItemSpacing.y, 8.f * k);
+        style.ScrollbarSize = std::max(style.ScrollbarSize, 22.f * k);
+        style.GrabMinSize = std::max(style.GrabMinSize, 20.f * k);
+    }
+}
 
 // ---- persistence ------------------------------------------------------------------------------------------------------------------------
 namespace {
@@ -716,7 +738,7 @@ void draw_tabs() {
             const float ix = named ? bb.Min.x + th::sp(th::S4) + isz * 0.5f : bb.Min.x + w * 0.5f;
             th::icon(dl, kPageIcons[i], ImVec2(ix, bb.Min.y + h * 0.5f), isz, fg);
             if (named) dl->AddText(ImVec2(bb.Min.x + th::sp(th::S4) + isz + th::sp(th::S2), bb.Min.y + (h - ts.y) * 0.5f), fg, kPageNames[i]);
-            if (!named && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("%s", kPageNames[i]);
+            if (!named && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) theme::tooltip("%s", kPageNames[i]);
             ImGui::RenderNavCursor(bb, id, ImGuiNavRenderCursorFlags_None, h * 0.5f);
         }
         th::pop();
@@ -867,7 +889,7 @@ void page_advanced() {
         const ImVec2 pos = ImGui::GetCursorScreenPos();
         const float wd = ImGui::GetContentRegionAvail().x;
         if (ImGui::Selectable("##t", sel, ImGuiSelectableFlags_None, ImVec2(wd, h))) { s.tool = w.title; mark_dirty(); }
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) ImGui::SetTooltip("%s", w.blurb);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) theme::tooltip("%s", w.blurb);
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const float isz = std::round(ImGui::GetFontSize() * 1.1f);
         const ImU32 fg = ImGui::GetColorU32(sel ? p.accent : p.text2);
@@ -1466,6 +1488,10 @@ void on_shown() {
 }
 
 bool wants_frame_colour() { return st().accent == "auto" || !st().inited; }
+bool accent_auto() {
+    init_look();
+    return st().accent == "auto";
+}
 void set_frame_colour(const unsigned char rgba[4]) {
     State& s = st();
     std::memcpy(s.frame_rgba, rgba, 4);

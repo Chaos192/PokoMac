@@ -34,4 +34,4 @@ Ryujinx (MIT), Mesa (MIT), pokopia-native (MIT), smo-recomp and ssbu-recomp (GPL
 libnx, SDL3 (zlib), astc-encoder and bc7enc_rdo (Apache-2.0), libvpx (BSD-3-Clause), ImGui (MIT), Vulkan Memory Allocator (MIT), volk (MIT),
 zstd (BSD), miniz (MIT), Lua (MIT), libopus (BSD-3-Clause), AMD FidelityFX and NVIDIA Image Scaling (MIT), Tauri (MIT / Apache-2.0), Zig (MIT), Python (PSF), the .NET runtime
 (MIT), the Khronos Vulkan loader (Apache-2.0), KosmicKrisp (MIT) and MoltenVK (Apache-2.0), Kenney input prompts (CC0), the DejaVu fonts,
-Inter (SIL OFL 1.1) and Lucide icons (ISC).
+Inter (SIL OFL 1.1), Cascadia Mono (SIL OFL 1.1, as AnySwitch Mono) and Lucide icons (ISC).

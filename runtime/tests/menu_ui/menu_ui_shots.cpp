@@ -9,7 +9,11 @@
 //   - a pin's controller chord fires only with its free button held first, and holds its other buttons back from the game meanwhile;
 //   - game input (keys, the mouse over a pin, the pad) reaches the game the same with the pins shown as hidden;
 //   - the settings file keeps the pins ([hud]) and the configuration's default groups are read;
-//   - the pins' cost per frame (CPU: theme, the pins' windows, ImGui's own work) stays under 0.1 ms.
+//   - the pins' cost per frame (CPU: theme, the pins' windows, ImGui's own work) stays under 0.1 ms;
+//   - the overlay's own screens (overlay_screens.h: the software keyboard, the quit and controller prompts, the counter and notices, a
+//     debug window and every themed control) and keyboard / controller focus;
+//   - every screen on light, dark and busy backgrounds too (refs at 320 pixels wide: <screen>@<background>.png), and on every screen the
+//     theme guard (soft_raster.h theme_guard: the style is the theme's, no vertex in ImGui's stock colours).
 //   nxrt_menu_ui_test [--out <dir>] [--ref <dir>] [--update] [--only <screen>]
 // Everything it reads and writes is in its own --out folder: never the player's settings or the app's.
 #include <SDL3/SDL.h>
@@ -26,9 +30,11 @@
 #include <string>
 #include <vector>
 
+#include "../../src/gfx/play/cheats_theme.h"
 #include "../../src/gfx/play/cheats_ui.h"
 #include "../../src/gfx/play/cheats_ui_internal.h"
 #include "../../src/gfx/play/hotkeys.h"
+#include "../../src/gfx/play/overlay_screens.h"
 #include "../../src/gfx/play/perf_pins.h"
 #include "../../src/gfx/play/pin_board.h"
 #include "../../src/gfx/play/play_types.h"
@@ -152,12 +158,12 @@ perf::HudSettings shot_pins() {
 struct Ctx {
     int w = 1280, h = 720;
     float scale = 1.f;
-    ImGuiStyle base;
     std::vector<uint8_t> bg;
 };
 
-enum class Mode { Menu, Pins };
+enum class Mode { Menu, Pins, Overlay };
 Mode g_mode = Mode::Menu;
+void (*g_overlay)() = nullptr;   // Mode::Overlay: one of the overlay's own screens (overlay_screens.h), drawn on the frame's base style
 ImTextureData* g_blur_tex = nullptr;
 bool g_glass = false;
 bool g_pad = true;
@@ -173,16 +179,15 @@ void frame(Ctx& c, std::vector<uint8_t>* out, bool timed) {
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2(static_cast<float>(c.w), static_cast<float>(c.h));
     io.DeltaTime = 1.f / 60.f;
-    ImGuiStyle& style = ImGui::GetStyle();
-    style = c.base;
-    style.ScaleAllSizes(c.scale);
-    style.FontScaleDpi = c.scale;
+    cheats::ui::frame_style(c.scale, false);   // as overlay.cpp: the theme is every frame's base style
     ImGui::NewFrame();
     if (g_clear_focus) {
         ImGui::FocusWindow(nullptr);
         g_clear_focus = false;
     }
-    {
+    if (g_mode == Mode::Overlay) {
+        if (g_overlay) g_overlay();
+    } else {
         ImGuiStyle saved = ImGui::GetStyle();
         cheats::ui::apply_theme(g_glass);
         if (g_mode == Mode::Pins) {
@@ -239,6 +244,7 @@ void reset() {
     s.style = -1;
     s.opacity = s.blur = s.tint = -1.f;
     g_mode = Mode::Menu;
+    g_overlay = nullptr;
     g_glass = false;
     g_pad = true;
     g_host.s = play::default_settings();
@@ -248,9 +254,149 @@ void reset() {
     play::menu_show(0, 0, 1);
 }
 
+// ---- the overlay's own screens, as overlay.cpp draws them (overlay_screens.h) ---------------------------------------------------------
+namespace scr = nxrt::play::screens;
+scr::KeyboardView g_kb;
+void kb_view(bool pad) {
+    g_kb = scr::KeyboardView();
+    g_kb.title = "Name your island";
+    g_kb.header = "What should your island be called?";
+    g_kb.sub = "Up to 12 characters. You can change it later at the town hall.";
+    g_kb.guide = "Island name";
+    g_kb.shown = g_kb.before_caret = "Sunny Isle";
+    g_kb.count = "10 / 12";
+    g_kb.pad = pad;
+    g_kb.by_label = true;
+    g_kb.sel_row = pad ? 2 : -1;
+    g_kb.sel_key = pad ? 4 : -1;
+    for (const char* row : {"1234567890", "qwertyuiop", "asdfghjkl-", "zxcvbnm,.?"}) {
+        std::vector<scr::KeyboardKey> r;
+        for (const char* c = row; *c; ++c) {
+            scr::KeyboardKey k;
+            k.label = std::string(1, *c);
+            r.push_back(k);
+        }
+        g_kb.rows.push_back(r);
+    }
+    auto key = [](const char* l, int w, bool accent = false, bool on = false) {
+        scr::KeyboardKey k;
+        k.label = l;
+        k.w = w;
+        k.accent = accent;
+        k.on = on;
+        return k;
+    };
+    g_kb.rows.push_back({key("Shift", 2, false, true), key("Space", 4), key("!", 1), key("'", 1), key("Delete", 2)});
+    g_kb.rows.push_back({key("Cancel", 5), key("OK", 5, true)});
+}
+void draw_keyboard() { scr::keyboard(g_kb, nullptr); }
+void draw_quit_pad() { scr::quit_prompt(false, true, true); }
+void draw_quit_keys() { scr::quit_prompt(false, false, false); }
+void draw_ctrl() { scr::ctrl_prompt(2, 4, 1, true, true); }
+void draw_notices() {
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    const ImVec2 d = ImGui::GetIO().DisplaySize;
+    const std::string lines[4] = {"60 FPS", "16.7 ms", "1% low 54", "max 21.4 ms"};
+    scr::fps_counter(dl, lines, 4, 1, d);
+    const std::string two[2] = {"144 FPS", "6.9 ms"};
+    scr::fps_counter(dl, two, 2, 2, d);
+    scr::shader_note(dl, 37, d);
+    scr::save_notice(dl, "the disk is full", d);
+    const float k = cheats::ui::theme::k();
+    scr::touch_button(dl, ImVec4(12.f * k, d.y * 0.5f, 56.f * k, 52.f * k), false);
+    scr::touch_button(dl, ImVec4(80.f * k, d.y * 0.5f, 56.f * k, 52.f * k), true);
+}
+// A debug window (Diagnostics without a menu, Overlay::add_panel) and every themed control (cheats_theme.h): a select open on its list,
+// switches, boxes, rings, sliders, a stepper, progress, a graph, a disclosure, colour swatches and a tooltip.
+int g_frame_no = 0;
+void draw_debug() {
+    namespace t = cheats::ui::theme;
+    const float k = t::k();
+    ImGui::SetNextWindowPos(ImVec2(24.f * k, 24.f * k), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(560.f * k, 0.f), ImGuiCond_Always);
+    bool open = true;
+    if (t::begin_window("Diagnostics", &open)) {
+        ImGui::Text("GPU: NVIDIA GeForce RTX 5090");
+        ImGui::TextDisabled("Vulkan 1.3, driver 0x%08x, validation off", 0x8d3c4000u);
+        ImGui::SeparatorText("Presentation");
+        static int mode = 2;
+        const ImGuiID combo_id = ImGui::GetID("Present mode");
+        if (g_frame_no == 1) ImGui::OpenPopupEx(ImHashStr("##ComboPopup", 0, combo_id));
+        static const char* const modes[] = {"Immediate", "Mailbox", "FIFO (vsync)", "FIFO relaxed"};
+        t::combo("Present mode", &mode, modes, 4);
+        static int win = 1;
+        t::radio("Windowed", &win, 0);
+        ImGui::SameLine();
+        t::radio("Borderless", &win, 1);
+        ImGui::SameLine();
+        t::radio("Exclusive", &win, 2);
+        static bool raw = true, hdr = false;
+        t::checkbox("Raw mouse (relative mode)", &raw);
+        ImGui::SameLine();
+        t::checkbox("HDR", &hdr);
+        static float cap = 60.f;
+        t::slider_float("Frame cap", &cap, 30.f, 240.f, "%.0f fps");
+        static int threads = 6;
+        t::input_int("Shader threads", &threads);
+        ImGui::SeparatorText("Timing");
+        float ft[120];
+        for (int i = 0; i < 120; ++i) ft[i] = 16.7f + 2.5f * std::sin(i * 0.35f) + (i % 37 == 0 ? 7.f : 0.f);
+        t::plot_lines("##ft", ft, 120, 0, "frame time", 0.f, 33.f, ImVec2(ImGui::GetContentRegionAvail().x, 48.f * k));
+        t::progress(0.62f, ImVec2(-1.f, 0.f), "Preparing shaders 62%");
+        if (t::tree_node("Most called stubs", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("%8u  %s", 1024u, "nvnCommandBufferSetDepthBounds");
+            ImGui::Text("%8u  %s", 96u, "nvnQueueGetTotalTime");
+            ImGui::TreePop();
+        }
+        t::collapsing_header("Swap chain");
+        static const ImU32 sw[4] = {IM_COL32(255, 194, 61, 255), IM_COL32(255, 111, 97, 255), IM_COL32(184, 63, 134, 255), IM_COL32(63, 182, 255, 255)};
+        for (int i = 0; i < 4; ++i) {
+            ImGui::PushID(i);
+            t::colour_swatch("##sw", sw[i], 0.f, i == 0);
+            ImGui::PopID();
+            if (i < 3) ImGui::SameLine();
+        }
+    }
+    ImGui::End();
+    ImGui::SetNextWindowPos(ImVec2(620.f * k, 380.f * k), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(300.f * k, 0.f), ImGuiCond_Always);
+    if (t::begin_window("Value graph###dbg2", nullptr)) {
+        static bool on = true;
+        t::toggle("##on", &on);
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Freeze");
+        ImGui::SetNextWindowPos(ImVec2(ImGui::GetItemRectMin().x, ImGui::GetItemRectMax().y + 12.f * k), ImGuiCond_Always);
+        t::tooltip("Tooltips: the dialog colour, small type, the theme's corners");
+    }
+    ImGui::End();
+}
+// Type: Inter's Latin, Greek and Cyrillic, the symbols, AnySwitch Mono and the CJK fallback (the system's faces: not compared with a
+// reference, it differs from machine to machine).
+void draw_type() {
+    namespace t = cheats::ui::theme;
+    const float k = t::k();
+    ImGui::SetNextWindowPos(ImVec2(24.f * k, 24.f * k), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(760.f * k, 0.f), ImGuiCond_Always);
+    if (t::begin_window("Type", nullptr)) {
+        t::text(t::Type::Display, 0, "AnySwitch 60 fps");
+        t::text(t::Type::Title, 0, "Title: The Legend of Zelda");
+        t::text(t::Type::Body, 0, "Body: \u0395\u03bb\u03bb\u03b7\u03bd\u03b9\u03ba\u03ac \u00b7 \u0420\u0443\u0441\u0441\u043a\u0438\u0439 \u00b7 Espa\u00f1ol \u00b7 \u010ce\u0161tina \u00b7 Ti\u1ebfng Vi\u1ec7t");
+        t::text(t::Type::Small, t::pal().text2, "Small: tabular figures 0123456789 / 1111111111");
+        t::text(t::Type::Body, 0, "Symbols: \u2713 \u2717 \u2605 \u2606 \u2190 \u2192 \u2191 \u2193 \u26a0 \u2665 \u25cf \u25c6 \u25b6 \u25a0 \u25a1 \u2265 \u2264 \u221e \u00a9 \u2122 \u20ac");
+        t::text(t::Type::Mono, 0, "Mono: 7800001230  64 00 00 00 5F 00 00 00  d...____");
+        t::text(t::Type::Body, 0, "CJK: \u30bc\u30eb\u30c0\u306e\u4f1d\u8aac \u00b7 \u8d85\u7ea7\u9a6c\u529b\u6b27\u5144\u5f1f \u00b7 \u5bf6\u53ef\u5922 \u00b7 \ud3ec\ucf13\ubaac\uc2a4\ud130");
+        t::text(t::Type::Strong, 0, "Cheat: \u65e0\u9650\u91d1\u5e01 / \u4f53\u529b\u6700\u5927 / \ubb34\ud55c \uccb4\ub825");
+    }
+    ImGui::End();
+}
+
 struct Screen {
     const char* name;
     void (*setup)();
+    ImGuiKey nav = ImGuiKey_None;   // pressed `presses` times after the screen's first frames: keyboard or controller focus
+    int presses = 0;
+    bool compare = true;            // false: the shot depends on the machine's system fonts (CJK)
 };
 const Screen kScreens[] = {
     {"display", [] { play::menu_show(0); }},
@@ -272,6 +418,19 @@ const Screen kScreens[] = {
     {"dock_right", [] { play::menu_show(0, -1, 2); }},
     {"pins", [] { g_mode = Mode::Pins; perf::set_board(shot_pins()); }},
     {"pins_dusk", [] { set_theme("dusk"); g_mode = Mode::Pins; perf::set_board(shot_pins()); }},
+    // focus: the keyboard's and the controller's (the accent ring on the focused row)
+    {"focus_keys", [] { play::menu_show(3); g_pad = false; }, ImGuiKey_DownArrow, 3},
+    {"focus_pad", [] { play::menu_show(0); }, ImGuiKey_GamepadDpadDown, 2},
+    // the overlay's own screens
+    {"keyboard_pad", [] { kb_view(true); g_mode = Mode::Overlay; g_overlay = draw_keyboard; }},
+    {"keyboard_keys", [] { kb_view(false); g_mode = Mode::Overlay; g_overlay = draw_keyboard; }},
+    {"quit_pad", [] { g_mode = Mode::Overlay; g_overlay = draw_quit_pad; }},
+    {"quit_keys", [] { g_mode = Mode::Overlay; g_overlay = draw_quit_keys; }},
+    {"ctrl_prompt", [] { g_mode = Mode::Overlay; g_overlay = draw_ctrl; }},
+    {"notices", [] { g_mode = Mode::Overlay; g_overlay = draw_notices; }},
+    {"debug_window", [] { g_mode = Mode::Overlay; g_overlay = draw_debug; }},
+    {"debug_daylight", [] { set_theme("daylight"); g_mode = Mode::Overlay; g_overlay = draw_debug; }},
+    {"type", [] { g_mode = Mode::Overlay; g_overlay = draw_type; }, ImGuiKey_None, 0, false},
 };
 
 // ---- the checks that need no pictures --------------------------------------------------------------------------------------------------
@@ -530,17 +689,11 @@ int main(int argc, char** argv) {
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
         io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
         test::soft_init();
-        ImGui::StyleColorsDark();
-        io.Fonts->AddFontDefaultVector();
-        cheats::ui::load_fonts(io.Fonts);
-        ImGui::GetStyle().FontSizeBase = 16.0f;
+        cheats::ui::setup_context();   // as overlay.cpp: the overlay's fonts and the theme before the first frame
         Ctx c;
         c.w = r.w;
         c.h = r.h;
         c.scale = r.scale;
-        c.base = ImGuiStyle();
-        ImGui::StyleColorsDark(&c.base);
-        c.base.FontSizeBase = 16.f;
         game_frame(c.bg, c.w, c.h);
         {
             int bw = 0, bh = 0;
@@ -550,16 +703,29 @@ int main(int argc, char** argv) {
             std::memcpy(g_blur_tex->GetPixels(), blurred.data(), blurred.size());
             ImGui::RegisterUserTexture(g_blur_tex);
         }
+        // every screen on the test's scene at both scales, then (1x) on the light, dark and busy backgrounds
+        std::vector<uint8_t> scene_bg = c.bg;
+        for (int bgk = 0; bgk < 4; ++bgk) {
+        if (bgk > 0 && r.scale != 1.f) break;
+        if (bgk > 0) test::background(bgk, c.bg, c.w, c.h);
         for (const Screen& sc : kScreens) {
             if (!only.empty() && only != sc.name) continue;
             reset();
             sc.setup();
             std::vector<uint8_t> px;
             for (int f = 0; f < 5; ++f) {
+                g_frame_no = f;
                 if (f == 2 && g_scroll >= 0.f) {
                     play::menu_scroll(g_scroll);
                     g_scroll = -1.f;
                 }
+                if (f == 2 && sc.nav != ImGuiKey_None)   // keyboard or controller focus: the presses, a frame each
+                    for (int n = 0; n < sc.presses; ++n) {
+                        io.AddKeyEvent(sc.nav, true);
+                        frame(c, nullptr, false);
+                        io.AddKeyEvent(sc.nav, false);
+                        frame(c, nullptr, false);
+                    }
                 frame(c, f == 4 ? &px : nullptr, false);   // windows size themselves over the first frames
                 if (g_glass && f == 2 && g_last.glass) {   // what the GPU pass would give for this panel: the reference blur of its rectangle
                     int bw = 0, bh = 0;
@@ -567,9 +733,12 @@ int main(int argc, char** argv) {
                     std::memcpy(g_blur_tex->GetPixels(), blurred.data(), blurred.size());
                 }
             }
-            if (std::string(sc.name) == "glass") check("glass: the menu's panel is drawn as glass and asks for the blur of its rectangle", g_last.glass && g_last.glass_rect[2] > 0);
+            if (std::string(sc.name) == "glass" && bgk == 0)
+                check("glass: the menu's panel is drawn as glass and asks for the blur of its rectangle", g_last.glass && g_last.glass_rect[2] > 0);
+            const std::string name = std::string(sc.name) + "@" + (bgk ? test::background_name(bgk) : r.tag);
+            if (!test::theme_guard(ImGui::GetDrawData(), name.c_str())) ++g_failures;
             ImGui::GetCurrentContext()->OpenPopupStack.resize(0);
-            const std::string name = std::string(sc.name) + "@" + r.tag;
+            ImGui::FocusWindow(nullptr);
             const std::string png = (fs::path(out_dir) / (name + ".png")).string();
             if (!gfx::save_png_rgba(png, px.data(), static_cast<uint32_t>(c.w), static_cast<uint32_t>(c.h))) {
                 std::printf("FAILED %s: cannot write %s\n", name.c_str(), png.c_str());
@@ -577,7 +746,8 @@ int main(int argc, char** argv) {
                 continue;
             }
             if (ref_dir.empty()) { std::printf("wrote  %s\n", png.c_str()); continue; }
-            const int f = c.w / 640;
+            if (!sc.compare) { std::printf("shot   %s (the system's CJK fonts: no reference)\n", name.c_str()); continue; }
+            const int f = c.w / (bgk ? 320 : 640);   // the references are 640 pixels wide (320 for the backgrounds)
             int sw = 0, sh = 0;
             const std::vector<uint8_t> small = shrink(px, c.w, c.h, f, &sw, &sh);
             const std::string ref = (fs::path(ref_dir) / (name + ".png")).string();
@@ -598,6 +768,8 @@ int main(int argc, char** argv) {
             std::printf("%-6s %s (mean %.2f, %.2f%% of pixels off by more than 8)\n", ok ? "ok" : "FAILED", name.c_str(), d.mean_abs, d.fraction_over_8 * 100.0);
             if (!ok) ++g_failures;
         }
+        }
+        c.bg = scene_bg;
         if (r.scale == 1.f && only.empty()) {
             // the pad drives the menu: L / R step through the pages
             reset();

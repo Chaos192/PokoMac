@@ -81,3 +81,6 @@ jobs:
           python3 -m py_compile game-build/release_b/pkp_build.py game-build/release_b/mods.py game-build/release_b/apply_ips.py
           python3 -I game-build/tests/test_mods.py
           python3 -I game-build/tests/test_apply_ips.py
+
+      - name: Overlay theme guard (no stock ImGui in the in-game overlay)
+        run: python3 -I tools/dev/test_overlay_theme_guard.py

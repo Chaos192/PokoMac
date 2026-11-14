@@ -55,11 +55,13 @@ if(GIT_FOUND)
     endif()
 endif()
 target_include_directories(nxrt_gfx PUBLIC include src/gfx/nvn/third_party PRIVATE src/gfx src/gfx/nvn)
-# The cheats overlay's typeface and themes (ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch).
-# Inter (OFL-1.1, the launcher's; assets/fonts/LICENSE-Inter.txt): the three subset TTFs compiled in as their bytes
-# (src/gfx/play/cheats_theme.cpp), so the overlay looks the same whatever folder the game runs from.
+# The overlay's faces and themes (ported from AnySwitch by Chaos192, github.com/Chaos192/AnySwitch), compiled in as their bytes
+# (src/gfx/play/cheats_theme.cpp load_fonts) so every overlay screen looks the same whatever folder the game runs from: Inter 4.1 Regular
+# and SemiBold (OFL-1.1, the launcher's typeface), AnySwitch Mono (Cascadia Mono subset, OFL-1.1) and AnySwitch Symbols (DejaVu Sans'
+# symbol blocks, Bitstream Vera licence). Made by scripts/make_overlay_fonts.py; licences in assets/fonts. Without them the overlay falls
+# back to ImGui's own font (a warning at start).
 set(_nxrt_inter_ok ON)
-foreach(_f Inter-Regular Inter-Regular-Ext Inter-SemiBold)
+foreach(_f Inter-Regular Inter-SemiBold AnySwitchMono-Regular AnySwitchSymbols-Regular)
     set(_src "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/${_f}.ttf")
     if(NOT EXISTS "${_src}")
         set(_nxrt_inter_ok OFF)

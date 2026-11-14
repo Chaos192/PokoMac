@@ -129,10 +129,10 @@ void draw_signature_maker() {
     if (!m.open) return;
     State& s = st();
     ImGui::SetNextWindowSize(ImVec2(theme::px(620.f), 0), ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("Signature maker###cheats_sig", &m.open)) {
+    if (theme::begin_window("Signature maker###cheats_sig", &m.open)) {
         ImGui::Text("Code at %s", cp::where(m.addr).c_str());
         ImGui::SetNextItemWidth(theme::px(120.f));
-        if (ImGui::SliderInt("start length", &m.len, 8, 64)) make_signature();
+        if (theme::slider_int("start length", &m.len, 8, 64)) make_signature();
         ImGui::SameLine();
         if (ImGui::Button("Make again")) make_signature();
         const std::string pat = aob_text(m.sig.pattern);
@@ -380,7 +380,7 @@ void win_disasm() {
             const auto p = patches.find(a);
             if (p != patches.end()) {
                 ImGui::TextColored(p->second.state == cp::State::Live ? ImVec4(0.5f, 0.95f, 0.6f, 1.f) : ImVec4(1.f, 0.8f, 0.4f, 1.f), "patched: %s", cp::state_name(p->second.state));
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", p->second.note.c_str());
+                if (ImGui::IsItemHovered()) theme::tooltip("%s", p->second.note.c_str());
                 ImGui::SameLine();
             }
             if (bp != bps.end()) {
@@ -399,7 +399,7 @@ void win_disasm() {
     // the injection prompt
     if (g_inj.open) {
         ImGui::SetNextWindowSize(ImVec2(theme::px(560.f), theme::px(320.f)), ImGuiCond_FirstUseEver);
-        if (ImGui::Begin("Inject code###cheats_inject", &g_inj.open)) {
+        if (theme::begin_window("Inject code###cheats_inject", &g_inj.open)) {
             ImGui::TextWrapped("At %s: these instructions run first, then the one that is there, then the code goes on. One A64 instruction per line.",
                                cp::where(g_inj.addr).c_str());
             editor("##inj", &g_inj.text, ImVec2(-1, -ImGui::GetFrameHeightWithSpacing() * 1.5f));
@@ -426,7 +426,7 @@ void win_disasm() {
     // the assemble prompt
     if (g_asm.open) {
         ImGui::SetNextWindowSize(ImVec2(theme::px(520.f), 0), ImGuiCond_FirstUseEver);
-        if (ImGui::Begin("Assemble###cheats_asm", &g_asm.open)) {
+        if (theme::begin_window("Assemble###cheats_asm", &g_asm.open)) {
             ImGui::Text("Replace the instruction at %s", gmem::describe(g_asm.addr).c_str());
             const bool go = field("##asm", g_asm.text, sizeof g_asm.text, Keys::Text, "mov w8, #99   /  nop  /  b 0x7100001234", -1);
             uint32_t word = 0;
@@ -510,7 +510,7 @@ void win_struct() {
     }
     ImGui::SameLine();
     ImGui::SetNextItemWidth(theme::px(110.f));
-    ImGui::InputInt("size", &s.struct_size, 0x40, 0x100, ImGuiInputTextFlags_CharsHexadecimal);
+    theme::input_int("size", &s.struct_size, 0x40, 0x100, ImGuiInputTextFlags_CharsHexadecimal);
     s.struct_size = std::clamp(s.struct_size, 0x10, 0x4000);
     ImGui::Text("at %s", cp::where(s.struct_addr).c_str());
     // each 8-byte slot is shown as what it most likely is: a pointer into guest memory, a float pair, small integers, or text
@@ -690,7 +690,7 @@ void win_snapshots() {
     for (const auto& sn : s.snaps) names.push_back(sn.name + " (" + std::to_string(sn.bytes >> 20) + " MiB)");
     auto pick = [&](const char* id, int* sel) {
         ImGui::SetNextItemWidth(theme::px(230.f));
-        if (ImGui::BeginCombo(id, names[static_cast<size_t>(*sel + 1)].c_str())) {
+        if (theme::begin_combo(id, names[static_cast<size_t>(*sel + 1)].c_str())) {
             for (int i = -1; i < static_cast<int>(s.snaps.size()); ++i)
                 if (ImGui::Selectable(names[static_cast<size_t>(i + 1)].c_str(), *sel == i)) *sel = i;
             ImGui::EndCombo();

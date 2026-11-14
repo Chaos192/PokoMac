@@ -294,13 +294,13 @@ void scan_options() {
     State& s = st();
     const th::Palette& p = th::pal();
     ImGui::PushStyleColor(ImGuiCol_Header, p.card);
-    const bool open = ImGui::CollapsingHeader("Search options");
+    const bool open = theme::collapsing_header("Search options");
     ImGui::PopStyleColor();
     if (!open) return;
     ImGui::Indent(th::sp(th::S2));
     auto cb = [](const char* label, bool* v, const char* tip) {
-        ImGui::Checkbox(label, v);
-        if (tip && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("%s", tip);
+        theme::checkbox(label, v);
+        if (tip && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) theme::tooltip("%s", tip);
     };
     th::text(th::Type::Small, p.text2, "Where to look");
     cb("The game's heap (most values live here)", &s.filter.heap, "heap");
@@ -377,7 +377,7 @@ void results_list(bool pattern) {
                 s.result_sel = i;
                 add_result(r);
             }
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) ImGui::SetTooltip("Add it to My table");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) theme::tooltip("Add it to My table");
             if (ImGui::IsItemFocused() && pad_mode() && pad_pressed(hid::btn(hid::kBtnX))) ImGui::OpenPopup("res_ctx");
             if (ImGui::BeginPopupContextItem("res_ctx")) {
                 th::text(th::Type::Small, p.text3, "%s", gmem::describe(r.addr).c_str());
@@ -434,7 +434,7 @@ void find_choose() {
     for (int i = 0; i < 6; ++i)
         if (kMoreKindIdx[i] == s.kind_i) more = i;
     ImGui::SetNextItemWidth(th::px(320.f));
-    if (ImGui::BeginCombo("##more", more >= 0 ? kMoreKinds[more] : "More types...")) {
+    if (theme::begin_combo("##more", more >= 0 ? kMoreKinds[more] : "More types...")) {
         for (int i = 0; i < 6; ++i)
             if (ImGui::Selectable(kMoreKinds[i], more == i)) s.kind_i = kMoreKindIdx[i];
         ImGui::EndCombo();
@@ -455,7 +455,7 @@ void find_choose() {
         if (s.find_now == 2) {
             int r = std::clamp(s.first_i - 2, 0, 4);
             ImGui::SetNextItemWidth(th::px(240.f));
-            if (ImGui::Combo("##range", &r, kRangeNames, 5)) s.first_i = r + 2;
+            if (theme::combo("##range", &r, kRangeNames, 5)) s.first_i = r + 2;
             s.first_i = r + 2;
             ImGui::SameLine();
         }
@@ -492,7 +492,7 @@ void find_progress() {
     char b[96];
     std::snprintf(b, sizeof b, "%.0f%%", f * 100.f);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, th::px(6.f));
-    ImGui::ProgressBar(f, ImVec2(-1, th::px(12.f)), "");
+    theme::progress(f, ImVec2(-1, th::px(12.f)), "");
     ImGui::PopStyleVar();
     th::text(th::Type::Body, p.text2, "%s   %.0f of %.0f MiB   %s found so far", b, static_cast<double>(don) / 1048576.0, static_cast<double>(tot) / 1048576.0,
              group_digits(s.prog.results.load()).c_str());
@@ -574,7 +574,7 @@ void find_narrow(float col_w) {
             // every other comparison
             ImGui::SetNextItemWidth(col_w);
             int more = s.next_i >= 5 || s.next_i == 10 ? s.next_i : -1;
-            if (ImGui::BeginCombo("##ways", more >= 0 ? kNextPlain[more] : "More ways to compare...")) {
+            if (theme::begin_combo("##ways", more >= 0 ? kNextPlain[more] : "More ways to compare...")) {
                 for (int i = 5; i < 11; ++i)
                     if (ImGui::Selectable(kNextPlain[i], more == i)) s.next_i = i;
                 ImGui::EndCombo();
@@ -676,7 +676,7 @@ void page_table() {
         s.script_text = e.script;
         mark_dirty();
     }
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) ImGui::SetTooltip("An AOB script: code changes that find their place by a byte pattern");
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) theme::tooltip("An AOB script: code changes that find their place by a byte pattern");
     ImGui::SameLine(0, th::sp(th::S2));
     ImGui::BeginDisabled(s.list.empty());
     if (th::button("Save as cheat codes", th::Icon::Export)) {
@@ -687,7 +687,7 @@ void page_table() {
     }
     ImGui::EndDisabled();
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal | ImGuiHoveredFlags_AllowWhenDisabled))
-        ImGui::SetTooltip("Writes the values and pointer paths as Atmosphère cheat codes for this game: they then run on a console, Ryujinx or yuzu too");
+        theme::tooltip("Writes the values and pointer paths as Atmosphère cheat codes for this game: they then run on a console, Ryujinx or yuzu too");
     if (!s.list.empty()) {
         // beside the buttons when it fits, else on a line of its own (a docked panel)
         const float fw = th::px(200.f);
@@ -761,7 +761,7 @@ void page_table() {
             }
             focus |= ImGui::IsItemFocused();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
-                ImGui::SetTooltip(e.is_script ? "Run the script" : "Freeze: keep the value as it is (the game can't change it)");
+                theme::tooltip(e.is_script ? "Run the script" : "Freeze: keep the value as it is (the game can't change it)");
             // name, and where it is (its status when something is wrong)
             ImGui::TableSetColumnIndex(1);
             const uint64_t a = e.is_script ? 0 : entry_address(e);
@@ -832,7 +832,7 @@ void page_table() {
                            e.hotkey.empty() ? th::Btn::Quiet : th::Btn::Secondary, 0.f, th::kControlSm))
                 s.hotkey_capture = static_cast<int>(i);
             focus |= ImGui::IsItemFocused();
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) ImGui::SetTooltip("A key or controller combination that switches it while you play");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) theme::tooltip("A key or controller combination that switches it while you play");
             // the row's actions: right-click / X / the dots
             ImGui::TableSetColumnIndex(4);
             ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (row_h - th::px(th::kControlH)) * 0.5f);
@@ -847,7 +847,7 @@ void page_table() {
                 } else {
                     th::text(th::Type::Small, p.text3, "When frozen");
                     auto mode = [&](const char* label, FreezeMode m) {
-                        if (ImGui::RadioButton(label, e.mode == m)) {
+                        if (theme::radio(label, e.mode == m)) {
                             e.mode = m;
                             if (e.freeze_id) Engine::instance().freeze_set_mode(e.freeze_id, e.mode);
                             mark_dirty();
@@ -885,7 +885,7 @@ void page_table() {
                 if (!e.is_script) {
                     const char* acts[] = {"Freeze / unfreeze", "Write the value", "Add 1", "Subtract 1"};
                     ImGui::SetNextItemWidth(th::px(220.f));
-                    if (ImGui::Combo("does", &e.hotkey_action, acts, 4)) mark_dirty();
+                    if (theme::combo("does", &e.hotkey_action, acts, 4)) mark_dirty();
                 }
                 ImGui::SetNextItemWidth(th::px(220.f));
                 if (field("group", &e.group, Keys::Text, "group", 220)) mark_dirty();
@@ -918,7 +918,7 @@ void win_script_editor() {
     Entry& e = s.list[s.script_edit];
     bool open = true;
     ImGui::SetNextWindowSize(ImVec2(theme::px(620.f), theme::px(440.f)), ImGuiCond_FirstUseEver);
-    if (ImGui::Begin(("AOB script: " + e.desc + "###cheats_script").c_str(), &open)) {
+    if (theme::begin_window(("AOB script: " + e.desc + "###cheats_script").c_str(), &open)) {
         field("Name", &e.desc, Keys::Text, "name");
         editor("##script", &s.script_text, ImVec2(-1, -ImGui::GetFrameHeightWithSpacing() * 2.2f));
         if (ImGui::Button("Save")) {
@@ -953,10 +953,10 @@ void win_pointer() {
     ImGui::SameLine();
     int depth = static_cast<int>(s.ptr_opt.max_depth);
     ImGui::SetNextItemWidth(theme::px(90.f));
-    if (ImGui::InputInt("levels", &depth)) s.ptr_opt.max_depth = static_cast<unsigned>(std::clamp(depth, 1, 7));
+    if (theme::input_int("levels", &depth)) s.ptr_opt.max_depth = static_cast<unsigned>(std::clamp(depth, 1, 7));
     int maxoff = static_cast<int>(s.ptr_opt.max_offset);
     ImGui::SetNextItemWidth(theme::px(120.f));
-    if (ImGui::InputInt("max offset", &maxoff, 0x100, 0x1000, ImGuiInputTextFlags_CharsHexadecimal)) s.ptr_opt.max_offset = static_cast<uint64_t>(std::clamp(maxoff, 8, 0x100000));
+    if (theme::input_int("max offset", &maxoff, 0x100, 0x1000, ImGuiInputTextFlags_CharsHexadecimal)) s.ptr_opt.max_offset = static_cast<uint64_t>(std::clamp(maxoff, 8, 0x100000));
     ImGui::SameLine();
     if (ImGui::Button("Scan", ImVec2(theme::px(90.f), 0))) {
         uint64_t target = 0;

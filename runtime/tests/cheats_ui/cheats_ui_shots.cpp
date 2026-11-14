@@ -3,7 +3,9 @@
 // Ported from AnySwitch by Chaos192 (github.com/Chaos192/AnySwitch).
 // The cheats overlay's screenshot test: every main screen drawn offscreen (no window, no GPU: soft_raster.h renders ImGui's draw data on
 // the CPU) at two UI scales over a synthetic game frame, written as PNGs and compared with the reference images in tests/cheats_ui/ref
-// (stored at a quarter of the pixels to keep the repository small; the comparison downsamples the render the same way).
+// (stored at a quarter of the pixels to keep the repository small; the comparison downsamples the render the same way). At 1x every screen
+// is drawn on light, dark and busy backgrounds too (references at 320 pixels wide: <screen>@<background>.png), and every screen passes
+// the theme guard (soft_raster.h theme_guard: the style is the theme's, no vertex in ImGui's stock colours).
 //   nxrt_cheats_ui_test [--out <dir>] [--ref <dir>] [--update] [--only <screen>]
 // --update writes the references from this run. The guest memory the tools read is a real heap section (mem::heap_create), filled with
 // known values, so the scans, the list and the viewers show live values as in a game.
@@ -81,11 +83,10 @@ void guest_setup() {
 struct Ctx {
     int w = 1280, h = 720;
     float scale = 1.f;
-    ImGuiStyle base;
     std::vector<uint8_t> bg;
 };
 
-// One frame of the overlay as overlay.cpp draws it: the F1 menu's scaled style, the cheats theme over it, the cheats UI.
+// One frame of the overlay as overlay.cpp draws it: the theme as the frame's base style, the cheats look over it, the cheats UI.
 double g_ui_ms = 0;      // the CPU time of the overlay's frames (theme, pages, ImGui's own work; not this test's rasterizer)
 int g_ui_frames = 0;
 bool g_hidden = false;   // the screen is the game with the panel closed (the HUD)
@@ -95,10 +96,7 @@ void frame(Ctx& c, std::vector<uint8_t>& out, bool timed) {
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2(static_cast<float>(c.w), static_cast<float>(c.h));
     io.DeltaTime = 1.f / 60.f;
-    ImGuiStyle& style = ImGui::GetStyle();
-    style = c.base;
-    style.ScaleAllSizes(c.scale);
-    style.FontScaleDpi = c.scale;
+    ui::frame_style(c.scale, false);
     ImGui::NewFrame();
     {
         ImGuiStyle saved = ImGui::GetStyle();
@@ -378,18 +376,12 @@ int main(int argc, char** argv) {
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
         io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
         test::soft_init();
-        ImGui::StyleColorsDark();
-        io.Fonts->AddFontDefaultVector();
-        ui::load_fonts(io.Fonts);
-        ImGui::GetStyle().FontSizeBase = 16.0f;
+        ui::setup_context();   // as overlay.cpp: the overlay's fonts and the theme before the first frame
         ui::on_shown();
         Ctx c;
         c.w = r.w;
         c.h = r.h;
         c.scale = r.scale;
-        c.base = ImGuiStyle();
-        ImGui::StyleColorsDark(&c.base);
-        c.base.FontSizeBase = 16.f;
         game_frame(c.bg, c.w, c.h);
         {
             int bw = 0, bh = 0;
@@ -403,6 +395,10 @@ int main(int argc, char** argv) {
         ui::st().list.clear();
         const uint32_t v100 = 100;
         std::memcpy(reinterpret_cast<void*>(mem::kHeapBase + 0x1230), &v100, 4);
+        const std::vector<uint8_t> scene_bg = c.bg;
+        for (int bgk = 0; bgk < 4; ++bgk) {
+        if (bgk > 0 && r.scale != 1.f) break;
+        if (bgk > 0) test::background(bgk, c.bg, c.w, c.h);
         for (const Screen& sc : kScreens) {
             if (!only.empty() && only != sc.name) continue;
             reset_look();
@@ -420,9 +416,10 @@ int main(int argc, char** argv) {
                     std::memcpy(g_blur_tex->GetPixels(), blurred.data(), blurred.size());
                 }
             }
+            const std::string name = std::string(sc.name) + "@" + (bgk ? test::background_name(bgk) : r.tag);
+            if (!test::theme_guard(ImGui::GetDrawData(), name.c_str())) ++g_failures;
             ImGui::GetCurrentContext()->OpenPopupStack.resize(0);   // the next screen starts without the last one's popups and keyboard
             ui::osk_show(nullptr, ui::Keys::Text, nullptr);
-            const std::string name = std::string(sc.name) + "@" + r.tag;
             const std::string png = (fs::path(out_dir) / (name + ".png")).string();
             if (!gfx::save_png_rgba(png, px.data(), static_cast<uint32_t>(c.w), static_cast<uint32_t>(c.h))) {
                 std::printf("FAILED %s: cannot write %s\n", name.c_str(), png.c_str());
@@ -430,7 +427,7 @@ int main(int argc, char** argv) {
                 continue;
             }
             if (ref_dir.empty()) { std::printf("wrote  %s\n", png.c_str()); continue; }
-            const int f = c.w / 640;   // the references are 640 pixels wide
+            const int f = c.w / (bgk ? 320 : 640);   // the references are 640 pixels wide (320 for the backgrounds)
             int sw = 0, sh = 0;
             const std::vector<uint8_t> small = shrink(px, c.w, c.h, f, &sw, &sh);
             const std::string ref = (fs::path(ref_dir) / (name + ".png")).string();
@@ -452,6 +449,8 @@ int main(int argc, char** argv) {
                         d.fraction_over_8 * 100.0);
             if (!ok) ++g_failures;
         }
+        }
+        c.bg = scene_bg;
         if (r.scale == 1.f && only.empty()) {
             // the pad drives it: L / R step through the pages, - takes back what the last message offers
             std::vector<uint8_t> px;

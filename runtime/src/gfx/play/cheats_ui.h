@@ -37,8 +37,16 @@ bool animations();                     // [cheats] animations: the menus' short 
 // The cheats HUD's own toggle ([cheats] hud_key, a key; [cheats] hud_pad, an opt-in controller chord): shows or hides the HUD's pins.
 void toggle_hud();
 bool hud_shown();
-// Adds the overlay's fonts (Inter) to the shared atlas; the atlas's first font stays the dev menu's. Once, after the default font.
+// Adds the overlay's fonts (Inter first: the context's default font; theme::load_fonts) to the context's atlas. setup_context() calls it.
 void load_fonts(ImFontAtlas* atlas);
+// The overlay's ImGui context made ready before its first frame (overlay.cpp create, scene runs, the screenshot tests): the fonts, the
+// player's look (init_look) and the theme as the base style, so not one frame, window, popup or tooltip starts from ImGui's stock look.
+// Call once, right after ImGui::CreateContext (tools/dev/overlay_theme_guard.py checks every CreateContext has it).
+void setup_context();
+// The base style of a frame, before every ImGui::NewFrame: the theme at the frame's DPI scale, finger-sized with `touch` (taller rows, a
+// wider scroll bar and grips). The menus push their own look over it and restore it; prompts, the keyboard, notices and debug windows
+// draw on it. The guard checks every NewFrame has it.
+void frame_style(float dpi, bool touch);
 // The panel's close button was pressed: the overlay hides it (true once per press).
 bool take_close_request();
 
@@ -69,6 +77,7 @@ bool keyboard_open();                  // the on-screen keyboard is up (+ confir
 
 // The auto accent: the colour of the game frame under the overlay (the overlay samples one frame when it opens).
 bool wants_frame_colour();
+bool accent_auto();                    // [cheats] accent = auto: the F1 menu samples a frame when it opens too
 void set_frame_colour(const unsigned char rgba[4]);
 // The overlay's own "pause the game while it is open" (Game control), on top of [cheats] pause_game.
 bool pause_while_open();
