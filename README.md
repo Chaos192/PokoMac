@@ -21,6 +21,9 @@
 
 **Community:** questions, help and news for PokoMac and AnySwitch are on the [AnySwitch Discord](https://discord.gg/8jmS5kJMYA).
 
+**Support:** like my work? Feel free to support me on [Patreon](https://www.patreon.com/ChaosPKM). Optional: nothing is locked behind
+it, and every release stays free.
+
 > [!IMPORTANT]
 > **No game files are included.** You need your own dump of Pokémon Pokopia, version **2.0.1a** (the update installed). This project
 > provides no game files, keys or dumping tools. Not affiliated with Nintendo, The Pokémon Company or Koei Tecmo; Pokémon is a trademark of

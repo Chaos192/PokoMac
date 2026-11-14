@@ -373,6 +373,16 @@ fn open_discord() -> Result<(), String> {
     play::open_url(DISCORD_URL)
 }
 
+/// The project's Patreon, for anyone who wants to support the work. Optional: nothing is locked behind it, and every release stays free.
+/// The one place the link lives: Settings > About opens it through open_patreon.
+pub const PATREON_URL: &str = "https://www.patreon.com/ChaosPKM";
+
+/// Opens the Patreon page in the default browser.
+#[tauri::command]
+fn open_patreon() -> Result<(), String> {
+    play::open_url(PATREON_URL)
+}
+
 /// The links the launcher opens in the browser: GitHub only (releases, issues, the project it is based on). No spaces, quotes or `&`.
 fn openable_link(url: &str) -> bool {
     url.starts_with("https://github.com/") && !url.chars().any(|c| c.is_whitespace() || c == '"' || c == '&')
@@ -1706,6 +1716,7 @@ fn main() {
             cancel_update,
             open_release_url,
             open_discord,
+            open_patreon,
             save_config,
             get_overview,
             pick_folder,

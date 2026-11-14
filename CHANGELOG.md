@@ -19,7 +19,8 @@ local wireless come from it, and PokoMac's services were replaced with AnySwitch
 - **Mods**: install game-file and code mods from a .zip or a folder on the new Mods page
 - **Render resolution: Console** is the new default: the console's own 1920 x 1080, scaled to your window, so lower-end Macs and PCs
   hold 60 fps
-- A **Discord** button in the sidebar (and Settings > About > Community) opens the AnySwitch community's Discord in your browser
+- A **Discord** button in the sidebar (and Settings > About > Community) opens the AnySwitch community's Discord in your browser;
+  Settings > About also has an optional Patreon link (nothing is locked behind it)
 
 ### Licence
 - PokoMac is now under the **PolyForm Noncommercial License 1.0.0** ([LICENSE](LICENSE)): use, change and share it for any

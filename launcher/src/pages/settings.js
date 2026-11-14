@@ -618,6 +618,7 @@ export async function render(el, ctx) {
     'clock-real': (id) => commit(FIELDS[id], 0),
     'open-url': (url) => api('open_release_url', { url }),
     'open-discord': () => api('open_discord'),
+    'open-patreon': () => api('open_patreon'),
     'cheats-theme-import': async () => {
       const t = await api('cheats_theme_import');
       if (!t) return;
