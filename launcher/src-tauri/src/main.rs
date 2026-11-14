@@ -363,6 +363,16 @@ fn open_release_url(url: String) -> Result<(), String> {
     play::open_url(&url)
 }
 
+/// The AnySwitch community's Discord invite. The one place the link lives: the sidebar's Discord button and Settings > About open it
+/// through open_discord, so the page never holds the address itself.
+pub const DISCORD_URL: &str = "https://discord.gg/8jmS5kJMYA";
+
+/// Opens the community Discord in the default browser.
+#[tauri::command]
+fn open_discord() -> Result<(), String> {
+    play::open_url(DISCORD_URL)
+}
+
 /// The links the launcher opens in the browser: GitHub only (releases, issues, the project it is based on). No spaces, quotes or `&`.
 fn openable_link(url: &str) -> bool {
     url.starts_with("https://github.com/") && !url.chars().any(|c| c.is_whitespace() || c == '"' || c == '&')
@@ -1695,6 +1705,7 @@ fn main() {
             install_version,
             cancel_update,
             open_release_url,
+            open_discord,
             save_config,
             get_overview,
             pick_folder,

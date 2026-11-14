@@ -6,7 +6,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import markUrl from './art/mark.svg';
 import markTestingUrl from './art/mark-testing.png';
 import logoUrl from './art/logo.png';
-import { api, errText, esc, icon } from './ui.js';
+import { api, errText, esc, icon, toast } from './ui.js';
 import { store } from './store.js';
 import { isFirstRun } from './action.js';
 import { startGamepadNav } from './gamepad-nav.js';
@@ -67,6 +67,7 @@ function drawNav() {
     <div class="brand" data-tauri-drag-region><img class="brand-mark" src="${markUrl}" alt="" /><img class="brand-mark-testing" src="${markTestingUrl}" alt="Testing" /><img class="brand-name brand-logo" src="${logoUrl}" alt="PokoMac" /><span class="brand-tag">Testing</span></div>
     ${items.join('')}
     <div class="nav-spacer"></div>
+    <button class="nav-item" id="discord-btn" aria-label="Join the Discord">${icon('message-circle')}<span class="nav-label">Discord</span><span class="nav-tip" aria-hidden="true">Join the Discord</span></button>
     <button class="nav-item" id="theme-btn" aria-label="Change colours">${icon('palette')}<span class="nav-label"></span><span class="nav-tip" aria-hidden="true"></span></button>
     <button class="task-pill" id="task-pill" hidden>
       ${icon('loader-circle', 'spin')}<span class="task-name clip"></span><span class="task-pct"></span>
@@ -74,6 +75,8 @@ function drawNav() {
     </button>`;
   applyTheme(readTheme());
   nav.addEventListener('click', (e) => {
+    // the community Discord, in the system browser (the address lives in Rust: main.rs DISCORD_URL)
+    if (e.target.closest('#discord-btn')) api('open_discord').catch((err) => toast(errText(err), 'error'));
     if (e.target.closest('#theme-btn')) {
       const next = THEMES[(THEMES.indexOf(readTheme()) + 1) % THEMES.length];
       try { localStorage.setItem('theme', next); } catch { /* the choice lasts until the launcher closes */ }

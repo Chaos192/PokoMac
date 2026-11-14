@@ -332,7 +332,7 @@ function handle(cmd, args) {
     case 'preflight': return sleep(500).then(() => ({ ...PREFLIGHT[sc.preflight || 'ok'], need_bytes: (looseShaders ? 31 : 14) * 2 ** 30 }));
     case 'start_setup': return runSetup();
     case 'cancel_setup': return pauseSetup();
-    case 'open_setup_log': case 'open_game_file': case 'open_game_dir': case 'open_save_dir': case 'open_release_url':
+    case 'open_setup_log': case 'open_game_file': case 'open_game_dir': case 'open_save_dir': case 'open_release_url': case 'open_discord':
       console.info('[mock] open', cmd, args);
       return null;
     case 'get_config': return { dump_dir: dumpDir, game_dir: '', minimize_on_play: false, gentle_build: false, loose_shaders: looseShaders, channel: mockChannel, icloud_sync: mockIcloud, icloud_last_sync: '', icloud_synced: {}, port_forward_off: !mockPortsOn };

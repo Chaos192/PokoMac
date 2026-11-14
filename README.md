@@ -11,8 +11,15 @@
   <a href="#install-and-play">Install</a> ·
   <a href="#common-problems">Help</a> ·
   <a href="docs/MACOS.md">How it works</a> ·
-  <a href="https://github.com/Chaos192/PokoMac/issues">Issues</a>
+  <a href="https://github.com/Chaos192/PokoMac/issues">Issues</a> ·
+  <a href="https://discord.gg/8jmS5kJMYA">Discord</a>
 </p>
+
+<p align="center">
+  <a href="https://discord.gg/8jmS5kJMYA"><img src="https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?logo=discord&logoColor=white" alt="Join the AnySwitch Discord"></a>
+</p>
+
+**Community:** questions, help and news for PokoMac and AnySwitch are on the [AnySwitch Discord](https://discord.gg/8jmS5kJMYA).
 
 > [!IMPORTANT]
 > **No game files are included.** You need your own dump of Pokémon Pokopia, version **2.0.1a** (the update installed). This project

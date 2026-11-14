@@ -617,6 +617,7 @@ export async function render(el, ctx) {
     update: () => store.installUpdate(),
     'clock-real': (id) => commit(FIELDS[id], 0),
     'open-url': (url) => api('open_release_url', { url }),
+    'open-discord': () => api('open_discord'),
     'cheats-theme-import': async () => {
       const t = await api('cheats_theme_import');
       if (!t) return;

@@ -985,6 +985,10 @@ export const SECTIONS = [
           },
           { id: 'built_with', label: 'Built with', type: 'info', value: 'Tauri 2, Lucide (ISC), Inter (OFL)' },
           { id: 'repo', label: 'Source code', type: 'info', actions: [open(REPO_URL, 'GitHub')] },
+          {
+            id: 'community', label: 'Community', type: 'info', value: 'Join the AnySwitch Discord',
+            actions: [{ act: 'open-discord', label: 'Join the Discord', icon: 'message-circle' }],   // the address is DISCORD_URL in main.rs
+          },
           { id: 'built_on', label: 'Built on', type: 'info', value: 'Built on AnySwitch by Chaos192 — github.com/Chaos192/AnySwitch', actions: [open(ANYSWITCH_URL, 'GitHub')] },
           { id: 'based_on', label: 'Credits', type: 'info', value: 'Based on Recompia by Dittobyte — github.com/Dittobyte/Recompia', actions: [open(UPSTREAM_URL, 'GitHub')] },
           { id: 'koi-credit', label: "Koi's Camp", type: 'info', value: 'Artwork by Koi, hand drawn' },
