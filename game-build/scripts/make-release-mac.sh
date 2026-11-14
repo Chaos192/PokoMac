@@ -4,7 +4,8 @@
 # in it; the player's Mac lifts the game from their own dump and links the native `pkp` against libpkp_rt.dylib). Run on a Mac:
 #   cmake --build build/mac --target pkp_rt                                         -> build/mac/libpkp_rt.dylib
 #   tools/shaders/scripts/setup_ryujinx.sh <ryubing checkout> &&
-#     dotnet publish -c Release -r osx-arm64 --self-contained true tools/shaders/harness/SpirvHarness.csproj -o build/mac-harness
+#     dotnet publish -c Release -r osx-arm64 --self-contained true -p:DebugType=none tools/shaders/harness/SpirvHarness.csproj -o build/mac-harness
+#     (DebugType=none: the package ships no .pdb, and a DLL built with one names its path on the build Mac)
 #   game-build/scripts/make-release-mac.sh [--no-build] [--keep-app] [--app <PokoMac.app>] [--rt <libpkp_rt.dylib>] [--harness <dir>]
 #       [--vulkan-sdk <SDK>/macOS] [--kbm-icons <dir>] [--out <dir>] [--cache <dir>]
 #
@@ -40,6 +41,9 @@
 #       Resources/licenses/, LICENSE.txt        every licence (game-build/release_b/macos/BUNDLED_TOOLS.txt lists them)
 #     README.txt, LICENSE.txt, licenses/
 #   PokoMac-<v>-macos-arm64.zip (+ .sha256, the line for SHA256SUMS.txt)
+# Nothing in it names the Mac it was built on (only the copyright line): the launcher is built with its source paths
+# remapped (--remap-path-prefix), the runtime's copies are stripped of debug stabs (strip -S: the object paths of static libraries
+# built with -g), and the finished package is searched for the build Mac's home folder and host name before it is signed.
 # The app is signed again ad hoc once its Resources are complete (no Apple developer account: players open it with right-click, Open).
 # Python and Zig are not shipped: the launcher downloads them pinned on the first Set up; their licences come from the same pinned files,
 # fetched into --cache (default build/mac-release-cache) and checked by SHA-256.
@@ -83,7 +87,10 @@ if [ "$build" = 1 ]; then
     sed -E -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"$version\"/" "$conf"
     sed -E -i '' "s/^version = \"[^\"]*\"/version = \"$version\"/" "$toml"
     grep -q "\"version\": \"$version\"" "$conf" && grep -q "^version = \"$version\"" "$toml" || fail "could not stamp the version"
-    (cd "$launcher" && { [ -d node_modules ] || npm ci --no-audit --no-fund; } && npm run tauri build -- --bundles app) || fail "the launcher build failed"
+    # panic locations name every crate's source file: the cargo registry under the home folder and this checkout (the later map wins)
+    remap="--remap-path-prefix=$HOME=/build --remap-path-prefix=$root=/pokomac"
+    (cd "$launcher" && { [ -d node_modules ] || npm ci --no-audit --no-fund; } && RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }$remap" npm run tauri build -- --bundles app) ||
+        fail "the launcher build failed"
 fi
 [ -f "$app/Contents/Info.plist" ] || fail "no launcher app at $app"
 app_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist" 2>/dev/null || true)
@@ -124,6 +131,10 @@ pinned() {
 # the app, then its read-only payload
 ditto "$app" "$pkg/$APP"
 R="$APP/Contents/Resources"
+# the runtime as shipped (both copies the same file): without debug stabs, signed again ad hoc (strip breaks the linker's signature)
+rt_pkg="$pkg/.libpkp_rt.dylib"
+cp -fL "$rt" "$rt_pkg" && strip -S "$rt_pkg" && codesign --force --sign - "$rt_pkg" || fail "could not strip and sign the runtime"
+rt="$rt_pkg"
 put "$rt" "$R/tools/build/sdk/libpkp_rt.dylib"
 put "$root/game-build/src/pkp_rt_api.h" "$R/tools/build/sdk/pkp_rt_api.h"
 put "$root/game-build/src/pkp_stub.cpp" "$R/tools/build/sdk/pkp_stub.cpp"
@@ -138,6 +149,7 @@ put "$root/tools/shaders/ampere/extract_corpus.py" "$R/tools/shaders/extract_cor
 
 # the game folder's run-time files (the runtime copies of the dylib and the SDK files, arm64 only: the port is Apple silicon only)
 put "$rt" "$R/runtime/libpkp_rt.dylib"
+rm -f "$rt_pkg"
 for lib in libvulkan.1.dylib libvulkan_kosmickrisp.dylib libMoltenVK.dylib; do
     dst="$res/runtime/$lib"
     if lipo -archs "$sdk/lib/$lib" | grep -qw x86_64; then
@@ -210,6 +222,14 @@ for d in "$R/licenses" "licenses"; do
     [ -f "$pkg/$d/LICENSE.GPL-3.0.txt" ] || fail "the package has no $d/LICENSE.GPL-3.0.txt"
 done
 for f in "$R/NOTICE.txt" "$R/LICENSE.txt" LICENSE.txt; do [ -f "$pkg/$f" ] || fail "the package has no $f"; done
+# nothing names the build Mac: its home folder (and so the user name in it) and its host names, in any file, text or binary
+needles=(-e "$HOME")
+for h in "$(hostname -s 2>/dev/null)" "$(scutil --get LocalHostName 2>/dev/null)" "$(scutil --get ComputerName 2>/dev/null)"; do
+    [ ${#h} -ge 4 ] && needles+=(-e "$h")
+done
+leak=$(grep -rlaF "${needles[@]}" "$pkg" || true)
+[ -z "$leak" ] || fail "files in the package name the build Mac (its home folder or host name):
+$leak"
 
 # sign the finished bundle again (ad hoc): its resources changed, and a broken seal would stop Gatekeeper's right-click Open
 xattr -cr "$pkg/$APP"
