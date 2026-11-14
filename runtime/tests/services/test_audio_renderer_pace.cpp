@@ -75,6 +75,14 @@ struct Driver final : ar::IHardwareDeviceDriver {
 }  // namespace
 
 SVC_TEST(audio_renderer, frames_stay_spread_out_on_a_device_clock) {
+    // The 1 ms timer resolution, held as a game holds it while the processor paces: AudioRendererManager::SendCommandsWorker, the only
+    // caller of the processor's Signal / Wait in the runtime, takes TimerResolutionScope before its first Wait (audio_out's pacer too).
+    // Since Windows 10 2004 the resolution is per process, so without it the fake game's sleep_for(300 us) below lasts one 15.6 ms timer
+    // tick and the game answers one frame in three: 141 updates of 440 (2.2 s / 15.6 ms) on the PC and on the GitHub runner, 439 with it.
+    struct HeldResolution {
+        HeldResolution() { ar::TimerResolutionScope::Acquire(); }
+        ~HeldResolution() { ar::TimerResolutionScope::Release(); }
+    } held;
     Driver driver;
     ar::AudioProcessor proc;
     proc.Start(&driver);
