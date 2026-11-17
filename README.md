@@ -147,3 +147,8 @@ Noncommercial License 1.0.0 ([LICENSE](LICENSE)): anyone may use, change and sha
 its Required Notices; no commercial use. The lifter stays GPL-3.0-or-later ([RELICENSING.md](RELICENSING.md),
 [LICENSE.GPL-3.0.txt](LICENSE.GPL-3.0.txt)). Third-party code keeps its own licence ([CREDITS.md](CREDITS.md)); every copy keeps
 [NOTICE](NOTICE).
+
+**Noncommercial means no money of any kind.** Selling PokoMac or anything built from it, charging for access, builds or features,
+running ads on it, and asking for or accepting donations, tips, sponsorships, memberships or crowdfunding to "support" a copy, fork,
+port or build of it are all commercial use and are not permitted. Releasing a build for free while asking for donations counts too.
+This limits everyone except the copyright holder.
